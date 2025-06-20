@@ -189,9 +189,20 @@ class VideoFlowProcessor:
         
         print(f"✓ Extracted {len(frames)} frames")
         return frames, fps, width, height, start_frame
+    
+    def preprocess_frame_for_flow(self, frame):
+        """Preprocess frame to ensure valid values for optical flow computation"""
+        # Convert to float32 for processing
+        frame_float = frame.astype(np.float32)
+        
+        # Handle NaN and inf values
+        frame_float = np.nan_to_num(frame_float, nan=128.0, posinf=255.0, neginf=0.0)
+        
+        # Final clamp and convert back to uint8
+        return np.clip(frame_float, 0, 255).astype(np.uint8)
         
     def prepare_frame_sequence(self, frames, frame_idx):
-        """Prepare 5-frame sequence for VideoFlow MOF model"""
+        """Prepare 5-frame sequence for VideoFlow MOF model with preprocessing"""
         # Multi-frame: use 5 consecutive frames centered around current frame
         start_idx = max(0, frame_idx - 2)
         end_idx = min(len(frames), frame_idx + 3)
@@ -207,11 +218,19 @@ class VideoFlowProcessor:
         # Ensure exactly 5 frames
         sequence = sequence[:5]
         
-        # Convert to tensors (same format as VideoFlow inference.py)
+        # Convert to tensors with preprocessing
         tensors = []
         for frame in sequence:
+            # Preprocess frame to ensure valid values
+            processed_frame = frame # self.preprocess_frame_for_flow(frame)
+            
             # Convert to tensor and normalize to [0,1], then change HWC to CHW
-            tensor = torch.from_numpy(frame.astype(np.float32)).permute(2, 0, 1)
+            tensor = torch.from_numpy(processed_frame.astype(np.float32)).permute(2, 0, 1) / 255.0
+            
+            # Additional tensor validation
+            tensor = torch.nan_to_num(tensor, nan=0.5, posinf=1.0, neginf=0.0)
+            tensor = torch.clamp(tensor, 0.0, 1.0)
+            
             tensors.append(tensor)
         
         # Stack frames and add batch dimension
@@ -245,21 +264,74 @@ class VideoFlowProcessor:
             
         return flow_np
         
+    def encode_hsv_format(self, flow, width, height):
+        """
+        Encode optical flow in HSV format (standard visualization):
+        - Hue: Flow direction (angle)
+        - Saturation: Flow magnitude (normalized)
+        - Value: Constant brightness
+        """
+        # Handle NaN and inf values first
+        flow = np.nan_to_num(flow, nan=0.0, posinf=1.0, neginf=-1.0)
+        
+        # Calculate magnitude and angle
+        magnitude = np.sqrt(flow[:, :, 0]**2 + flow[:, :, 1]**2)
+        angle = np.arctan2(flow[:, :, 1], flow[:, :, 0])
+        
+        # Normalize angle to [0, 2π] and convert to hue [0, 180] for OpenCV
+        hue = (angle + np.pi) / (2 * np.pi) * 180
+        hue = np.clip(hue, 0, 180).astype(np.uint8)
+        
+        # Normalize magnitude for saturation
+        max_magnitude = np.max(magnitude)
+        if max_magnitude > 0:
+            saturation = (magnitude / max_magnitude * 255).astype(np.uint8)
+            # print(f"HSV Flow - max magnitude: {max_magnitude:.4f}")
+        else:
+            saturation = np.zeros_like(magnitude, dtype=np.uint8)
+            # print("HSV Flow - no motion detected")
+        
+        # Set constant value (brightness)
+        value = np.full_like(magnitude, 255, dtype=np.uint8)
+        
+        # Create HSV image
+        hsv = np.stack([hue, saturation, value], axis=2)
+        
+        # Convert HSV to RGB
+        rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+        
+        return rgb
+    
     def encode_gamedev_format(self, flow, width, height):
         """
-        Encode optical flow in gamedev format:
+        Encode optical flow in gamedev format with enhanced visibility:
         - Normalize flow by image dimensions
         - Scale and clamp to [-20, +20] range  
         - Map to [0, 1] where 0 = -20, 1 = +20
         - Store in RG channels (R=horizontal, G=vertical)
         """
+        # Handle NaN and inf values first
+        flow = np.nan_to_num(flow, nan=0.0, posinf=1.0, neginf=-1.0)
+        
         # Normalize flow by image dimensions
         norm_flow = flow.copy()
         norm_flow[:, :, 0] /= width    # Horizontal flow
         norm_flow[:, :, 1] /= height   # Vertical flow
         
-        # Scale to make motion visible
-        norm_flow *= 200
+        # Calculate flow magnitude for adaptive scaling
+        flow_magnitude = np.sqrt(norm_flow[:, :, 0]**2 + norm_flow[:, :, 1]**2)
+        max_magnitude = np.max(flow_magnitude)
+        
+        # Adaptive scaling based on flow magnitude
+        if max_magnitude > 0:
+            # Scale to make motion visible, but adapt to actual flow range
+            scale_factor = min(200, 50 / max_magnitude)  # Adaptive scaling
+            norm_flow *= scale_factor
+            # print(f"Flow magnitude: max={max_magnitude:.4f}, scale={scale_factor:.1f}")
+        else:
+            # No motion detected, use default scaling
+            norm_flow *= 200
+            # print("No motion detected, using default scaling")
         
         # Clamp to [-20, +20] range
         clamped = np.clip(norm_flow, -20, 20)
@@ -275,37 +347,246 @@ class VideoFlowProcessor:
         rgb[:, :, 1] = encoded[:, :, 1]  # G channel: vertical flow
         rgb[:, :, 2] = 0.0               # B channel: unused
         
+        # Add some base color if flow is too weak
+        if max_magnitude < 0.001:
+            # Add subtle pattern to show that processing occurred
+            rgb[:, :, 2] = 0.1  # Slight blue tint to indicate processed frame
+        
         # Convert to 8-bit, handle NaN and inf values
         rgb_8bit = rgb * 255
         rgb_8bit = np.nan_to_num(rgb_8bit, nan=0.0, posinf=255.0, neginf=0.0)
         return rgb_8bit.astype(np.uint8)
+    
+    def apply_taa_effect(self, current_frame, flow=None, previous_taa_frame=None, alpha=0.1, use_flow=True):
+        """
+        Apply TAA (Temporal Anti-Aliasing) effect with or without optical flow
         
-    def create_side_by_side(self, original, flow_viz, vertical=False, flow_only=False):
-        """Create side-by-side, top-bottom, or flow-only visualization"""
+        Args:
+            current_frame: Current frame (RGB, 0-255)
+            flow: Optical flow (HWC, normalized) - only used if use_flow=True
+            previous_taa_frame: Previous TAA result frame
+            alpha: Blending weight (0.0 = full history, 1.0 = no history)
+            use_flow: Whether to use optical flow for reprojection
+        
+        Returns:
+            TAA processed frame
+        """
+        if previous_taa_frame is None:
+            # First frame, no history
+            return current_frame.astype(np.float32)
+        
+        current_float = current_frame.astype(np.float32)
+        
+        if not use_flow or flow is None:
+            # Simple temporal blending without flow (basic TAA)
+            taa_result = alpha * current_float + (1 - alpha) * previous_taa_frame
+            return taa_result
+        
+        # Flow-based TAA (motion-compensated)
+        h, w = current_frame.shape[:2]
+        
+        # Convert flow to pixel coordinates
+        flow_pixels = flow.copy()
+        flow_pixels[:, :, 0] *= w  # Horizontal flow in pixels
+        flow_pixels[:, :, 1] *= h  # Vertical flow in pixels
+        
+        # Create coordinate grids
+        y_coords, x_coords = np.mgrid[0:h, 0:w]
+        
+        # Calculate previous pixel positions using flow
+        prev_x = x_coords + flow_pixels[:, :, 0]
+        prev_y = y_coords + flow_pixels[:, :, 1]
+        
+        # Handle NaN and inf values
+        prev_x = np.nan_to_num(prev_x, nan=0.0, posinf=w-1, neginf=0.0)
+        prev_y = np.nan_to_num(prev_y, nan=0.0, posinf=h-1, neginf=0.0)
+        
+        # Clamp coordinates to valid range
+        prev_x = np.clip(prev_x, 0, w - 1)
+        prev_y = np.clip(prev_y, 0, h - 1)
+        
+        # Bilinear interpolation from previous frame
+        x0 = np.floor(prev_x).astype(int)
+        x1 = np.minimum(x0 + 1, w - 1)
+        y0 = np.floor(prev_y).astype(int)
+        y1 = np.minimum(y0 + 1, h - 1)
+        
+        # Ensure indices are valid
+        x0 = np.clip(x0, 0, w - 1)
+        x1 = np.clip(x1, 0, w - 1)
+        y0 = np.clip(y0, 0, h - 1)
+        y1 = np.clip(y1, 0, h - 1)
+        
+        # Interpolation weights
+        wx = prev_x - x0
+        wy = prev_y - y0
+        
+        # Sample previous TAA frame with bilinear interpolation
+        reprojected = np.zeros_like(current_frame, dtype=np.float32)
+        
+        for c in range(3):  # RGB channels
+            reprojected[:, :, c] = (
+                previous_taa_frame[y0, x0, c] * (1 - wx) * (1 - wy) +
+                previous_taa_frame[y0, x1, c] * wx * (1 - wy) +
+                previous_taa_frame[y1, x0, c] * (1 - wx) * wy +
+                previous_taa_frame[y1, x1, c] * wx * wy
+            )
+        
+        # Exponential moving average (TAA blending)
+        taa_result = alpha * current_float + (1 - alpha) * reprojected
+        
+        return taa_result
+    
+    def add_text_overlay(self, frame, text, position='top-left', font_scale=0.4, color=(255, 255, 255), thickness=1):
+        """
+        Add text overlay to frame
+        
+        Args:
+            frame: Input frame (BGR format for OpenCV)
+            text: Text to add
+            position: 'top-left', 'top-right', 'bottom-left', 'bottom-right'
+            font_scale: Size of the font
+            color: Text color (BGR)
+            thickness: Text thickness
+        
+        Returns:
+            Frame with text overlay
+        """
+        frame_with_text = frame.copy()
+        h, w = frame.shape[:2]
+        
+        # Calculate text size
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
+        
+        # Calculate position
+        margin = 5
+        if position == 'top-left':
+            pos = (margin, text_size[1] + margin)
+        elif position == 'top-right':
+            pos = (w - text_size[0] - margin, text_size[1] + margin)
+        elif position == 'bottom-left':
+            pos = (margin, h - margin)
+        elif position == 'bottom-right':
+            pos = (w - text_size[0] - margin, h - margin)
+        else:
+            pos = (margin, text_size[1] + margin)  # Default to top-left
+        
+        # Add black outline for better visibility
+        cv2.putText(frame_with_text, text, pos, font, font_scale, (0, 0, 0), thickness + 1, cv2.LINE_AA)
+        # Add white text
+        cv2.putText(frame_with_text, text, pos, font, font_scale, color, thickness, cv2.LINE_AA)
+        
+        return frame_with_text
+        
+    def create_side_by_side(self, original, flow_viz, vertical=False, flow_only=False, 
+                           taa_frame=None, taa_simple_frame=None, model_name="VideoFlow", fast_mode=False, flow_format="gamedev"):
+        """Create side-by-side, top-bottom, flow-only, or TAA visualization with text overlays"""
         # Ensure same dimensions
         h, w = original.shape[:2]
         if flow_viz.shape[:2] != (h, w):
             flow_viz = cv2.resize(flow_viz, (w, h))
         
-        # Convert to BGR for video writing
+        # Convert to BGR for video writing and add text overlays
+        orig_bgr = cv2.cvtColor(original, cv2.COLOR_RGB2BGR)
         flow_bgr = cv2.cvtColor(flow_viz, cv2.COLOR_RGB2BGR)
+        
+        # Add text overlays
+        mode_text = " (Fast)" if fast_mode else ""
+        
+        orig_bgr = self.add_text_overlay(orig_bgr, f"Original{mode_text}", 'top-left')
+        flow_bgr = self.add_text_overlay(flow_bgr, f"Optical Flow{mode_text}", 'top-left')
+        flow_bgr = self.add_text_overlay(flow_bgr, f"{model_name} ({flow_format.upper()})", 'bottom-left')
         
         if flow_only:
             # Return only optical flow
             return flow_bgr
         
-        orig_bgr = cv2.cvtColor(original, cv2.COLOR_RGB2BGR)
-        
-        if vertical:
-            # Concatenate vertically (top-bottom)
-            return np.concatenate([orig_bgr, flow_bgr], axis=0)
+        if taa_frame is not None and taa_simple_frame is not None:
+            # Both TAA modes: flow-based and simple
+            taa_bgr = cv2.cvtColor(np.clip(taa_frame, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+            taa_simple_bgr = cv2.cvtColor(np.clip(taa_simple_frame, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+            
+            # Add TAA text overlays
+            taa_bgr = self.add_text_overlay(taa_bgr, "TAA + Flow", 'top-left')
+            taa_bgr = self.add_text_overlay(taa_bgr, "Alpha: 0.1", 'bottom-left')
+            
+            taa_simple_bgr = self.add_text_overlay(taa_simple_bgr, "TAA Simple", 'top-left')
+            taa_simple_bgr = self.add_text_overlay(taa_simple_bgr, "Alpha: 0.1", 'bottom-left')
+            
+            if vertical:
+                # Stack vertically: Original | Flow | TAA+Flow | TAA Simple
+                return np.concatenate([orig_bgr, flow_bgr, taa_bgr, taa_simple_bgr], axis=0)
+            else:
+                # Create 2x2 grid layout
+                # Top row: Original | Flow
+                top_row = np.concatenate([orig_bgr, flow_bgr], axis=1)
+                # Bottom row: TAA+Flow | TAA Simple
+                bottom_row = np.concatenate([taa_bgr, taa_simple_bgr], axis=1)
+                # Stack rows vertically
+                return np.concatenate([top_row, bottom_row], axis=0)
+        elif taa_frame is not None:
+            # Single TAA mode (backward compatibility)
+            taa_bgr = cv2.cvtColor(np.clip(taa_frame, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+            taa_bgr = self.add_text_overlay(taa_bgr, "TAA + Flow", 'top-left')
+            taa_bgr = self.add_text_overlay(taa_bgr, "Alpha: 0.1", 'bottom-left')
+            
+            if vertical:
+                # Stack vertically: Original | Flow | TAA
+                return np.concatenate([orig_bgr, flow_bgr, taa_bgr], axis=0)
+            else:
+                # Stack horizontally: Original | Flow | TAA
+                return np.concatenate([orig_bgr, flow_bgr, taa_bgr], axis=1)
         else:
-            # Concatenate horizontally (side-by-side)
-            return np.concatenate([orig_bgr, flow_bgr], axis=1)
+            if vertical:
+                # Concatenate vertically (top-bottom)
+                return np.concatenate([orig_bgr, flow_bgr], axis=0)
+            else:
+                # Concatenate horizontally (side-by-side)
+                return np.concatenate([orig_bgr, flow_bgr], axis=1)
         
+    def generate_output_filename(self, input_path, output_dir, start_time=None, duration=None, 
+                                start_frame=0, max_frames=1000, vertical=False, flow_only=False, taa=False):
+        """Generate automatic output filename based on parameters"""
+        import os
+        
+        # Get base name without extension
+        base_name = os.path.splitext(os.path.basename(input_path))[0]
+        
+        # Build filename parts
+        parts = [base_name]
+        
+        # Add time/frame info
+        if start_time is not None:
+            parts.append(f"{start_time}s")
+        elif start_frame > 0:
+            parts.append(f"f{start_frame}")
+            
+        if duration is not None:
+            parts.append(f"{duration}s")
+        elif max_frames != 1000:
+            parts.append(f"{max_frames}f")
+        
+        # Add mode info
+        if self.fast_mode:
+            parts.append("fast")
+        
+        if flow_only:
+            parts.append("flow")
+        elif taa:
+            parts.append("taa")
+        elif vertical:
+            parts.append("vert")
+        
+        # Join parts and add extension
+        filename = "_".join(parts) + ".mp4"
+        return os.path.join(output_dir, filename)
+    
     def process_video(self, input_path, output_path, max_frames=1000, start_frame=0, 
-                     start_time=None, duration=None, vertical=False, flow_only=False):
+                     start_time=None, duration=None, vertical=False, flow_only=False, taa=False, flow_format='gamedev'):
         """Main processing function"""
+        import os
+        
         # Handle time-based parameters
         if start_time is not None or duration is not None:
             fps = self.get_video_fps(input_path)
@@ -318,6 +599,14 @@ class VideoFlowProcessor:
             if duration is not None:
                 max_frames = self.time_to_frame(duration, fps)
                 print(f"Duration: {duration}s -> {max_frames} frames")
+        
+        # Check if output_path is a directory and generate filename if needed
+        if os.path.isdir(output_path):
+            output_path = self.generate_output_filename(
+                input_path, output_path, start_time, duration, 
+                start_frame, max_frames, vertical, flow_only, taa
+            )
+            print(f"Auto-generated output filename: {os.path.basename(output_path)}")
         
         print(f"Processing: {input_path} -> {output_path}")
         print(f"Frame range: {start_frame} to {start_frame + max_frames - 1}")
@@ -332,6 +621,11 @@ class VideoFlowProcessor:
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         if flow_only:
             output_size = (width, height)  # Flow only: original dimensions
+        elif taa:
+            if vertical:
+                output_size = (width, height * 4)  # Vertical: same width, quad height (Original + Flow + TAA+Flow + TAA Simple)
+            else:
+                output_size = (width * 2, height * 2)  # 2x2 grid: double width, double height
         elif vertical:
             output_size = (width, height * 2)  # Vertical: same width, double height
         else:
@@ -347,6 +641,10 @@ class VideoFlowProcessor:
         import time
         frame_times = []
         
+        # TAA state
+        previous_taa_frame = None
+        previous_taa_simple_frame = None
+        
         # Create progress bar
         pbar = tqdm(total=len(frames), desc="VideoFlow processing", 
                    unit="frame", ncols=100, 
@@ -358,11 +656,36 @@ class VideoFlowProcessor:
             # Compute optical flow using VideoFlow
             flow = self.compute_optical_flow(frames, i)
             
-            # Encode in gamedev format
-            flow_viz = self.encode_gamedev_format(flow, width, height)
+            # Encode optical flow based on selected format
+            if flow_format == 'hsv':
+                flow_viz = self.encode_hsv_format(flow, width, height)
+            else:
+                flow_viz = self.encode_gamedev_format(flow, width, height)
             
-            # Create combined frame (side-by-side, top-bottom, or flow-only)
-            combined = self.create_side_by_side(frames[i], flow_viz, vertical=vertical, flow_only=flow_only)
+            # Apply TAA effects if requested
+            taa_frame = None
+            taa_simple_frame = None
+            if taa:
+                # Convert flow back to normalized format for TAA
+                flow_normalized = flow.copy()
+                flow_normalized[:, :, 0] /= width
+                flow_normalized[:, :, 1] /= height
+                
+                # Apply flow-based TAA with alpha=0.1 (90% history, 10% current)
+                taa_result = self.apply_taa_effect(frames[i], flow_normalized, previous_taa_frame, alpha=0.1, use_flow=True)
+                previous_taa_frame = taa_result.copy()
+                taa_frame = taa_result
+                
+                # Apply simple TAA (no flow) with alpha=0.1
+                taa_simple_result = self.apply_taa_effect(frames[i], None, previous_taa_simple_frame, alpha=0.1, use_flow=False)
+                previous_taa_simple_frame = taa_simple_result.copy()
+                taa_simple_frame = taa_simple_result
+            
+            # Create combined frame (side-by-side, top-bottom, flow-only, or with TAA)
+            model_name = "MOF_sintel" if hasattr(self, 'model') else "VideoFlow"
+            combined = self.create_side_by_side(frames[i], flow_viz, vertical=vertical, flow_only=flow_only, 
+                                              taa_frame=taa_frame, taa_simple_frame=taa_simple_frame,
+                                              model_name=model_name, fast_mode=self.fast_mode, flow_format=flow_format)
             
             # Write frame
             out.write(combined)
@@ -391,6 +714,18 @@ class VideoFlowProcessor:
         print(f"✓ Output saved: {output_path}")
         if flow_only:
             print("Output: Optical flow only (VideoFlow + gamedev encoding)")
+        elif taa:
+            if vertical:
+                print("Panel 1 (Top): Original video")
+                print("Panel 2: Optical flow (VideoFlow + gamedev encoding)")
+                print("Panel 3: TAA + Flow (Motion-compensated temporal anti-aliasing)")
+                print("Panel 4 (Bottom): TAA Simple (Basic temporal blending)")
+            else:
+                print("2x2 Grid Layout:")
+                print("Top-Left: Original video")
+                print("Top-Right: Optical flow (VideoFlow + gamedev encoding)")
+                print("Bottom-Left: TAA + Flow (Motion-compensated temporal anti-aliasing)")
+                print("Bottom-Right: TAA Simple (Basic temporal blending)")
         elif vertical:
             print("Top: Original video")
             print("Bottom: Optical flow (VideoFlow + gamedev encoding)")
@@ -399,6 +734,9 @@ class VideoFlowProcessor:
             print("Right side: Optical flow (VideoFlow + gamedev encoding)")
         print("  R channel: Horizontal flow (-20 to +20)")
         print("  G channel: Vertical flow (-20 to +20)")
+        if taa:
+            print("  TAA + Flow: Motion-compensated temporal anti-aliasing (90% history weight)")
+            print("  TAA Simple: Basic temporal blending without motion compensation (90% history weight)")
 
 def main():
     parser = argparse.ArgumentParser(description='VideoFlow Optical Flow Processor')
@@ -422,6 +760,10 @@ def main():
                        help='Stack videos vertically (top-bottom) instead of horizontally (side-by-side)')
     parser.add_argument('--flow-only', action='store_true',
                        help='Output only optical flow visualization (no original video)')
+    parser.add_argument('--taa', action='store_true',
+                       help='Add TAA (Temporal Anti-Aliasing) effect visualization using optical flow')
+    parser.add_argument('--flow-format', choices=['gamedev', 'hsv'], default='gamedev',
+                       help='Optical flow encoding format: gamedev (RG channels) or hsv (standard visualization)')
     
     args = parser.parse_args()
     
@@ -454,6 +796,8 @@ def main():
                 mode += "_vertical"
             if args.flow_only:
                 mode += "_flow_only"
+            if args.taa:
+                mode += "_taa"
             
             if args.start_time is not None or args.duration is not None:
                 # Use time-based naming
@@ -472,7 +816,7 @@ def main():
         
         processor.process_video(args.input, args.output, max_frames=args.frames, start_frame=args.start_frame,
                               start_time=args.start_time, duration=args.duration, vertical=args.vertical, 
-                              flow_only=args.flow_only)
+                              flow_only=args.flow_only, taa=args.taa, flow_format=args.flow_format)
         print("\n✓ VideoFlow processing completed successfully!")
         
     except Exception as e:
