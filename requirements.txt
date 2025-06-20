@@ -1,0 +1,13 @@
+torch>=1.6.0
+torchvision>=0.7.0
+numpy
+tqdm
+yacs
+loguru
+einops
+timm==0.4.12
+imageio
+scipy
+matplotlib
+tensorboard
+opencv-python 
