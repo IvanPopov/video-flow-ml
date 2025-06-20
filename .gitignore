@@ -2,19 +2,19 @@
 content/
 results/
 
-# VideoFlow submodule (external repository)
-VideoFlow/
+# VideoFlow and model weights are now included in repository
+# VideoFlow/
 *.avi
 *.mp4
 *.mov
 *.mkv
 *.wmv
 
-# Model weights and checkpoints
-VideoFlow_ckpt/
-*.pth
-*.pt
-*.ckpt
+# Model weights and checkpoints are now included
+# VideoFlow_ckpt/
+# *.pth
+# *.pt
+# *.ckpt
 
 # Python cache
 __pycache__/
