@@ -25,7 +25,7 @@ from utils.utils import InputPadder
 from configs.multiframes_sintel_submission import get_cfg
 
 class VideoFlowProcessor:
-    def __init__(self, device='auto', fast_mode=False):
+    def __init__(self, device='auto', fast_mode=False, tile_mode=False):
         """Initialize VideoFlow processor with pure VideoFlow implementation"""
         if device == 'auto':
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -36,6 +36,7 @@ class VideoFlowProcessor:
             self.device = device
             
         self.fast_mode = fast_mode
+        self.tile_mode = tile_mode
         self.model = None
         self.input_padder = None
         self.cfg = None
@@ -46,6 +47,7 @@ class VideoFlowProcessor:
             print(f"GPU: {torch.cuda.get_device_name(0)}")
             print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
         print(f"Fast mode: {fast_mode}")
+        print(f"Tile mode: {tile_mode}")
         
     def load_videoflow_model(self):
         """Load VideoFlow MOF model"""
@@ -200,6 +202,154 @@ class VideoFlowProcessor:
         
         # Final clamp and convert back to uint8
         return np.clip(frame_float, 0, 255).astype(np.uint8)
+    
+    def calculate_tile_grid(self, width, height, target_aspect=16/9):
+        """
+        Simple tile grid calculation for 16:9 aspect ratio tiles
+        
+        Args:
+            width, height: Original frame dimensions
+            target_aspect: Target aspect ratio (16:9 = 1.777...)
+            
+        Returns:
+            (tile_width, tile_height, cols, rows, tiles_info)
+        """
+        frame_aspect = width / height
+        
+        if frame_aspect > target_aspect:
+            # Frame is wider than 16:9, split horizontally
+            # Each tile has height = frame height, width = height * 16/9
+            tile_height = height
+            tile_width = int(height * target_aspect)
+            # Make sure width is even
+            tile_width = tile_width - (tile_width % 2)
+            
+            # Calculate number of tiles needed
+            cols = int(np.ceil(width / tile_width))
+            rows = 1
+            
+        else:
+            # Frame is taller than 16:9, split vertically  
+            # Each tile has width = frame width, height = width / 16*9
+            tile_width = width
+            tile_height = int(width / target_aspect)
+            # Make sure height is even
+            tile_height = tile_height - (tile_height % 2)
+            
+            # Calculate number of tiles needed
+            cols = 1
+            rows = int(np.ceil(height / tile_height))
+        
+        # Calculate actual tile positions
+        tiles_info = []
+        for row in range(rows):
+            for col in range(cols):
+                # Calculate tile position
+                x = col * tile_width
+                y = row * tile_height
+                
+                # Calculate actual tile size (last tile might be smaller)
+                actual_width = min(tile_width, width - x)
+                actual_height = min(tile_height, height - y)
+                
+                # Check if padding is needed (for last tile)
+                needs_padding = (actual_width < tile_width) or (actual_height < tile_height)
+                
+                tiles_info.append({
+                    'x': x, 'y': y,
+                    'width': actual_width, 'height': actual_height,
+                    'target_width': tile_width, 'target_height': tile_height,
+                    'col': col, 'row': row,
+                    'needs_padding': needs_padding
+                })
+        
+        print(f"Tile grid: {cols}x{rows} tiles, each {tile_width}x{tile_height} (aspect: {tile_width/tile_height:.3f})")
+        return tile_width, tile_height, cols, rows, tiles_info
+    
+    def extract_tile(self, frame, tile_info):
+        """Extract a tile from the frame with padding to maintain 16:9 aspect ratio"""
+        x, y = tile_info['x'], tile_info['y']
+        w, h = tile_info['width'], tile_info['height']
+        target_w, target_h = tile_info['target_width'], tile_info['target_height']
+        
+        # Extract the actual tile from frame
+        tile = frame[y:y+h, x:x+w]
+        
+        # Add padding if needed to reach target dimensions
+        if tile_info['needs_padding']:
+            # Create padded tile with target dimensions
+            padded_tile = np.zeros((target_h, target_w, 3), dtype=tile.dtype)
+            
+            # Copy actual tile to top-left of padded tile
+            padded_tile[:h, :w] = tile
+            
+            # Pad right edge if needed
+            if w < target_w:
+                # Repeat last column
+                for col in range(w, target_w):
+                    padded_tile[:h, col] = tile[:, -1]
+            
+            # Pad bottom edge if needed  
+            if h < target_h:
+                # Repeat last row
+                for row in range(h, target_h):
+                    padded_tile[row, :] = padded_tile[h-1, :]
+            
+            return padded_tile
+        
+        return tile
+    
+    def compute_optical_flow_tiled(self, frames, frame_idx):
+        """
+        Compute optical flow using tile-based processing for better 16:9 aspect ratio handling
+        
+        Args:
+            frames: List of frames
+            frame_idx: Current frame index
+            
+        Returns:
+            Full-resolution optical flow
+        """
+        if not self.tile_mode:
+            # Use standard processing if tile mode is disabled
+            return self.compute_optical_flow(frames, frame_idx)
+        
+        current_frame = frames[frame_idx]
+        height, width = current_frame.shape[:2]
+        
+        # Calculate tile grid
+        tile_width, tile_height, cols, rows, tiles_info = self.calculate_tile_grid(width, height)
+        
+        # Initialize full flow map
+        full_flow = np.zeros((height, width, 2), dtype=np.float32)
+        
+        print(f"Processing {len(tiles_info)} tiles for frame {frame_idx}")
+        
+        # Process each tile
+        for i, tile_info in enumerate(tiles_info):
+            # Extract tile from all frames in sequence
+            tile_frames = []
+            for frame in frames:
+                tile = self.extract_tile(frame, tile_info)
+                tile_frames.append(tile)
+            
+            # Compute flow for this tile
+            tile_flow = self.compute_optical_flow(tile_frames, frame_idx)
+            
+            # Place tile flow back into full flow map
+            x, y = tile_info['x'], tile_info['y']
+            w, h = tile_info['width'], tile_info['height']  # Original dimensions
+            
+            # Extract only the valid portion of the flow (without padding)
+            valid_flow = tile_flow[:h, :w]
+            
+            # Place back into full flow map
+            full_flow[y:y+h, x:x+w] = valid_flow
+            
+            padding_info = " (with padding)" if tile_info['needs_padding'] else ""
+            print(f"  Tile {i+1}/{len(tiles_info)}: {tile_info['target_width']}x{tile_info['target_height']} -> {w}x{h} at ({x},{y}){padding_info}")
+        
+        return full_flow
         
     def prepare_frame_sequence(self, frames, frame_idx):
         """Prepare 5-frame sequence for VideoFlow MOF model with preprocessing"""
@@ -653,8 +803,8 @@ class VideoFlowProcessor:
         for i in range(len(frames)):
             start_time = time.time()
             
-            # Compute optical flow using VideoFlow
-            flow = self.compute_optical_flow(frames, i)
+            # Compute optical flow using VideoFlow (with tiling if enabled)
+            flow = self.compute_optical_flow_tiled(frames, i)
             
             # Encode optical flow based on selected format
             if flow_format == 'hsv':
@@ -764,6 +914,10 @@ def main():
                        help='Add TAA (Temporal Anti-Aliasing) effect visualization using optical flow')
     parser.add_argument('--flow-format', choices=['gamedev', 'hsv'], default='gamedev',
                        help='Optical flow encoding format: gamedev (RG channels) or hsv (standard visualization)')
+    parser.add_argument('--tile', action='store_true',
+                       help='Enable tile-based processing: split frames into 16:9 tiles for better optical flow quality')
+    parser.add_argument('--show-tiles', action='store_true',
+                       help='Only show tile grid calculation without processing video')
     
     args = parser.parse_args()
     
@@ -783,7 +937,71 @@ def main():
         print("and place it in VideoFlow_ckpt/")
         return
     
-    processor = VideoFlowProcessor(device=args.device, fast_mode=args.fast)
+    # Special mode: only show tile grid calculation
+    if args.show_tiles:
+        print(f"Analyzing tile grid for: {args.input}")
+        
+        # Get video properties
+        cap = cv2.VideoCapture(args.input)
+        if not cap.isOpened():
+            print(f"Error: Cannot open video: {args.input}")
+            return
+            
+        orig_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        orig_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        
+        print(f"Video properties:")
+        print(f"  Resolution: {orig_width}x{orig_height}")
+        print(f"  Aspect ratio: {orig_width/orig_height:.3f}")
+        print(f"  FPS: {fps:.1f}")
+        print(f"  Total frames: {total_frames}")
+        print(f"  Duration: {total_frames/fps:.1f}s")
+        
+        # Apply fast mode scaling if enabled
+        if args.fast:
+            max_dimension = 256
+            scale_factor = min(max_dimension / orig_width, max_dimension / orig_height)
+            if scale_factor > 1.0:
+                scale_factor = 1.0
+            if max(orig_width, orig_height) > 512:
+                scale_factor = min(scale_factor, 0.25)
+            elif max(orig_width, orig_height) > 256:
+                scale_factor = min(scale_factor, 0.5)
+            
+            width = max(64, int(orig_width * scale_factor) - (int(orig_width * scale_factor) % 2))
+            height = max(64, int(orig_height * scale_factor) - (int(orig_height * scale_factor) % 2))
+            
+            print(f"\nFast mode scaling:")
+            print(f"  Scale factor: {scale_factor:.3f}")
+            print(f"  Processed resolution: {width}x{height}")
+        else:
+            width = orig_width
+            height = orig_height
+            print(f"\nProcessed resolution: {width}x{height} (no scaling)")
+        
+        # Create temporary processor just for tile calculation
+        temp_processor = VideoFlowProcessor(device='cpu', fast_mode=False, tile_mode=True)
+        
+        print(f"\nTile grid analysis:")
+        tile_width, tile_height, cols, rows, tiles_info = temp_processor.calculate_tile_grid(width, height)
+        
+        print(f"\nDetailed tile information:")
+        for i, tile_info in enumerate(tiles_info):
+            padding_info = " (needs padding)" if tile_info['needs_padding'] else ""
+            print(f"  Tile {i+1}: position ({tile_info['x']}, {tile_info['y']}), "
+                  f"size {tile_info['width']}x{tile_info['height']} -> "
+                  f"target {tile_info['target_width']}x{tile_info['target_height']}{padding_info}")
+        
+        print(f"\nSummary:")
+        print(f"  Grid: {cols}x{rows} tiles")
+        print(f"  Tile aspect ratio: {tile_width/tile_height:.3f} (target: 1.778)")
+        print(f"  Total tiles: {len(tiles_info)}")
+        return
+    
+    processor = VideoFlowProcessor(device=args.device, fast_mode=args.fast, tile_mode=args.tile)
     
     try:
         # Create output filename with frame/time range if not specified
@@ -792,6 +1010,8 @@ def main():
             mode = ""
             if args.fast:
                 mode += "_fast"
+            if args.tile:
+                mode += "_tile"
             if args.vertical:
                 mode += "_vertical"
             if args.flow_only:
