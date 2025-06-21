@@ -51,23 +51,14 @@ class VideoFlowProcessor:
         
     def load_videoflow_model(self):
         """Load VideoFlow MOF model"""
-        print("Loading VideoFlow MOF model...")
-        
         # Get VideoFlow configuration
-        print("  Getting configuration...")
         self.cfg = get_cfg()
         
         # Apply fast mode optimizations
         if self.fast_mode:
-            print("  Applying fast mode optimizations...")
             self.cfg.decoder_depth = 6  # Reduce from default 12
             self.cfg.corr_levels = 3    # Reduce correlation levels
             self.cfg.corr_radius = 3    # Reduce correlation radius
-            print(f"    Decoder depth: {self.cfg.decoder_depth}")
-            print(f"    Correlation levels: {self.cfg.corr_levels}")
-            print(f"    Correlation radius: {self.cfg.corr_radius}")
-        
-        print(f"  Model path: {self.cfg.model}")
         
         # Check if model weights exist
         model_path = self.cfg.model
@@ -75,29 +66,20 @@ class VideoFlowProcessor:
             raise FileNotFoundError(f"Model weights not found: {model_path}")
         
         # Build network
-        print("  Building network...")
         self.model = build_network(self.cfg)
-        print("  Network built successfully")
         
         # Load pre-trained weights
-        print("  Loading weights...")
-        checkpoint = torch.load(model_path, map_location=self.device)
-        print(f"  Checkpoint loaded, keys count: {len(checkpoint.keys())}")
+        checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
         
         # Remove 'module.' prefix from keys if present (for models trained with DataParallel)
         if any(key.startswith('module.') for key in checkpoint.keys()):
-            print("  Removing 'module.' prefix from checkpoint keys...")
             checkpoint = {key.replace('module.', ''): value for key, value in checkpoint.items()}
         
-        print("  Loading state dict...")
         self.model.load_state_dict(checkpoint)
         
         # Move to device and set evaluation mode
-        print(f"  Moving model to {self.device}...")
         self.model.to(self.device)
         self.model.eval()
-        
-        print("✓ VideoFlow MOF model loaded successfully")
         
     def get_video_fps(self, video_path):
         """Get video FPS for time calculations"""
@@ -113,7 +95,6 @@ class VideoFlowProcessor:
     def extract_frames(self, video_path, max_frames=1000, start_frame=0):
         """Extract frames from video starting at start_frame"""
         end_frame = start_frame + max_frames
-        print(f"Extracting frames {start_frame} to {end_frame-1} from {video_path}...")
         
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
@@ -134,6 +115,10 @@ class VideoFlowProcessor:
         
         # Apply fast mode resolution reduction
         if self.fast_mode:
+            # VideoFlow requires minimum 128x128 for correlation pyramid
+            # (feature map needs to be at least 16x16, down_ratio=8)
+            MIN_VIDEOFLOW_SIZE = 128
+            
             # More aggressive resolution reduction for fast mode
             # Target maximum 256x256, but maintain aspect ratio
             max_dimension = 256
@@ -143,33 +128,37 @@ class VideoFlowProcessor:
             if scale_factor > 1.0:
                 scale_factor = 1.0
             
-            # Apply additional reduction for large videos
-            if max(orig_width, orig_height) > 512:
-                scale_factor = min(scale_factor, 0.25)  # Quarter size for very large videos
-            elif max(orig_width, orig_height) > 256:
-                scale_factor = min(scale_factor, 0.5)   # Half size for medium videos
-            
             width = int(orig_width * scale_factor)
             height = int(orig_height * scale_factor)
             
-            # Ensure dimensions are even (required for some codecs) and minimum 64x64
-            width = max(64, width - (width % 2))
-            height = max(64, height - (height % 2))
+            # Ensure minimum VideoFlow compatible size while preserving aspect ratio
+            if width < MIN_VIDEOFLOW_SIZE or height < MIN_VIDEOFLOW_SIZE:
+                # Calculate original aspect ratio
+                aspect_ratio = orig_width / orig_height
+                
+                if width < height:
+                    # Width is smaller, set it to minimum and adjust height
+                    width = MIN_VIDEOFLOW_SIZE
+                    height = int(width / aspect_ratio)
+                else:
+                    # Height is smaller, set it to minimum and adjust width
+                    height = MIN_VIDEOFLOW_SIZE
+                    width = int(height * aspect_ratio)
+                
+                # Ensure both dimensions are at least minimum
+                width = max(MIN_VIDEOFLOW_SIZE, width)
+                height = max(MIN_VIDEOFLOW_SIZE, height)
             
-            print(f"Fast mode: aggressive resolution reduction from {orig_width}x{orig_height} to {width}x{height} (scale: {scale_factor:.2f})")
         else:
             width = orig_width
             height = orig_height
-        
-        print(f"Video: {orig_width}x{orig_height} -> {width}x{height}, {fps:.1f}fps")
-        print(f"Extracting frames {start_frame}-{actual_end-1} ({frames_to_extract} frames) from {total_frames} total frames")
         
         # Seek to start frame
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
         
         # Extract frames
         frames = []
-        pbar = tqdm(total=frames_to_extract, desc="Extracting frames")
+        pbar = tqdm(total=frames_to_extract, desc="Loading video", leave=False)
         
         for i in range(frames_to_extract):
             ret, frame = cap.read()
@@ -189,7 +178,6 @@ class VideoFlowProcessor:
         cap.release()
         pbar.close()
         
-        print(f"✓ Extracted {len(frames)} frames")
         return frames, fps, width, height, start_frame
     
     def preprocess_frame_for_flow(self, frame):
@@ -203,42 +191,24 @@ class VideoFlowProcessor:
         # Final clamp and convert back to uint8
         return np.clip(frame_float, 0, 255).astype(np.uint8)
     
-    def calculate_tile_grid(self, width, height, target_aspect=16/9):
+    def calculate_tile_grid(self, width, height, tile_size=1280):
         """
-        Simple tile grid calculation for 16:9 aspect ratio tiles
+        Calculate tile grid for fixed square tiles (optimized for VideoFlow MOF model)
         
         Args:
             width, height: Original frame dimensions
-            target_aspect: Target aspect ratio (16:9 = 1.777...)
+            tile_size: Fixed tile size (default: 1280x1280, optimal for MOF model)
             
         Returns:
             (tile_width, tile_height, cols, rows, tiles_info)
         """
-        frame_aspect = width / height
+        # Use fixed square tiles
+        tile_width = tile_size
+        tile_height = tile_size
         
-        if frame_aspect > target_aspect:
-            # Frame is wider than 16:9, split horizontally
-            # Each tile has height = frame height, width = height * 16/9
-            tile_height = height
-            tile_width = int(height * target_aspect)
-            # Make sure width is even
-            tile_width = tile_width - (tile_width % 2)
-            
-            # Calculate number of tiles needed
-            cols = int(np.ceil(width / tile_width))
-            rows = 1
-            
-        else:
-            # Frame is taller than 16:9, split vertically  
-            # Each tile has width = frame width, height = width / 16*9
-            tile_width = width
-            tile_height = int(width / target_aspect)
-            # Make sure height is even
-            tile_height = tile_height - (tile_height % 2)
-            
-            # Calculate number of tiles needed
-            cols = 1
-            rows = int(np.ceil(height / tile_height))
+        # Calculate number of tiles needed
+        cols = int(np.ceil(width / tile_width))
+        rows = int(np.ceil(height / tile_height))
         
         # Calculate actual tile positions
         tiles_info = []
@@ -248,64 +218,37 @@ class VideoFlowProcessor:
                 x = col * tile_width
                 y = row * tile_height
                 
-                # Calculate actual tile size (last tile might be smaller)
+                # Calculate actual tile size (edge tiles might be smaller)
                 actual_width = min(tile_width, width - x)
                 actual_height = min(tile_height, height - y)
-                
-                # Check if padding is needed (for last tile)
-                needs_padding = (actual_width < tile_width) or (actual_height < tile_height)
                 
                 tiles_info.append({
                     'x': x, 'y': y,
                     'width': actual_width, 'height': actual_height,
-                    'target_width': tile_width, 'target_height': tile_height,
-                    'col': col, 'row': row,
-                    'needs_padding': needs_padding
+                    'col': col, 'row': row
                 })
         
-        print(f"Tile grid: {cols}x{rows} tiles, each {tile_width}x{tile_height} (aspect: {tile_width/tile_height:.3f})")
         return tile_width, tile_height, cols, rows, tiles_info
     
     def extract_tile(self, frame, tile_info):
-        """Extract a tile from the frame with padding to maintain 16:9 aspect ratio"""
+        """Extract a tile from the frame without padding"""
         x, y = tile_info['x'], tile_info['y']
         w, h = tile_info['width'], tile_info['height']
-        target_w, target_h = tile_info['target_width'], tile_info['target_height']
         
-        # Extract the actual tile from frame
+        # Extract the tile from frame
         tile = frame[y:y+h, x:x+w]
-        
-        # Add padding if needed to reach target dimensions
-        if tile_info['needs_padding']:
-            # Create padded tile with target dimensions
-            padded_tile = np.zeros((target_h, target_w, 3), dtype=tile.dtype)
-            
-            # Copy actual tile to top-left of padded tile
-            padded_tile[:h, :w] = tile
-            
-            # Pad right edge if needed
-            if w < target_w:
-                # Repeat last column
-                for col in range(w, target_w):
-                    padded_tile[:h, col] = tile[:, -1]
-            
-            # Pad bottom edge if needed  
-            if h < target_h:
-                # Repeat last row
-                for row in range(h, target_h):
-                    padded_tile[row, :] = padded_tile[h-1, :]
-            
-            return padded_tile
         
         return tile
     
-    def compute_optical_flow_tiled(self, frames, frame_idx):
+    def compute_optical_flow_tiled(self, frames, frame_idx, tile_pbar=None, overall_pbar=None):
         """
-        Compute optical flow using tile-based processing for better 16:9 aspect ratio handling
+        Compute optical flow using tile-based processing with 1280x1280 square tiles
         
         Args:
             frames: List of frames
             frame_idx: Current frame index
+            tile_pbar: Progress bar for current tile processing
+            overall_pbar: Progress bar for overall tiles progress
             
         Returns:
             Full-resolution optical flow
@@ -323,31 +266,31 @@ class VideoFlowProcessor:
         # Initialize full flow map
         full_flow = np.zeros((height, width, 2), dtype=np.float32)
         
-        print(f"Processing {len(tiles_info)} tiles for frame {frame_idx}")
-        
         # Process each tile
         for i, tile_info in enumerate(tiles_info):
+            # Update overall progress bar description
+            if overall_pbar is not None:
+                overall_pbar.set_description(f"Tile {i+1}/{len(tiles_info)} ({tile_info['width']}x{tile_info['height']})")
+            
             # Extract tile from all frames in sequence
             tile_frames = []
             for frame in frames:
                 tile = self.extract_tile(frame, tile_info)
                 tile_frames.append(tile)
             
-            # Compute flow for this tile
-            tile_flow = self.compute_optical_flow(tile_frames, frame_idx)
+            # Compute flow for this tile with tile progress bar
+            tile_flow = self.compute_optical_flow_with_progress(tile_frames, frame_idx, tile_pbar)
             
             # Place tile flow back into full flow map
             x, y = tile_info['x'], tile_info['y']
-            w, h = tile_info['width'], tile_info['height']  # Original dimensions
+            w, h = tile_info['width'], tile_info['height']
             
-            # Extract only the valid portion of the flow (without padding)
-            valid_flow = tile_flow[:h, :w]
+            # Place flow back into full flow map
+            full_flow[y:y+h, x:x+w] = tile_flow
             
-            # Place back into full flow map
-            full_flow[y:y+h, x:x+w] = valid_flow
-            
-            padding_info = " (with padding)" if tile_info['needs_padding'] else ""
-            print(f"  Tile {i+1}/{len(tiles_info)}: {tile_info['target_width']}x{tile_info['target_height']} -> {w}x{h} at ({x},{y}){padding_info}")
+            # Update overall progress
+            if overall_pbar is not None:
+                overall_pbar.update(1)
         
         return full_flow
         
@@ -387,6 +330,52 @@ class VideoFlowProcessor:
         batch = torch.stack(tensors).unsqueeze(0).to(self.device)
         return batch
         
+    def compute_optical_flow_with_progress(self, frames, frame_idx, tile_pbar=None):
+        """Compute optical flow with progress updates for tile processing"""
+        if tile_pbar is not None:
+            tile_pbar.set_description("Preparing frames")
+            tile_pbar.reset()
+        
+        # Prepare frame sequence
+        frame_batch = self.prepare_frame_sequence(frames, frame_idx)
+        
+        if tile_pbar is not None:
+            tile_pbar.set_description("Creating padder")
+            tile_pbar.update(1)
+        
+        # Create input padder
+        padder = InputPadder(frame_batch.shape[-2:])
+        frame_batch_padded = padder.pad(frame_batch)
+        
+        if tile_pbar is not None:
+            tile_pbar.set_description("Running VideoFlow")
+            tile_pbar.update(1)
+        
+        # Run VideoFlow inference
+        with torch.no_grad():
+            # VideoFlow forward pass
+            flow_predictions, _ = self.model(frame_batch_padded, {})
+            
+            if tile_pbar is not None:
+                tile_pbar.set_description("Processing output")
+                tile_pbar.update(1)
+            
+            # Unpad results
+            flow_tensor = padder.unpad(flow_predictions)
+            
+            # Get the middle flow
+            middle_idx = flow_tensor.shape[1] // 2
+            flow_tensor = flow_tensor[0, middle_idx]
+            
+            # Convert to numpy: CHW -> HWC  
+            flow_np = flow_tensor.permute(1, 2, 0).cpu().numpy()
+            
+            if tile_pbar is not None:
+                tile_pbar.set_description("Completed")
+                tile_pbar.update(1)
+        
+        return flow_np
+        
     def compute_optical_flow(self, frames, frame_idx):
         """Compute optical flow using VideoFlow model"""
         # Prepare frame sequence
@@ -416,9 +405,9 @@ class VideoFlowProcessor:
         
     def encode_hsv_format(self, flow, width, height):
         """
-        Encode optical flow in HSV format (standard visualization):
+        Encode optical flow in HSV format with absolute normalization:
         - Hue: Flow direction (angle)
-        - Saturation: Flow magnitude (normalized)
+        - Saturation: Flow magnitude (normalized by absolute pixel scale)
         - Value: Constant brightness
         """
         # Handle NaN and inf values first
@@ -432,14 +421,15 @@ class VideoFlowProcessor:
         hue = (angle + np.pi) / (2 * np.pi) * 180
         hue = np.clip(hue, 0, 180).astype(np.uint8)
         
-        # Normalize magnitude for saturation
-        max_magnitude = np.max(magnitude)
-        if max_magnitude > 0:
-            saturation = (magnitude / max_magnitude * 255).astype(np.uint8)
-            # print(f"HSV Flow - max magnitude: {max_magnitude:.4f}")
-        else:
-            saturation = np.zeros_like(magnitude, dtype=np.uint8)
-            # print("HSV Flow - no motion detected")
+        # Absolute normalization independent of image/tile size
+        # Reference: 10 pixels motion = reasonable visible flow
+        REFERENCE_FLOW_PIXELS = 10.0
+        
+        # Smooth saturation mapping using sigmoid-like function
+        # This makes small flows visible while avoiding saturation at high flows
+        normalized_mag = magnitude / REFERENCE_FLOW_PIXELS
+        saturation = (1 - np.exp(-normalized_mag * 2)) * 255  # Smooth exponential mapping
+        saturation = np.clip(saturation, 0, 255).astype(np.uint8)
         
         # Set constant value (brightness)
         value = np.full_like(magnitude, 255, dtype=np.uint8)
@@ -454,40 +444,27 @@ class VideoFlowProcessor:
     
     def encode_gamedev_format(self, flow, width, height):
         """
-        Encode optical flow in gamedev format with enhanced visibility:
-        - Normalize flow by image dimensions
-        - Scale and clamp to [-20, +20] range  
-        - Map to [0, 1] where 0 = -20, 1 = +20
-        - Store in RG channels (R=horizontal, G=vertical)
+        Encode optical flow in gamedev format with absolute normalization:
+        - Absolute scaling independent of frame/tile size
+        - Smooth mapping to prevent saturation
+        - Map to [0, 1] range stored in RG channels
         """
         # Handle NaN and inf values first
         flow = np.nan_to_num(flow, nan=0.0, posinf=1.0, neginf=-1.0)
         
-        # Normalize flow by image dimensions
-        norm_flow = flow.copy()
-        norm_flow[:, :, 0] /= width    # Horizontal flow
-        norm_flow[:, :, 1] /= height   # Vertical flow
+        # Absolute scaling independent of image dimensions
+        # Reference: 20 pixels motion = strong flow (tanh maps to ~0.96)
+        REFERENCE_FLOW_PIXELS = 20.0
         
-        # Calculate flow magnitude for adaptive scaling
-        flow_magnitude = np.sqrt(norm_flow[:, :, 0]**2 + norm_flow[:, :, 1]**2)
-        max_magnitude = np.max(flow_magnitude)
+        # Normalize flow by absolute scale
+        norm_flow = flow / REFERENCE_FLOW_PIXELS
         
-        # Adaptive scaling based on flow magnitude
-        if max_magnitude > 0:
-            # Scale to make motion visible, but adapt to actual flow range
-            scale_factor = min(200, 50 / max_magnitude)  # Adaptive scaling
-            norm_flow *= scale_factor
-            # print(f"Flow magnitude: max={max_magnitude:.4f}, scale={scale_factor:.1f}")
-        else:
-            # No motion detected, use default scaling
-            norm_flow *= 200
-            # print("No motion detected, using default scaling")
+        # Smooth mapping using tanh to prevent harsh cutoffs
+        # This maps infinite range to [-1, 1] smoothly
+        smooth_flow = np.tanh(norm_flow)
         
-        # Clamp to [-20, +20] range
-        clamped = np.clip(norm_flow, -20, 20)
-        
-        # Map [-20, +20] to [0, 1]: 0 = -20, 1 = +20
-        encoded = (clamped + 20) / 40
+        # Map [-1, 1] to [0, 1] for storage
+        encoded = (smooth_flow + 1) / 2
         encoded = np.clip(encoded, 0, 1)
         
         # Create RGB image
@@ -495,16 +472,15 @@ class VideoFlowProcessor:
         rgb = np.zeros((h, w, 3), dtype=np.float32)
         rgb[:, :, 0] = encoded[:, :, 0]  # R channel: horizontal flow
         rgb[:, :, 1] = encoded[:, :, 1]  # G channel: vertical flow
-        rgb[:, :, 2] = 0.0               # B channel: unused
         
-        # Add some base color if flow is too weak
-        if max_magnitude < 0.001:
-            # Add subtle pattern to show that processing occurred
-            rgb[:, :, 2] = 0.1  # Slight blue tint to indicate processed frame
+        # Blue channel shows flow magnitude for reference
+        flow_magnitude = np.sqrt(flow[:, :, 0]**2 + flow[:, :, 1]**2)
+        magnitude_normalized = 1 - np.exp(-flow_magnitude / REFERENCE_FLOW_PIXELS)  # Exponential mapping
+        rgb[:, :, 2] = magnitude_normalized * 0.3  # Subtle blue indicating flow strength
         
         # Convert to 8-bit, handle NaN and inf values
         rgb_8bit = rgb * 255
-        rgb_8bit = np.nan_to_num(rgb_8bit, nan=0.0, posinf=255.0, neginf=0.0)
+        rgb_8bit = np.nan_to_num(rgb_8bit, nan=128.0, posinf=255.0, neginf=0.0)
         return rgb_8bit.astype(np.uint8)
     
     def apply_taa_effect(self, current_frame, flow=None, previous_taa_frame=None, alpha=0.1, use_flow=True):
@@ -700,6 +676,13 @@ class VideoFlowProcessor:
         """Generate automatic output filename based on parameters"""
         import os
         
+        # Always use results directory
+        results_dir = os.path.join(output_dir, "results") if output_dir != "results" else "results"
+        
+        # Create results directory if it doesn't exist
+        if not os.path.exists(results_dir):
+            os.makedirs(results_dir)
+        
         # Get base name without extension
         base_name = os.path.splitext(os.path.basename(input_path))[0]
         
@@ -721,6 +704,9 @@ class VideoFlowProcessor:
         if self.fast_mode:
             parts.append("fast")
         
+        if self.tile_mode:
+            parts.append("tile")
+        
         if flow_only:
             parts.append("flow")
         elif taa:
@@ -730,7 +716,7 @@ class VideoFlowProcessor:
         
         # Join parts and add extension
         filename = "_".join(parts) + ".mp4"
-        return os.path.join(output_dir, filename)
+        return os.path.join(results_dir, filename)
     
     def process_video(self, input_path, output_path, max_frames=1000, start_frame=0, 
                      start_time=None, duration=None, vertical=False, flow_only=False, taa=False, flow_format='gamedev'):
@@ -767,10 +753,10 @@ class VideoFlowProcessor:
         # Extract frames
         frames, fps, width, height, actual_start = self.extract_frames(input_path, max_frames=max_frames, start_frame=start_frame)
         
-        # Setup output video
+        # Setup output video using processed frame dimensions
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         if flow_only:
-            output_size = (width, height)  # Flow only: original dimensions
+            output_size = (width, height)  # Flow only: processed dimensions
         elif taa:
             if vertical:
                 output_size = (width, height * 4)  # Vertical: same width, quad height (Original + Flow + TAA+Flow + TAA Simple)
@@ -786,8 +772,6 @@ class VideoFlowProcessor:
             raise ValueError(f"Cannot create output video: {output_path}")
         
         # Process each frame
-        print("Processing frames with VideoFlow...")
-        
         import time
         frame_times = []
         
@@ -795,16 +779,44 @@ class VideoFlowProcessor:
         previous_taa_frame = None
         previous_taa_simple_frame = None
         
-        # Create progress bar
-        pbar = tqdm(total=len(frames), desc="VideoFlow processing", 
-                   unit="frame", ncols=100, 
-                   bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
+        # Create progress bars for tile mode or single progress bar for normal mode
+        if self.tile_mode:
+            # Calculate tile count for first frame to setup progress bars
+            current_frame = frames[0]
+            height_temp, width_temp = current_frame.shape[:2]
+            _, _, _, _, tiles_info_temp = self.calculate_tile_grid(width_temp, height_temp)
+            total_tiles = len(tiles_info_temp)
+            
+            # Create two progress bars for tile mode
+            main_pbar = tqdm(total=len(frames), desc="Frame processing", 
+                           position=0, leave=True, ncols=100,
+                           bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
+            
+            tile_pbar = tqdm(total=4, desc="Tile processing", 
+                           position=1, leave=False, ncols=100,
+                           bar_format='{desc}: {bar}| {n_fmt}/{total_fmt}')
+            
+            overall_tile_pbar = tqdm(total=total_tiles, desc="Overall tiles", 
+                                   position=2, leave=False, ncols=100,
+                                   bar_format='{desc}: {bar}| {n_fmt}/{total_fmt}')
+        else:
+            # Single progress bar for normal mode
+            main_pbar = tqdm(total=len(frames), desc="VideoFlow processing", 
+                           unit="frame", ncols=100, 
+                           bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
+            tile_pbar = None
+            overall_tile_pbar = None
         
         for i in range(len(frames)):
             start_time = time.time()
             
             # Compute optical flow using VideoFlow (with tiling if enabled)
-            flow = self.compute_optical_flow_tiled(frames, i)
+            if self.tile_mode:
+                # Reset overall tile progress for each frame
+                overall_tile_pbar.reset()
+                flow = self.compute_optical_flow_tiled(frames, i, tile_pbar, overall_tile_pbar)
+            else:
+                flow = self.compute_optical_flow_tiled(frames, i)
             
             # Encode optical flow based on selected format
             if flow_format == 'hsv':
@@ -854,46 +866,26 @@ class VideoFlowProcessor:
             eta_seconds = remaining_frames * avg_time
             
             # Update progress bar description
-            pbar.set_description(f"VideoFlow processing (ETA: {eta_seconds:.0f}s)")
-            pbar.update(1)
-        
-        pbar.close()
-        out.release()
-        
-        print(f"✓ VideoFlow processing completed!")
-        print(f"✓ Output saved: {output_path}")
-        if flow_only:
-            print("Output: Optical flow only (VideoFlow + gamedev encoding)")
-        elif taa:
-            if vertical:
-                print("Panel 1 (Top): Original video")
-                print("Panel 2: Optical flow (VideoFlow + gamedev encoding)")
-                print("Panel 3: TAA + Flow (Motion-compensated temporal anti-aliasing)")
-                print("Panel 4 (Bottom): TAA Simple (Basic temporal blending)")
+            if self.tile_mode:
+                main_pbar.set_description(f"Frame {i+1}/{len(frames)} (ETA: {eta_seconds:.0f}s)")
             else:
-                print("2x2 Grid Layout:")
-                print("Top-Left: Original video")
-                print("Top-Right: Optical flow (VideoFlow + gamedev encoding)")
-                print("Bottom-Left: TAA + Flow (Motion-compensated temporal anti-aliasing)")
-                print("Bottom-Right: TAA Simple (Basic temporal blending)")
-        elif vertical:
-            print("Top: Original video")
-            print("Bottom: Optical flow (VideoFlow + gamedev encoding)")
-        else:
-            print("Left side: Original video")
-            print("Right side: Optical flow (VideoFlow + gamedev encoding)")
-        print("  R channel: Horizontal flow (-20 to +20)")
-        print("  G channel: Vertical flow (-20 to +20)")
-        if taa:
-            print("  TAA + Flow: Motion-compensated temporal anti-aliasing (90% history weight)")
-            print("  TAA Simple: Basic temporal blending without motion compensation (90% history weight)")
+                main_pbar.set_description(f"VideoFlow processing (ETA: {eta_seconds:.0f}s)")
+            main_pbar.update(1)
+        
+        # Close progress bars
+        main_pbar.close()
+        if self.tile_mode:
+            tile_pbar.close()
+            overall_tile_pbar.close()
+            print()  # Add spacing after tile progress bars
+        out.release()
 
 def main():
     parser = argparse.ArgumentParser(description='VideoFlow Optical Flow Processor')
     parser.add_argument('--input', default='big_buck_bunny_720p_h264.mov',
                        help='Input video file')
-    parser.add_argument('--output', default='videoflow_result.mp4',
-                       help='Output video file')
+    parser.add_argument('--output', default='results',
+                       help='Output video file or directory (default: results)')
     parser.add_argument('--device', default='auto', choices=['auto', 'cuda', 'cpu'],
                        help='Processing device')
     parser.add_argument('--frames', type=int, default=1000,
@@ -915,7 +907,7 @@ def main():
     parser.add_argument('--flow-format', choices=['gamedev', 'hsv'], default='gamedev',
                        help='Optical flow encoding format: gamedev (RG channels) or hsv (standard visualization)')
     parser.add_argument('--tile', action='store_true',
-                       help='Enable tile-based processing: split frames into 16:9 tiles for better optical flow quality')
+                       help='Enable tile-based processing: split frames into 1280x1280 square tiles (optimal for VideoFlow MOF model)')
     parser.add_argument('--show-tiles', action='store_true',
                        help='Only show tile grid calculation without processing video')
     
@@ -990,14 +982,12 @@ def main():
         
         print(f"\nDetailed tile information:")
         for i, tile_info in enumerate(tiles_info):
-            padding_info = " (needs padding)" if tile_info['needs_padding'] else ""
             print(f"  Tile {i+1}: position ({tile_info['x']}, {tile_info['y']}), "
-                  f"size {tile_info['width']}x{tile_info['height']} -> "
-                  f"target {tile_info['target_width']}x{tile_info['target_height']}{padding_info}")
+                  f"size {tile_info['width']}x{tile_info['height']}")
         
         print(f"\nSummary:")
         print(f"  Grid: {cols}x{rows} tiles")
-        print(f"  Tile aspect ratio: {tile_width/tile_height:.3f} (target: 1.778)")
+        print(f"  Tile aspect ratio: {tile_width/tile_height:.3f} (target: 1.000 - square)")
         print(f"  Total tiles: {len(tiles_info)}")
         return
     
