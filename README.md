@@ -1,124 +1,168 @@
 # VideoFlow Optical Flow Processor
 
-Чистая реализация VideoFlow для генерации оптического потока из видео с кодированием в gamedev формате.
+VideoFlow implementation for generating optical flow from video with gamedev format encoding.
 
-## Описание
+## Description
 
-Скрипт использует [VideoFlow](https://github.com/XiaoyuShi97/VideoFlow) для генерации оптического потока и создает side-by-side визуализацию:
-- **Левая сторона**: Оригинальное видео (первые 1000 кадров)
-- **Правая сторона**: Оптический поток в gamedev формате
+This project processes video files to generate optical flow visualization using the VideoFlow neural network:
+- **Left side**: Original video frames
+- **Right side**: Optical flow in gamedev format
 
-## Кодирование gamedev формата
+## Gamedev Format Encoding
 
-Оптический поток кодируется в RG каналы:
-- Векторы потока нормализуются относительно разрешения изображения
-- Значения ограничиваются диапазоном [-20, +20]
-- Кодируются как: 0 = -20, 1 = +20
-- R канал: горизонтальный поток
-- G канал: вертикальный поток
-- B канал: не используется (0)
+Optical flow is encoded into RG channels:
+- Flow vectors are normalized relative to image resolution
+- Values are clamped to range [-20, +20]
+- Encoded as: 0 = -20, 1 = +20
+- R channel: horizontal flow
+- G channel: vertical flow
+- B channel: unused (0)
 
-## Установка
+## Installation
 
-### 1. Клонирование VideoFlow
+### Prerequisites
+- Python 3.8+
+- NVIDIA GPU with CUDA support (recommended)
+- Windows (setup.bat) or manual installation
 
+### Quick Setup
+
+1. **Download the repository** (VideoFlow source code and trained models are included)
+
+2. **Run the setup script:**
 ```bash
-git clone https://github.com/XiaoyuShi97/VideoFlow.git
+setup.bat
 ```
 
-### 2. Установка зависимостей
+This will:
+- Check for Python and NVIDIA GPU
+- Create virtual environment
+- Install PyTorch with CUDA support
+- Install all dependencies
+- Test the installation
 
+3. **Activate the environment:**
 ```bash
-pip install -r requirements.txt
+venv_video_flow\Scripts\activate
 ```
 
-### 3. Загрузка весов модели
-
-Скачайте предобученную модель с [VideoFlow GitHub](https://github.com/XiaoyuShi97/VideoFlow):
-
-- Скачайте `MOF_sintel.pth` (Multi-frame Optical Flow)
-- Поместите файл в директорию `VideoFlow_ckpt/`
-
-### Структура файлов
+### Repository Structure
 
 ```
 video-flow-ml/
-├── VideoFlow/                    # Клонированный репозиторий VideoFlow
-├── VideoFlow_ckpt/               # Директория с весами модели
-│   └── MOF_sintel.pth           # Веса модели VideoFlow MOF
-├── flow_processor.py            # Основной скрипт
-├── requirements.txt             # Зависимости
-└── big_buck_bunny_720p_h264.mov # Входное видео
+├── VideoFlow/                    # VideoFlow source code (included)
+├── VideoFlow_ckpt/               # Pre-trained models (included)
+│   ├── MOF_sintel.pth           # Multi-frame model for Sintel
+│   ├── MOF_kitti.pth            # Multi-frame model for KITTI
+│   └── BOF_sintel.pth           # Bi-directional model
+├── flow_processor.py            # Main processing script
+├── check_cuda.py                # CUDA verification script
+├── setup.bat                    # Installation script
+├── requirements.txt             # Python dependencies
+└── README.md                    # This file
 ```
 
-## Использование
+## Usage
 
-### Базовое использование
+### Verify Installation
 
 ```bash
-python flow_processor.py --input big_buck_bunny_720p_h264.mov --output result.mp4
+python check_cuda.py
 ```
 
-### Параметры
+### Basic Usage
 
-- `--input`: Путь к входному видео (по умолчанию: `big_buck_bunny_720p_h264.mov`)
-- `--output`: Путь к выходному видео (по умолчанию: `videoflow_result.mp4`)
-- `--device`: Устройство обработки (`auto`, `cuda`, `cpu`)
+```bash
+python flow_processor.py --input your_video.mp4 --output result.mp4
+```
 
-## Технические детали
+### Advanced Options
+
+```bash
+# Fast processing mode
+python flow_processor.py --input video.mp4 --output result.mp4 --fast
+
+# Tile-based processing for better quality
+python flow_processor.py --input video.mp4 --output result.mp4 --tile
+
+# Flow visualization only
+python flow_processor.py --input video.mp4 --output result.mp4 --flow-only
+
+# Vertical layout
+python flow_processor.py --input video.mp4 --output result.mp4 --vertical
+```
+
+### Parameters
+
+- `--input`: Input video file path
+- `--output`: Output video file path (default: videoflow_result.mp4)
+- `--device`: Processing device (auto, cuda, cpu)
+- `--frames`: Maximum frames to process (default: 1000)
+- `--fast`: Enable fast mode (lower quality, faster processing)
+- `--tile`: Enable tile-based processing for better quality
+- `--flow-only`: Output only optical flow visualization
+- `--vertical`: Stack videos vertically instead of horizontally
+
+## Technical Details
 
 ### VideoFlow Multi-frame Optical Flow (MOF)
 
-Используется модель MOF из VideoFlow, которая:
-- Анализирует последовательности из 5 кадров
-- Обрабатывает только первые 1000 кадров видео
-- Генерирует плотный оптический поток высокого качества
+The implementation uses VideoFlow MOF model which:
+- Analyzes sequences of 5 frames
+- Generates dense, high-quality optical flow
+- Supports multiple pre-trained models (Sintel, KITTI)
 
-### Gamedev кодирование
+### Gamedev Encoding
 
 ```python
-# Нормализация относительно размера изображения
-normalized_flow[:, :, 0] /= image_width   # Горизонтальная компонента
-normalized_flow[:, :, 1] /= image_height  # Вертикальная компонента
+# Normalize relative to image size
+normalized_flow[:, :, 0] /= image_width   # Horizontal component
+normalized_flow[:, :, 1] /= image_height  # Vertical component
 
-# Масштабирование и ограничение до [-20, +20]
+# Scale and clamp to [-20, +20]
 scaled_flow = normalized_flow * 200
 clamped_flow = np.clip(scaled_flow, -20, 20)
 
-# Кодирование в [0, 1]: 0 = -20, 1 = +20
+# Encode to [0, 1]: 0 = -20, 1 = +20
 encoded_flow = (clamped_flow + 20) / 40
 
-# Сохранение в RG каналах
-rgb_image[:, :, 0] = encoded_flow[:, :, 0]  # R: горизонтальный поток
-rgb_image[:, :, 1] = encoded_flow[:, :, 1]  # G: вертикальный поток
-rgb_image[:, :, 2] = 0.0                    # B: не используется
+# Store in RG channels
+rgb_image[:, :, 0] = encoded_flow[:, :, 0]  # R: horizontal flow
+rgb_image[:, :, 1] = encoded_flow[:, :, 1]  # G: vertical flow
+rgb_image[:, :, 2] = 0.0                    # B: unused
 ```
 
-## Требования
+## System Requirements
 
-- Python 3.7+
-- PyTorch 1.6.0+
-- CUDA (рекомендуется для GPU ускорения)
-- VideoFlow репозиторий
-- Предобученные веса MOF_sintel.pth
+- Python 3.8+
+- PyTorch 2.0+ with CUDA support
+- NVIDIA GPU (8GB+ VRAM recommended)
+- 16GB+ RAM recommended
 
-## Поддерживаемые форматы
+## Supported Formats
 
-- **Входные**: MP4, MOV, AVI и другие форматы видео
-- **Выходные**: MP4
+- **Input**: MP4, MOV, AVI and other video formats
+- **Output**: MP4
 
-## Примеры результатов
+## Output Examples
 
-Выходное видео содержит:
+The output video contains:
+- **Left panel**: Original video frames
+- **Right panel**: Optical flow visualization:
+  - Black pixels = no movement
+  - Red tones = rightward movement
+  - Green tones = downward movement
+  - Yellow tones = diagonal movement
 
-- **Левая панель**: Оригинальное видео (первые 1000 кадров)
-- **Правая панель**: Визуализация оптического потока:
-  - Черные пиксели = отсутствие движения
-  - Красные оттенки = движение вправо
-  - Зеленые оттенки = движение вниз
-  - Желтые оттенки = диагональное движение
+## Troubleshooting
 
-## Ссылки
+### CUDA Issues
+Run `python check_cuda.py` to verify GPU setup.
+
+### Memory Issues
+Use `--fast` or `--tile` flags for large videos.
+
+## References
 
 - [VideoFlow GitHub](https://github.com/XiaoyuShi97/VideoFlow)
 - [VideoFlow Paper (ICCV 2023)](https://arxiv.org/abs/2303.08340) 

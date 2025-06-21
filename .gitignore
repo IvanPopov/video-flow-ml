@@ -49,6 +49,7 @@ Thumbs.db
 venv/
 env/
 .env
+venv_video_flow/
 
 # Jupyter Notebook
 .ipynb_checkpoints
