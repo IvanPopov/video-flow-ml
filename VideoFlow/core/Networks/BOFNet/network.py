@@ -13,10 +13,7 @@ from .sk2 import SKUpdateBlock6_Deep_nopoolres_AllDecoder2
 
 from torchvision.utils import save_image
 
-try:
-    from torch.amp import autocast
-except ImportError:
-    from torch.cuda.amp import autocast
+autocast = torch.cuda.amp.autocast
 
 class BOFNet(nn.Module):
     def __init__(self, cfg):

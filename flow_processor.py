@@ -69,7 +69,7 @@ class VideoFlowProcessor:
         self.model = build_network(self.cfg)
         
         # Load pre-trained weights
-        checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
+        checkpoint = torch.load(model_path, map_location=self.device)
         
         # Remove 'module.' prefix from keys if present (for models trained with DataParallel)
         if any(key.startswith('module.') for key in checkpoint.keys()):
@@ -115,10 +115,6 @@ class VideoFlowProcessor:
         
         # Apply fast mode resolution reduction
         if self.fast_mode:
-            # VideoFlow requires minimum 128x128 for correlation pyramid
-            # (feature map needs to be at least 16x16, down_ratio=8)
-            MIN_VIDEOFLOW_SIZE = 128
-            
             # More aggressive resolution reduction for fast mode
             # Target maximum 256x256, but maintain aspect ratio
             max_dimension = 256
@@ -128,37 +124,30 @@ class VideoFlowProcessor:
             if scale_factor > 1.0:
                 scale_factor = 1.0
             
+            # Apply additional reduction for large videos
+            if max(orig_width, orig_height) > 512:
+                scale_factor = min(scale_factor, 0.25)  # Quarter size for very large videos
+            elif max(orig_width, orig_height) > 256:
+                scale_factor = min(scale_factor, 0.5)   # Half size for medium videos
+            
             width = int(orig_width * scale_factor)
             height = int(orig_height * scale_factor)
             
-            # Ensure minimum VideoFlow compatible size while preserving aspect ratio
-            if width < MIN_VIDEOFLOW_SIZE or height < MIN_VIDEOFLOW_SIZE:
-                # Calculate original aspect ratio
-                aspect_ratio = orig_width / orig_height
-                
-                if width < height:
-                    # Width is smaller, set it to minimum and adjust height
-                    width = MIN_VIDEOFLOW_SIZE
-                    height = int(width / aspect_ratio)
-                else:
-                    # Height is smaller, set it to minimum and adjust width
-                    height = MIN_VIDEOFLOW_SIZE
-                    width = int(height * aspect_ratio)
-                
-                # Ensure both dimensions are at least minimum
-                width = max(MIN_VIDEOFLOW_SIZE, width)
-                height = max(MIN_VIDEOFLOW_SIZE, height)
+            # Ensure dimensions are even (required for some codecs) and minimum 64x64
+            width = max(64, width - (width % 2))
+            height = max(64, height - (height % 2))
             
+            print(f"Fast mode: aggressive resolution reduction from {orig_width}x{orig_height} to {width}x{height} (scale: {scale_factor:.2f})")
         else:
             width = orig_width
             height = orig_height
-        
+
         # Seek to start frame
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
         
         # Extract frames
         frames = []
-        pbar = tqdm(total=frames_to_extract, desc="Loading video", leave=False)
+        pbar = tqdm(total=frames_to_extract, desc="Extracting frames")
         
         for i in range(frames_to_extract):
             ret, frame = cap.read()
@@ -180,6 +169,18 @@ class VideoFlowProcessor:
         
         return frames, fps, width, height, start_frame
     
+    def preprocess_frame_for_flow(self, frame):
+        """Preprocess frame to ensure valid values for optical flow computation"""
+        # Convert to float32 for processing
+        frame_float = frame.astype(np.float32)
+        
+        # Handle NaN and inf values
+        frame_float = np.nan_to_num(frame_float, nan=128.0, posinf=255.0, neginf=0.0)
+        
+        # Final clamp and convert back to uint8
+        return np.clip(frame_float, 0, 255).astype(np.uint8)
+
+
     def calculate_tile_grid(self, width, height, tile_size=1280):
         """
         Calculate tile grid for fixed square tiles (optimized for VideoFlow MOF model)
@@ -302,9 +303,17 @@ class VideoFlowProcessor:
         
         # Convert to tensors with preprocessing
         tensors = []
-        for frame in sequence:           
+        for frame in sequence:
+            # Preprocess frame to ensure valid values
+            processed_frame = frame # self.preprocess_frame_for_flow(frame)
+            
             # Convert to tensor and normalize to [0,1], then change HWC to CHW
-            tensor = torch.from_numpy(frame.astype(np.float32)).permute(2, 0, 1) / 255.0            
+            tensor = torch.from_numpy(processed_frame.astype(np.float32)).permute(2, 0, 1) / 255.0
+            
+            # Additional tensor validation
+            tensor = torch.nan_to_num(tensor, nan=0.5, posinf=1.0, neginf=0.0)
+            tensor = torch.clamp(tensor, 0.0, 1.0)
+            
             tensors.append(tensor)
         
         # Stack frames and add batch dimension
@@ -386,12 +395,14 @@ class VideoFlowProcessor:
         
     def encode_hsv_format(self, flow, width, height):
         """
-        Encode optical flow in HSV format with absolute normalization:
+        Encode optical flow in HSV format (standard visualization):
         - Hue: Flow direction (angle)
-        - Saturation: Flow magnitude (normalized by absolute pixel scale)
+        - Saturation: Flow magnitude (normalized)
         - Value: Constant brightness
         """
-
+        # Handle NaN and inf values first
+        flow = np.nan_to_num(flow, nan=0.0, posinf=1.0, neginf=-1.0)
+        
         # Calculate magnitude and angle
         magnitude = np.sqrt(flow[:, :, 0]**2 + flow[:, :, 1]**2)
         angle = np.arctan2(flow[:, :, 1], flow[:, :, 0])
@@ -400,15 +411,14 @@ class VideoFlowProcessor:
         hue = (angle + np.pi) / (2 * np.pi) * 180
         hue = np.clip(hue, 0, 180).astype(np.uint8)
         
-        # Absolute normalization independent of image/tile size
-        # Reference: 10 pixels motion = reasonable visible flow
-        REFERENCE_FLOW_PIXELS = 10.0
-        
-        # Smooth saturation mapping using sigmoid-like function
-        # This makes small flows visible while avoiding saturation at high flows
-        normalized_mag = magnitude / REFERENCE_FLOW_PIXELS
-        saturation = (1 - np.exp(-normalized_mag * 2)) * 255  # Smooth exponential mapping
-        saturation = np.clip(saturation, 0, 255).astype(np.uint8)
+        # Normalize magnitude for saturation
+        max_magnitude = np.max(magnitude)
+        if max_magnitude > 0:
+            saturation = (magnitude / max_magnitude * 255).astype(np.uint8)
+            # print(f"HSV Flow - max magnitude: {max_magnitude:.4f}")
+        else:
+            saturation = np.zeros_like(magnitude, dtype=np.uint8)
+            # print("HSV Flow - no motion detected")
         
         # Set constant value (brightness)
         value = np.full_like(magnitude, 255, dtype=np.uint8)
@@ -423,25 +433,57 @@ class VideoFlowProcessor:
     
     def encode_gamedev_format(self, flow, width, height):
         """
-        Encode optical flow in gamedev format with absolute normalization:
-        - Absolute scaling independent of frame/tile size
-        - Map to [0, 1] range stored in RG channels
+        Encode optical flow in gamedev format with enhanced visibility:
+        - Normalize flow by image dimensions
+        - Scale and clamp to [-20, +20] range  
+        - Map to [0, 1] where 0 = -20, 1 = +20
+        - Store in RG channels (R=horizontal, G=vertical)
         """
-
-        # Absolute scaling independent of image dimensions
-        # Reference: 20 pixels motion = strong flow (tanh maps to ~0.96)
-        REFERENCE_FLOW_PIXELS = 5.0
+        # Handle NaN and inf values first
+        flow = np.nan_to_num(flow, nan=0.0, posinf=1.0, neginf=-1.0)
         
-        encoded = (np.clip(flow / REFERENCE_FLOW_PIXELS, -1, 1) * 0.5 + 0.5)**2
+        # Normalize flow by image dimensions
+        norm_flow = flow.copy()
+        norm_flow[:, :, 0] /= width    # Horizontal flow
+        norm_flow[:, :, 1] /= height   # Vertical flow
+        
+        # Calculate flow magnitude for adaptive scaling
+        flow_magnitude = np.sqrt(norm_flow[:, :, 0]**2 + norm_flow[:, :, 1]**2)
+        max_magnitude = np.max(flow_magnitude)
+        
+        # Adaptive scaling based on flow magnitude
+        if max_magnitude > 0:
+            # Scale to make motion visible, but adapt to actual flow range
+            scale_factor = min(200, 50 / max_magnitude)  # Adaptive scaling
+            norm_flow *= scale_factor
+            # print(f"Flow magnitude: max={max_magnitude:.4f}, scale={scale_factor:.1f}")
+        else:
+            # No motion detected, use default scaling
+            norm_flow *= 200
+            # print("No motion detected, using default scaling")
+        
+        # Clamp to [-20, +20] range
+        clamped = np.clip(norm_flow, -20, 20)
+        
+        # Map [-20, +20] to [0, 1]: 0 = -20, 1 = +20
+        encoded = (clamped + 20) / 40
+        encoded = np.clip(encoded, 0, 1)
         
         # Create RGB image
         h, w = flow.shape[:2]
         rgb = np.zeros((h, w, 3), dtype=np.float32)
         rgb[:, :, 0] = encoded[:, :, 0]  # R channel: horizontal flow
         rgb[:, :, 1] = encoded[:, :, 1]  # G channel: vertical flow
-    
-        # Convert to 8-bit
+        rgb[:, :, 2] = 0.0               # B channel: unused
+        
+        # Add some base color if flow is too weak
+        if max_magnitude < 0.001:
+            # Add subtle pattern to show that processing occurred
+            rgb[:, :, 2] = 0.1  # Slight blue tint to indicate processed frame
+        
+        # Convert to 8-bit, handle NaN and inf values
         rgb_8bit = rgb * 255
+        rgb_8bit = np.nan_to_num(rgb_8bit, nan=0.0, posinf=255.0, neginf=0.0)
         return rgb_8bit.astype(np.uint8)
     
     def encode_torchvision_format(self, flow, width, height):
@@ -521,6 +563,11 @@ class VideoFlowProcessor:
         # Calculate previous pixel positions using flow
         prev_x = x_coords + flow_pixels[:, :, 0]
         prev_y = y_coords + flow_pixels[:, :, 1]
+        
+        # Handle NaN and inf values
+        prev_x = np.nan_to_num(prev_x, nan=0.0, posinf=w-1, neginf=0.0)
+        prev_y = np.nan_to_num(prev_y, nan=0.0, posinf=h-1, neginf=0.0)
+        
         # Clamp coordinates to valid range
         prev_x = np.clip(prev_x, 0, w - 1)
         prev_y = np.clip(prev_y, 0, h - 1)

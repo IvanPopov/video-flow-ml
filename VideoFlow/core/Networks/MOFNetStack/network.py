@@ -10,10 +10,7 @@ from .gma import Attention, Aggregate
 
 from torchvision.utils import save_image
 
-try:
-    from torch.amp import autocast
-except ImportError:
-    from torch.cuda.amp import autocast
+autocast = torch.cuda.amp.autocast
 
 class MOFNet(nn.Module):
     def __init__(self, cfg):
@@ -149,7 +146,7 @@ class MOFNet(nn.Module):
         hdim = self.hidden_dim
         cdim = self.context_dim
 
-        with autocast('cuda' if images.is_cuda else 'cpu', enabled=self.cfg.mixed_precision):
+        with autocast(enabled=self.cfg.mixed_precision):
             fmaps = self.fnet(images.reshape(B*N, 3, H, W)).reshape(B, N, -1, H//down_ratio, W//down_ratio)
         fmaps = fmaps.float()
 
@@ -160,7 +157,7 @@ class MOFNet(nn.Module):
         forward_corr_fn = corr_fn(fmaps[:, 1:N-1, ...].reshape(B*(N-2), -1, H//down_ratio, W//down_ratio), fmaps[:, 2:N, ...].reshape(B*(N-2), -1, H//down_ratio, W//down_ratio), num_levels=self.cfg.corr_levels, radius=self.cfg.corr_radius)
         backward_corr_fn = corr_fn(fmaps[:, 1:N-1, ...].reshape(B*(N-2), -1, H//down_ratio, W//down_ratio), fmaps[:, 0:N-2, ...].reshape(B*(N-2), -1, H//down_ratio, W//down_ratio), num_levels=self.cfg.corr_levels, radius=self.cfg.corr_radius)
 
-        with autocast('cuda' if images.is_cuda else 'cpu', enabled=self.cfg.mixed_precision):
+        with autocast(enabled=self.cfg.mixed_precision):
             cnet = self.cnet(images[:, 1:N-1, ...].reshape(B*(N-2), 3, H, W))
             if self.cfg.context_3D:
                 #print("!@!@@#!@#!@")
@@ -191,7 +188,7 @@ class MOFNet(nn.Module):
             forward_flow = forward_coords1 - forward_coords0
             backward_flow = backward_coords1 - backward_coords0
             
-            with autocast('cuda' if net.is_cuda else 'cpu', enabled=self.cfg.mixed_precision):
+            with autocast(enabled=self.cfg.mixed_precision):
                 net, motion_hidden_state, up_mask, delta_flow = self.update_block(net, motion_hidden_state, inp, forward_corr, backward_corr, forward_flow, backward_flow, forward_coords0, attention, bs=B)
 
             forward_up_mask, backward_up_mask = torch.split(up_mask, [down_ratio**2*9, down_ratio**2*9], dim=1)
