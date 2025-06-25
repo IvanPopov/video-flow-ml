@@ -25,7 +25,7 @@ from utils.utils import InputPadder
 from configs.multiframes_sintel_submission import get_cfg
 
 class VideoFlowProcessor:
-    def __init__(self, device='auto', fast_mode=False, tile_mode=False, sequence_length=5):
+    def __init__(self, device='auto', fast_mode=False, tile_mode=False, sequence_length=5, flow_smoothing=0.0):
         """Initialize VideoFlow processor with pure VideoFlow implementation"""
         if device == 'auto':
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -38,9 +38,11 @@ class VideoFlowProcessor:
         self.fast_mode = fast_mode
         self.tile_mode = tile_mode
         self.sequence_length = sequence_length
+        self.flow_smoothing = flow_smoothing
         self.model = None
         self.input_padder = None
         self.cfg = None
+        self.previous_smoothed_flow = None  # For temporal flow smoothing
         
         print(f"VideoFlow Processor initialized - Device: {self.device}")
         print(f"CUDA available: {torch.cuda.is_available()}")
@@ -50,6 +52,8 @@ class VideoFlowProcessor:
         print(f"Fast mode: {fast_mode}")
         print(f"Tile mode: {tile_mode}")
         print(f"Sequence length: {sequence_length} frames")
+        if flow_smoothing > 0:
+            print(f"Flow smoothing: {flow_smoothing:.2f} (color-consistency stabilization enabled)")
         
     def load_videoflow_model(self):
         """Load VideoFlow MOF model"""
@@ -375,6 +379,141 @@ class VideoFlowProcessor:
             flow_np = flow_tensor.permute(1, 2, 0).cpu().numpy()
             
         return flow_np
+    
+    def stabilize_optical_flow(self, current_flow, current_frame, previous_frame):
+        """
+        Apply color-consistency based stabilization to optical flow
+        
+        This method stabilizes flow vectors by testing multiple candidates and selecting
+        the one that best preserves color when used for reprojection (TAA-style validation).
+        
+        Args:
+            current_flow: Current frame's optical flow (HWC numpy array)
+            current_frame: Current frame (HWC RGB, 0-255)
+            previous_frame: Previous frame (HWC RGB, 0-255)
+            
+        Returns:
+            Stabilized optical flow
+        """
+        if self.flow_smoothing <= 0.0:
+            # No stabilization - return original flow
+            return current_flow
+            
+        if self.previous_smoothed_flow is None:
+            # First frame - initialize with current flow
+            self.previous_smoothed_flow = current_flow.copy()
+            return current_flow
+        
+        h, w = current_flow.shape[:2]
+        stabilized_flow = current_flow.copy()
+        
+        # Convert frames to float for processing
+        current_float = current_frame.astype(np.float32)
+        previous_float = previous_frame.astype(np.float32)
+        
+        # Create coordinate grids
+        y_coords, x_coords = np.mgrid[0:h, 0:w]
+        
+        # Generate flow candidates for testing
+        candidates = []
+        weights = []
+        
+        # Candidate 1: Current raw flow
+        candidates.append(current_flow)
+        weights.append(0.4)
+        
+        # Candidate 2: Previous smoothed flow (temporal consistency)
+        candidates.append(self.previous_smoothed_flow)
+        weights.append(0.3)
+        
+        # Candidate 3: Exponentially smoothed flow
+        alpha = 1.0 - self.flow_smoothing
+        smooth_flow = alpha * current_flow + self.flow_smoothing * self.previous_smoothed_flow
+        candidates.append(smooth_flow)
+        weights.append(0.3)
+        
+        # Test each candidate and compute color consistency score
+        best_flow = current_flow.copy()
+        
+        # Process in blocks to avoid memory issues
+        block_size = 64
+        for by in range(0, h, block_size):
+            for bx in range(0, w, block_size):
+                # Define block boundaries
+                y_end = min(by + block_size, h)
+                x_end = min(bx + block_size, w)
+                
+                block_h = y_end - by
+                block_w = x_end - bx
+                
+                # Extract block data
+                block_current = current_float[by:y_end, bx:x_end]
+                block_y_coords = y_coords[by:y_end, bx:x_end]
+                block_x_coords = x_coords[by:y_end, bx:x_end]
+                
+                best_score = np.full((block_h, block_w), float('inf'))
+                best_block_flow = current_flow[by:y_end, bx:x_end].copy()
+                
+                # Test each candidate flow
+                for candidate_flow, weight in zip(candidates, weights):
+                    block_flow = candidate_flow[by:y_end, bx:x_end]
+                    
+                    # Calculate reprojection coordinates using inverted flow (TAA-style)
+                    # Invert flow to get "where did this pixel come from"
+                    inv_flow = -block_flow
+                    
+                    prev_x = block_x_coords + inv_flow[:, :, 0]
+                    prev_y = block_y_coords + inv_flow[:, :, 1]
+                    
+                    # Clamp coordinates to valid range
+                    prev_x = np.clip(prev_x, 0, w - 1)
+                    prev_y = np.clip(prev_y, 0, h - 1)
+                    
+                    # Bilinear interpolation from previous frame
+                    x0 = np.floor(prev_x).astype(int)
+                    x1 = np.minimum(x0 + 1, w - 1)
+                    y0 = np.floor(prev_y).astype(int)
+                    y1 = np.minimum(y0 + 1, h - 1)
+                    
+                    # Interpolation weights
+                    wx = prev_x - x0
+                    wy = prev_y - y0
+                    
+                    # Sample previous frame with bilinear interpolation
+                    reprojected = np.zeros_like(block_current)
+                    
+                    for c in range(3):  # RGB channels
+                        reprojected[:, :, c] = (
+                            previous_float[y0, x0, c] * (1 - wx) * (1 - wy) +
+                            previous_float[y0, x1, c] * wx * (1 - wy) +
+                            previous_float[y1, x0, c] * (1 - wx) * wy +
+                            previous_float[y1, x1, c] * wx * wy
+                        )
+                    
+                    # Calculate color consistency score (lower is better)
+                    color_diff = np.mean((block_current - reprojected) ** 2, axis=2)
+                    
+                    # Apply weight to the score
+                    weighted_score = color_diff / weight
+                    
+                    # Update best flow where this candidate is better
+                    better_mask = weighted_score < best_score
+                    best_score[better_mask] = weighted_score[better_mask]
+                    best_block_flow[better_mask] = block_flow[better_mask]
+                
+                # Store the best flow for this block
+                best_flow[by:y_end, bx:x_end] = best_block_flow
+        
+        # Apply additional smoothing to reduce remaining jitter
+        # Use bilateral filter to preserve edges while smoothing
+        best_flow_u = cv2.bilateralFilter(best_flow[:,:,0].astype(np.float32), 5, 10.0, 10.0)
+        best_flow_v = cv2.bilateralFilter(best_flow[:,:,1].astype(np.float32), 5, 10.0, 10.0)
+        best_flow = np.stack([best_flow_u, best_flow_v], axis=2)
+        
+        # Update previous smoothed flow for next iteration
+        self.previous_smoothed_flow = best_flow.copy()
+        
+        return best_flow
         
     def encode_hsv_format(self, flow, width, height):
         """
@@ -818,6 +957,13 @@ class VideoFlowProcessor:
             else:
                 flow = self.compute_optical_flow_tiled(frames, i)
             
+            # Apply color-consistency based stabilization if enabled
+            if i > 0:  # Need previous frame for stabilization
+                flow = self.stabilize_optical_flow(flow, frames[i], frames[i-1])
+            elif self.flow_smoothing > 0.0:
+                # First frame - just initialize
+                self.previous_smoothed_flow = flow.copy()
+            
             # Encode optical flow based on selected format
             if flow_format == 'hsv':
                 flow_viz = self.encode_hsv_format(flow, width, height)
@@ -918,6 +1064,8 @@ def main():
                        help='Enable tile-based processing: split frames into 1280x1280 square tiles (optimal for VideoFlow MOF model)')
     parser.add_argument('--sequence-length', type=int, default=5,
                        help='Number of frames to use in sequence for VideoFlow processing (default: 5, recommended: 5-9)')
+    parser.add_argument('--flow-smoothing', type=float, default=0.0,
+                       help='Color-consistency flow stabilization (0.0=disabled, 0.1-0.3=light, 0.4-0.7=medium, 0.8+=strong)')
     parser.add_argument('--show-tiles', action='store_true',
                        help='Only show tile grid calculation without processing video')
     
@@ -985,7 +1133,8 @@ def main():
             print(f"\nProcessed resolution: {width}x{height} (no scaling)")
         
         # Create temporary processor just for tile calculation
-        temp_processor = VideoFlowProcessor(device='cpu', fast_mode=False, tile_mode=True, sequence_length=args.sequence_length)
+        temp_processor = VideoFlowProcessor(device='cpu', fast_mode=False, tile_mode=True, 
+                                          sequence_length=args.sequence_length, flow_smoothing=0.0)
         
         print(f"\nTile grid analysis:")
         tile_width, tile_height, cols, rows, tiles_info = temp_processor.calculate_tile_grid(width, height)
@@ -1001,7 +1150,8 @@ def main():
         print(f"  Total tiles: {len(tiles_info)}")
         return
     
-    processor = VideoFlowProcessor(device=args.device, fast_mode=args.fast, tile_mode=args.tile, sequence_length=args.sequence_length)
+    processor = VideoFlowProcessor(device=args.device, fast_mode=args.fast, tile_mode=args.tile, 
+                                  sequence_length=args.sequence_length, flow_smoothing=args.flow_smoothing)
     
     try:
         # Create output filename with frame/time range if not specified

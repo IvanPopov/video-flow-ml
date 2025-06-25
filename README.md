@@ -98,6 +98,9 @@ python flow_processor.py --input video.mp4 --output result.mp4 --vertical
 
 # Use more frames for better accuracy (recommended for complex scenes)
 python flow_processor.py --input video.mp4 --output result.mp4 --sequence-length 7
+
+# Enable color-consistency flow stabilization (reduces jitter, optimized for TAA)
+python flow_processor.py --input video.mp4 --output result.mp4 --flow-smoothing 0.3
 ```
 
 ### Parameters
@@ -109,6 +112,7 @@ python flow_processor.py --input video.mp4 --output result.mp4 --sequence-length
 - `--fast`: Enable fast mode (lower quality, faster processing)
 - `--tile`: Enable tile-based processing for better quality
 - `--sequence-length`: Number of frames in sequence (default: 5, recommended: 5-9)
+- `--flow-smoothing`: Color-consistency stabilization (0.0=off, 0.1-0.3=light, 0.4-0.7=medium, 0.8+=strong)
 - `--flow-only`: Output only optical flow visualization
 - `--vertical`: Stack videos vertically instead of horizontally
 
@@ -120,6 +124,14 @@ The implementation uses VideoFlow MOF model which:
 - Analyzes configurable sequences of frames (default: 5, supports 3-9+)
 - Generates dense, high-quality optical flow
 - Supports multiple pre-trained models (Sintel, KITTI)
+
+### Color-Consistency Flow Stabilization
+
+The processor includes advanced stabilization to reduce vector jitter while preserving accuracy:
+- **Color validation**: Tests flow candidates by reprojecting colors from previous frame
+- **Multi-candidate selection**: Chooses between raw flow, smoothed flow, and temporal consistency
+- **TAA-optimized**: Ensures flow vectors work well for Temporal Anti-Aliasing
+- **Edge-preserving**: Uses bilateral filtering to maintain motion boundaries
 
 ### Gamedev Encoding
 
