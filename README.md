@@ -101,6 +101,21 @@ python flow_processor.py --input video.mp4 --output result.mp4 --sequence-length
 
 # Enable color-consistency flow stabilization (reduces jitter, optimized for TAA)
 python flow_processor.py --input video.mp4 --output result.mp4 --flow-smoothing 0.3
+
+# Save raw optical flow data for further processing
+python flow_processor.py --input video.mp4 --output result.mp4 --save-flow flo
+python flow_processor.py --input video.mp4 --output result.mp4 --save-flow npz
+python flow_processor.py --input video.mp4 --output result.mp4 --save-flow both
+
+# Optical flow caching (automatic - speeds up repeated processing)
+python flow_processor.py --input video.mp4 --output result1.mp4 --flow-format gamedev
+python flow_processor.py --input video.mp4 --output result2.mp4 --flow-format hsv  # Uses cached flow
+
+# Force recompute flow cache
+python flow_processor.py --input video.mp4 --output result.mp4 --force-recompute
+
+# Use specific flow cache directory
+python flow_processor.py --input video.mp4 --output result.mp4 --use-flow-cache /path/to/cache
 ```
 
 ### Parameters
@@ -113,6 +128,12 @@ python flow_processor.py --input video.mp4 --output result.mp4 --flow-smoothing 
 - `--tile`: Enable tile-based processing for better quality
 - `--sequence-length`: Number of frames in sequence (default: 5, recommended: 5-9)
 - `--flow-smoothing`: Color-consistency stabilization (0.0=off, 0.1-0.3=light, 0.4-0.7=medium, 0.8+=strong)
+- `--save-flow`: Save raw optical flow data without compression loss
+  - `flo`: Middlebury .flo format (standard, widely supported)
+  - `npz`: NumPy .npz format (compressed, includes metadata)
+  - `both`: Save in both formats
+- `--force-recompute`: Force recomputation of optical flow even if cached data exists
+- `--use-flow-cache PATH`: Use optical flow from specific cache directory instead of computing
 - `--flow-only`: Output only optical flow visualization
 - `--vertical`: Stack videos vertically instead of horizontally
 
@@ -132,6 +153,84 @@ The processor includes advanced stabilization to reduce vector jitter while pres
 - **Multi-candidate selection**: Chooses between raw flow, smoothed flow, and temporal consistency
 - **TAA-optimized**: Ensures flow vectors work well for Temporal Anti-Aliasing
 - **Edge-preserving**: Uses bilateral filtering to maintain motion boundaries
+
+### Automatic Flow Caching
+
+The processor automatically caches computed optical flow to speed up repeated processing:
+
+- **Cache Location**: Next to input video file
+- **Cache Naming**: Includes parameters that affect raw optical flow computation
+- **Smart Reuse**: Automatically detects and reuses compatible cached flow data
+- **Parameter Sensitivity**: Only parameters affecting raw flow create separate caches
+
+#### Cache Directory Structure
+```
+video_flow_cache_seq5_start0_frames100_tile/
+├── flow_frame_000000.npz    # Frame 0 raw optical flow (before stabilization)
+├── flow_frame_000001.npz    # Frame 1 raw optical flow
+└── ...                      # Additional frames
+```
+
+#### Cache Behavior
+- **First Run**: Computes and caches raw optical flow (before stabilization)
+- **Subsequent Runs**: Automatically uses cached data if core parameters match
+- **Core Parameters**: sequence-length, start-frame, frames, fast, tile (affect raw flow computation)
+- **Non-Cache Parameters**: flow-smoothing, flow-format, taa, vertical (applied after loading cache)
+- **Force Recompute**: `--force-recompute` flag bypasses cache
+
+#### Parameters Affecting Cache
+**Create separate caches:**
+- `--sequence-length`: Different sequence lengths produce different flow
+- `--start-frame` / `--frames`: Different frame ranges
+- `--fast`: Changes resolution and model parameters
+- `--tile`: Changes processing method
+
+**Reuse same cache:**
+- `--flow-smoothing`: Applied after loading raw flow from cache
+- `--flow-format`: Only affects visualization encoding
+- `--taa` / `--vertical`: Only affects output layout
+
+### Raw Flow Data Saving
+
+The processor can save uncompressed optical flow data for maximum precision:
+
+#### .flo Format (Middlebury)
+- **Standard**: Widely supported by optical flow tools
+- **Lossless**: Full float32 precision maintained
+- **Structure**: Header (magic + dimensions) + raw flow data
+- **Usage**: Research, benchmarking, tool interoperability
+
+#### .npz Format (NumPy)
+- **Compressed**: Uses NumPy's compression for smaller files
+- **Metadata**: Includes frame index, shape, data type information
+- **Flexible**: Easy to load and process in Python
+- **Usage**: Data analysis, custom processing pipelines
+
+```python
+# Loading saved flow data
+processor = VideoFlowProcessor()
+
+# Load .flo file
+flow_data = processor.load_flow_flo('flow_frame_000001.flo')
+
+# Load .npz file with metadata
+npz_data = processor.load_flow_npz('flow_frame_000001.npz')
+flow_data = npz_data['flow']
+frame_idx = npz_data['frame_idx']
+```
+
+#### Example Usage
+
+```bash
+# First run - computes and caches optical flow
+python flow_processor.py --input video.mp4 --output gamedev.mp4 --flow-format gamedev
+
+# Second run - uses cached flow (much faster)
+python flow_processor.py --input video.mp4 --output hsv.mp4 --flow-format hsv
+
+# Save additional flow data while using cache
+python flow_processor.py --input video.mp4 --output result.mp4 --save-flow flo
+```
 
 ### Gamedev Encoding
 
@@ -163,7 +262,30 @@ rgb_image[:, :, 2] = 0.0                    # B: unused
 ## Supported Formats
 
 - **Input**: MP4, MOV, AVI and other video formats
-- **Output**: MP4
+- **Output**: 
+  - **Video**: MP4 format
+  - **Flow data**: .flo (Middlebury), .npz (NumPy compressed)
+
+### Output Structure
+
+The processor creates automatic caches and optional explicit flow saves:
+
+```
+video_directory/
+├── video.mp4                                    # Original video
+├── video_flow_cache_seq5_start0_frames100/      # Automatic cache (sequence=5)
+│   ├── flow_frame_000000.npz                   # Cached flow data
+│   └── ...
+├── video_flow_cache_seq7_start0_frames100/      # Different cache (sequence=7)
+│   ├── flow_frame_000000.npz
+│   └── ...
+└── results/
+    ├── videoflow_result.mp4                     # Processed video
+    └── videoflow_result_flow/                   # Explicit flow save (--save-flow)
+        ├── flow_frame_000000.flo                # Frame 0 flow (if --save-flow flo)
+        ├── flow_frame_000000.npz                # Frame 0 flow (if --save-flow npz)
+        └── ...
+```
 
 ## Output Examples
 

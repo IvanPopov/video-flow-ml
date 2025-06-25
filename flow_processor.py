@@ -515,6 +515,231 @@ class VideoFlowProcessor:
         
         return best_flow
         
+    def save_flow_flo(self, flow, filename):
+        """
+        Save optical flow in Middlebury .flo format (lossless)
+        
+        Args:
+            flow: Raw optical flow data [H, W, 2]
+            filename: Output filename with .flo extension
+        """
+        # Convert to numpy if tensor
+        if torch.is_tensor(flow):
+            flow = flow.cpu().numpy()
+        
+        height, width = flow.shape[:2]
+        
+        with open(filename, 'wb') as f:
+            # Write magic number
+            f.write(b'PIEH')
+            
+            # Write dimensions
+            import struct
+            f.write(struct.pack('<I', width))
+            f.write(struct.pack('<I', height))
+            
+            # Write flow data as float32
+            flow_data = flow.astype(np.float32)
+            f.write(flow_data.tobytes())
+    
+    def save_flow_npz(self, flow, filename, frame_idx=None, metadata=None):
+        """
+        Save optical flow in NumPy .npz format (lossless, compressed)
+        
+        Args:
+            flow: Raw optical flow data [H, W, 2]
+            filename: Output filename with .npz extension
+            frame_idx: Frame index for metadata
+            metadata: Additional metadata dictionary
+        """
+        # Convert to numpy if tensor
+        if torch.is_tensor(flow):
+            flow = flow.cpu().numpy()
+        
+        # Prepare save data
+        save_data = {'flow': flow.astype(np.float32)}
+        
+        if frame_idx is not None:
+            save_data['frame_idx'] = frame_idx
+            
+        if metadata is not None:
+            save_data.update(metadata)
+            
+        # Save with compression
+        np.savez_compressed(filename, **save_data)
+    
+    def save_optical_flow_files(self, flow, base_filename, frame_idx, save_format):
+        """
+        Save optical flow in specified format(s)
+        
+        Args:
+            flow: Raw optical flow data [H, W, 2]
+            base_filename: Base filename without extension
+            frame_idx: Current frame index
+            save_format: Format to save ('flo', 'npz', or 'both')
+        """
+        if save_format in ['flo', 'both']:
+            flo_filename = f"{base_filename}_frame_{frame_idx:06d}.flo"
+            self.save_flow_flo(flow, flo_filename)
+            
+        if save_format in ['npz', 'both']:
+            npz_filename = f"{base_filename}_frame_{frame_idx:06d}.npz"
+            metadata = {
+                'frame_idx': frame_idx,
+                'shape': flow.shape,
+                'dtype': str(flow.dtype)
+            }
+            self.save_flow_npz(flow, npz_filename, frame_idx, metadata)
+    
+    def load_flow_flo(self, filename):
+        """
+        Load optical flow from Middlebury .flo format
+        
+        Args:
+            filename: Input .flo filename
+            
+        Returns:
+            Optical flow data [H, W, 2] as numpy array
+        """
+        with open(filename, 'rb') as f:
+            # Read magic number
+            magic = f.read(4)
+            if magic != b'PIEH':
+                raise ValueError(f"Invalid .flo file magic number: {magic}")
+            
+            # Read dimensions
+            import struct
+            width = struct.unpack('<I', f.read(4))[0]
+            height = struct.unpack('<I', f.read(4))[0]
+            
+            # Read flow data
+            flow_data = f.read(width * height * 2 * 4)  # 2 channels, 4 bytes per float32
+            flow = np.frombuffer(flow_data, dtype=np.float32)
+            flow = flow.reshape(height, width, 2)
+            
+        return flow
+    
+    def load_flow_npz(self, filename):
+        """
+        Load optical flow from NumPy .npz format
+        
+        Args:
+            filename: Input .npz filename
+            
+        Returns:
+            Dictionary with 'flow' and metadata
+        """
+        data = np.load(filename)
+        return dict(data)
+    
+    def generate_flow_cache_path(self, input_path, start_frame, max_frames, sequence_length, fast_mode, tile_mode):
+        """
+        Generate cache directory path based on video processing parameters that affect raw optical flow computation
+        
+        Args:
+            input_path: Input video path
+            start_frame: Starting frame
+            max_frames: Number of frames to process
+            sequence_length: VideoFlow sequence length
+            fast_mode: Fast mode flag
+            tile_mode: Tile mode flag
+            
+        Returns:
+            Cache directory path
+        """
+        # Create cache identifier based on processing parameters that affect raw flow computation
+        # NOTE: flow_smoothing is NOT included because cache stores raw flow before stabilization
+        video_name = Path(input_path).stem
+        cache_params = [
+            f"seq{sequence_length}",
+            f"start{start_frame}",
+            f"frames{max_frames}"
+        ]
+        
+        if fast_mode:
+            cache_params.append("fast")
+        if tile_mode:
+            cache_params.append("tile")
+            
+        cache_id = "_".join(cache_params)
+        cache_dir_name = f"{video_name}_flow_cache_{cache_id}"
+        
+        # Place cache next to input video
+        cache_path = Path(input_path).parent / cache_dir_name
+        return str(cache_path)
+    
+    def check_flow_cache_exists(self, cache_dir, max_frames):
+        """
+        Check if complete flow cache exists for the requested number of frames
+        
+        Args:
+            cache_dir: Cache directory path
+            max_frames: Expected number of frames
+            
+        Returns:
+            (exists, format) where format is 'flo', 'npz', or None
+        """
+        if not os.path.exists(cache_dir):
+            return False, None
+            
+        # Check for .flo files
+        flo_files = []
+        npz_files = []
+        
+        for i in range(max_frames):
+            flo_file = os.path.join(cache_dir, f"flow_frame_{i:06d}.flo")
+            npz_file = os.path.join(cache_dir, f"flow_frame_{i:06d}.npz")
+            
+            if os.path.exists(flo_file):
+                flo_files.append(flo_file)
+            if os.path.exists(npz_file):
+                npz_files.append(npz_file)
+        
+        # Determine which format is complete
+        if len(flo_files) == max_frames:
+            return True, 'flo'
+        elif len(npz_files) == max_frames:
+            return True, 'npz'
+        else:
+            return False, None
+    
+    def load_cached_flow(self, cache_dir, frame_idx, format_type='auto'):
+        """
+        Load cached optical flow for specific frame
+        
+        Args:
+            cache_dir: Cache directory path
+            frame_idx: Frame index to load
+            format_type: 'flo', 'npz', or 'auto'
+            
+        Returns:
+            Optical flow data [H, W, 2]
+        """
+        if format_type == 'auto':
+            # Try .flo first, then .npz
+            flo_file = os.path.join(cache_dir, f"flow_frame_{frame_idx:06d}.flo")
+            npz_file = os.path.join(cache_dir, f"flow_frame_{frame_idx:06d}.npz")
+            
+            if os.path.exists(flo_file):
+                return self.load_flow_flo(flo_file)
+            elif os.path.exists(npz_file):
+                npz_data = self.load_flow_npz(npz_file)
+                return npz_data['flow']
+            else:
+                raise FileNotFoundError(f"No cached flow found for frame {frame_idx}")
+        
+        elif format_type == 'flo':
+            flo_file = os.path.join(cache_dir, f"flow_frame_{frame_idx:06d}.flo")
+            return self.load_flow_flo(flo_file)
+            
+        elif format_type == 'npz':
+            npz_file = os.path.join(cache_dir, f"flow_frame_{frame_idx:06d}.npz")
+            npz_data = self.load_flow_npz(npz_file)
+            return npz_data['flow']
+        
+        else:
+            raise ValueError(f"Unknown format type: {format_type}")
+
     def encode_hsv_format(self, flow, width, height):
         """
         Encode optical flow in HSV format (standard visualization):
@@ -857,7 +1082,8 @@ class VideoFlowProcessor:
         return os.path.join(results_dir, filename)
     
     def process_video(self, input_path, output_path, max_frames=1000, start_frame=0, 
-                     start_time=None, duration=None, vertical=False, flow_only=False, taa=False, flow_format='gamedev'):
+                     start_time=None, duration=None, vertical=False, flow_only=False, taa=False, flow_format='gamedev', 
+                     save_flow=None, force_recompute=False, use_flow_cache=None):
         """Main processing function"""
         import os
         
@@ -885,11 +1111,69 @@ class VideoFlowProcessor:
         print(f"Processing: {input_path} -> {output_path}")
         print(f"Frame range: {start_frame} to {start_frame + max_frames - 1}")
         
-        # Load VideoFlow model
-        self.load_videoflow_model()
-        
-        # Extract frames
+        # Extract frames first
         frames, fps, width, height, actual_start = self.extract_frames(input_path, max_frames=max_frames, start_frame=start_frame)
+        
+        # Setup flow caching
+        flow_cache_dir = None
+        use_cached_flow = False
+        cached_flow_format = None
+        cache_save_format = 'npz'  # Default cache format
+        
+        if use_flow_cache is not None:
+            # Use specific cache directory
+            flow_cache_dir = use_flow_cache
+            if os.path.exists(flow_cache_dir):
+                cache_exists, cached_flow_format = self.check_flow_cache_exists(flow_cache_dir, len(frames))
+                if cache_exists:
+                    use_cached_flow = True
+                    print(f"Using optical flow cache from: {flow_cache_dir} (format: {cached_flow_format})")
+                else:
+                    print(f"Warning: Specified cache directory incomplete or missing: {flow_cache_dir}")
+            else:
+                print(f"Warning: Specified cache directory not found: {flow_cache_dir}")
+        else:
+            # Generate automatic cache directory
+            flow_cache_dir = self.generate_flow_cache_path(
+                input_path, start_frame, len(frames), self.sequence_length, 
+                self.fast_mode, self.tile_mode
+            )
+            
+            if not force_recompute:
+                cache_exists, cached_flow_format = self.check_flow_cache_exists(flow_cache_dir, len(frames))
+                if cache_exists:
+                    use_cached_flow = True
+                    print(f"Found existing optical flow cache: {flow_cache_dir} (format: {cached_flow_format})")
+                else:
+                    print(f"No existing cache found, will compute and save to: {flow_cache_dir}")
+            else:
+                print(f"Force recompute enabled, will overwrite cache: {flow_cache_dir}")
+        
+        # Load VideoFlow model only if we need to compute flow
+        if not use_cached_flow:
+            self.load_videoflow_model()
+        
+        # Setup flow saving directory if requested or if we need to cache
+        flow_base_filename = None
+        if save_flow is not None or (not use_cached_flow):
+            # Determine where to save flow data
+            if save_flow is not None:
+                # Create flow directory next to output video
+                output_dir = os.path.dirname(output_path)
+                output_name = os.path.splitext(os.path.basename(output_path))[0]
+                flow_dir = os.path.join(output_dir, f"{output_name}_flow")
+                os.makedirs(flow_dir, exist_ok=True)
+                flow_base_filename = os.path.join(flow_dir, "flow")
+                print(f"Saving optical flow to: {flow_dir}")
+            
+            # Also save to cache if we're computing
+            if not use_cached_flow:
+                os.makedirs(flow_cache_dir, exist_ok=True)
+                # If no explicit save format, default to npz for cache
+                if save_flow is not None:
+                    cache_save_format = save_flow
+                else:
+                    cache_save_format = 'npz'
         
         # Setup output video using processed frame dimensions
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -949,20 +1233,38 @@ class VideoFlowProcessor:
         for i in range(len(frames)):
             start_time = time.time()
             
-            # Compute optical flow using VideoFlow (with tiling if enabled)
-            if self.tile_mode:
-                # Reset overall tile progress for each frame
-                overall_tile_pbar.reset()
-                flow = self.compute_optical_flow_tiled(frames, i, tile_pbar, overall_tile_pbar)
+            # Get optical flow (from cache or compute)
+            if use_cached_flow:
+                # Load from cache (raw flow before stabilization)
+                raw_flow = self.load_cached_flow(flow_cache_dir, i, cached_flow_format)
             else:
-                flow = self.compute_optical_flow_tiled(frames, i)
+                # Compute optical flow using VideoFlow (with tiling if enabled)
+                if self.tile_mode:
+                    # Reset overall tile progress for each frame
+                    overall_tile_pbar.reset()
+                    raw_flow = self.compute_optical_flow_tiled(frames, i, tile_pbar, overall_tile_pbar)
+                else:
+                    raw_flow = self.compute_optical_flow_tiled(frames, i)
+                
+                # Save raw flow to cache BEFORE stabilization
+                cache_base_filename = os.path.join(flow_cache_dir, "flow")
+                self.save_optical_flow_files(raw_flow, cache_base_filename, i, cache_save_format)
+            
+            # Save raw optical flow if explicitly requested (before stabilization)
+            if save_flow is not None and flow_base_filename is not None:
+                self.save_optical_flow_files(raw_flow, flow_base_filename, i, save_flow)
             
             # Apply color-consistency based stabilization if enabled
-            if i > 0:  # Need previous frame for stabilization
-                flow = self.stabilize_optical_flow(flow, frames[i], frames[i-1])
-            elif self.flow_smoothing > 0.0:
-                # First frame - just initialize
-                self.previous_smoothed_flow = flow.copy()
+            if self.flow_smoothing > 0.0:
+                if i > 0:  # Need previous frame for stabilization
+                    flow = self.stabilize_optical_flow(raw_flow, frames[i], frames[i-1])
+                else:
+                    # First frame - just initialize and use raw flow
+                    self.previous_smoothed_flow = raw_flow.copy()
+                    flow = raw_flow
+            else:
+                # No stabilization - use raw flow
+                flow = raw_flow
             
             # Encode optical flow based on selected format
             if flow_format == 'hsv':
@@ -1066,6 +1368,12 @@ def main():
                        help='Number of frames to use in sequence for VideoFlow processing (default: 5, recommended: 5-9)')
     parser.add_argument('--flow-smoothing', type=float, default=0.0,
                        help='Color-consistency flow stabilization (0.0=disabled, 0.1-0.3=light, 0.4-0.7=medium, 0.8+=strong)')
+    parser.add_argument('--save-flow', choices=['flo', 'npz', 'both'], default=None,
+                       help='Save raw optical flow data: flo (Middlebury format), npz (NumPy format), both')
+    parser.add_argument('--force-recompute', action='store_true',
+                       help='Force recomputation of optical flow even if cached data exists')
+    parser.add_argument('--use-flow-cache', type=str, default=None,
+                       help='Use optical flow from specific cache directory instead of computing')
     parser.add_argument('--show-tiles', action='store_true',
                        help='Only show tile grid calculation without processing video')
     
@@ -1186,7 +1494,8 @@ def main():
         
         processor.process_video(args.input, args.output, max_frames=args.frames, start_frame=args.start_frame,
                               start_time=args.start_time, duration=args.duration, vertical=args.vertical, 
-                              flow_only=args.flow_only, taa=args.taa, flow_format=args.flow_format)
+                              flow_only=args.flow_only, taa=args.taa, flow_format=args.flow_format, save_flow=args.save_flow,
+                              force_recompute=args.force_recompute, use_flow_cache=args.use_flow_cache)
         print("\n✓ VideoFlow processing completed successfully!")
         
     except Exception as e:
