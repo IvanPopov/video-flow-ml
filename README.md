@@ -95,6 +95,9 @@ python flow_processor.py --input video.mp4 --output result.mp4 --flow-only
 
 # Vertical layout
 python flow_processor.py --input video.mp4 --output result.mp4 --vertical
+
+# Use more frames for better accuracy (recommended for complex scenes)
+python flow_processor.py --input video.mp4 --output result.mp4 --sequence-length 7
 ```
 
 ### Parameters
@@ -105,6 +108,7 @@ python flow_processor.py --input video.mp4 --output result.mp4 --vertical
 - `--frames`: Maximum frames to process (default: 1000)
 - `--fast`: Enable fast mode (lower quality, faster processing)
 - `--tile`: Enable tile-based processing for better quality
+- `--sequence-length`: Number of frames in sequence (default: 5, recommended: 5-9)
 - `--flow-only`: Output only optical flow visualization
 - `--vertical`: Stack videos vertically instead of horizontally
 
@@ -113,7 +117,7 @@ python flow_processor.py --input video.mp4 --output result.mp4 --vertical
 ### VideoFlow Multi-frame Optical Flow (MOF)
 
 The implementation uses VideoFlow MOF model which:
-- Analyzes sequences of 5 frames
+- Analyzes configurable sequences of frames (default: 5, supports 3-9+)
 - Generates dense, high-quality optical flow
 - Supports multiple pre-trained models (Sintel, KITTI)
 

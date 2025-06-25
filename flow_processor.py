@@ -25,7 +25,7 @@ from utils.utils import InputPadder
 from configs.multiframes_sintel_submission import get_cfg
 
 class VideoFlowProcessor:
-    def __init__(self, device='auto', fast_mode=False, tile_mode=False):
+    def __init__(self, device='auto', fast_mode=False, tile_mode=False, sequence_length=5):
         """Initialize VideoFlow processor with pure VideoFlow implementation"""
         if device == 'auto':
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -37,6 +37,7 @@ class VideoFlowProcessor:
             
         self.fast_mode = fast_mode
         self.tile_mode = tile_mode
+        self.sequence_length = sequence_length
         self.model = None
         self.input_padder = None
         self.cfg = None
@@ -48,6 +49,7 @@ class VideoFlowProcessor:
             print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
         print(f"Fast mode: {fast_mode}")
         print(f"Tile mode: {tile_mode}")
+        print(f"Sequence length: {sequence_length} frames")
         
     def load_videoflow_model(self):
         """Load VideoFlow MOF model"""
@@ -273,22 +275,23 @@ class VideoFlowProcessor:
         return full_flow
         
     def prepare_frame_sequence(self, frames, frame_idx):
-        """Prepare 5-frame sequence for VideoFlow MOF model"""
-        # Multi-frame: use 5 consecutive frames centered around current frame
-        start_idx = max(0, frame_idx - 2)
-        end_idx = min(len(frames), frame_idx + 3)
+        """Prepare frame sequence for VideoFlow MOF model"""
+        # Multi-frame: use consecutive frames centered around current frame
+        half_seq = self.sequence_length // 2
+        start_idx = max(0, frame_idx - half_seq)
+        end_idx = min(len(frames), frame_idx + half_seq + 1)
         sequence = frames[start_idx:end_idx]
         
-        # Pad to exactly 5 frames
-        while len(sequence) < 5:
+        # Pad to exactly sequence_length frames
+        while len(sequence) < self.sequence_length:
             if start_idx == 0:
                 sequence.insert(0, sequence[0])
             else:
                 sequence.append(sequence[-1])
         
-        # Ensure exactly 5 frames
-        sequence = sequence[:5]
-        
+        # Ensure exactly sequence_length frames
+        sequence = sequence[:self.sequence_length]
+
         # Convert to tensors (same format as VideoFlow inference.py)
         tensors = []
         for frame in sequence:
@@ -484,13 +487,13 @@ class VideoFlowProcessor:
         
         return flow_image_np
     
-    def apply_taa_effect(self, current_frame, flow=None, previous_taa_frame=None, alpha=0.1, use_flow=True):
+    def apply_taa_effect(self, current_frame, flow_pixels=None, previous_taa_frame=None, alpha=0.1, use_flow=True):
         """
         Apply TAA (Temporal Anti-Aliasing) effect with or without optical flow
         
         Args:
             current_frame: Current frame (RGB, 0-255)
-            flow: Optical flow (HWC, normalized) - only used if use_flow=True
+            flow: Inverted optical flow from previous frame (HWC, normalized) - only used if use_flow=True
             previous_taa_frame: Previous TAA result frame
             alpha: Blending weight (0.0 = full history, 1.0 = no history)
             use_flow: Whether to use optical flow for reprojection
@@ -504,18 +507,13 @@ class VideoFlowProcessor:
         
         current_float = current_frame.astype(np.float32)
         
-        if not use_flow or flow is None:
+        if not use_flow or flow_pixels is None:
             # Simple temporal blending without flow (basic TAA)
             taa_result = alpha * current_float + (1 - alpha) * previous_taa_frame
             return taa_result
         
         # Flow-based TAA (motion-compensated)
         h, w = current_frame.shape[:2]
-        
-        # Convert flow to pixel coordinates
-        flow_pixels = flow.copy()
-        flow_pixels[:, :, 0] *= w  # Horizontal flow in pixels
-        flow_pixels[:, :, 1] *= h  # Vertical flow in pixels
         
         # Create coordinate grids
         y_coords, x_coords = np.mgrid[0:h, 0:w]
@@ -635,7 +633,7 @@ class VideoFlowProcessor:
             taa_simple_bgr = cv2.cvtColor(np.clip(taa_simple_frame, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
             
             # Add TAA text overlays
-            taa_bgr = self.add_text_overlay(taa_bgr, "TAA + Flow", 'top-left')
+            taa_bgr = self.add_text_overlay(taa_bgr, "TAA + Inv.Flow", 'top-left')
             taa_bgr = self.add_text_overlay(taa_bgr, "Alpha: 0.1", 'bottom-left')
             
             taa_simple_bgr = self.add_text_overlay(taa_simple_bgr, "TAA Simple", 'top-left')
@@ -655,7 +653,7 @@ class VideoFlowProcessor:
         elif taa_frame is not None:
             # Single TAA mode (backward compatibility)
             taa_bgr = cv2.cvtColor(np.clip(taa_frame, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
-            taa_bgr = self.add_text_overlay(taa_bgr, "TAA + Flow", 'top-left')
+            taa_bgr = self.add_text_overlay(taa_bgr, "TAA + Inv.Flow", 'top-left')
             taa_bgr = self.add_text_overlay(taa_bgr, "Alpha: 0.1", 'bottom-left')
             
             if vertical:
@@ -779,6 +777,7 @@ class VideoFlowProcessor:
         # TAA state
         previous_taa_frame = None
         previous_taa_simple_frame = None
+        previous_flow = None  # Store previous frame's optical flow for TAA
         
         # Create progress bars for tile mode or single progress bar for normal mode
         if self.tile_mode:
@@ -830,21 +829,27 @@ class VideoFlowProcessor:
             # Apply TAA effects if requested
             taa_frame = None
             taa_simple_frame = None
+
             if taa:
-                # Convert flow back to normalized format for TAA
-                flow_normalized = flow.copy()
-                flow_normalized[:, :, 0] /= width
-                flow_normalized[:, :, 1] /= height
-                
-                # Apply flow-based TAA with alpha=0.1 (90% history, 10% current)
-                taa_result = self.apply_taa_effect(frames[i], flow_normalized, previous_taa_frame, alpha=0.1, use_flow=True)
-                previous_taa_frame = taa_result.copy()
-                taa_frame = taa_result
+                # Use previous frame's flow with inverted direction for TAA
+                if previous_flow is not None:
+                    # Apply flow-based TAA with alpha=0.1 (90% history, 10% current)
+                    taa_result = self.apply_taa_effect(frames[i], previous_flow, previous_taa_frame, alpha=0.1, use_flow=True)
+                    previous_taa_frame = taa_result.copy()
+                    taa_frame = taa_result
+                else:
+                    # First frame or no previous flow - just copy current frame
+                    taa_result = frames[i].astype(np.float32)
+                    previous_taa_frame = taa_result.copy()
+                    taa_frame = taa_result
                 
                 # Apply simple TAA (no flow) with alpha=0.1
                 taa_simple_result = self.apply_taa_effect(frames[i], None, previous_taa_simple_frame, alpha=0.1, use_flow=False)
                 previous_taa_simple_frame = taa_simple_result.copy()
                 taa_simple_frame = taa_simple_result
+                
+            # Store current flow for next frame's TAA
+            previous_flow = flow.copy()
             
             # Create combined frame (side-by-side, top-bottom, flow-only, or with TAA)
             model_name = "MOF_sintel" if hasattr(self, 'model') else "VideoFlow"
@@ -906,11 +911,13 @@ def main():
     parser.add_argument('--flow-only', action='store_true',
                        help='Output only optical flow visualization (no original video)')
     parser.add_argument('--taa', action='store_true',
-                       help='Add TAA (Temporal Anti-Aliasing) effect visualization using optical flow')
+                       help='Add TAA (Temporal Anti-Aliasing) effect visualization using inverted optical flow from previous frame')
     parser.add_argument('--flow-format', choices=['gamedev', 'hsv', 'torchvision'], default='gamedev',
                        help='Optical flow encoding format: gamedev (RG channels), hsv (standard visualization), or torchvision (color wheel)')
     parser.add_argument('--tile', action='store_true',
                        help='Enable tile-based processing: split frames into 1280x1280 square tiles (optimal for VideoFlow MOF model)')
+    parser.add_argument('--sequence-length', type=int, default=5,
+                       help='Number of frames to use in sequence for VideoFlow processing (default: 5, recommended: 5-9)')
     parser.add_argument('--show-tiles', action='store_true',
                        help='Only show tile grid calculation without processing video')
     
@@ -978,7 +985,7 @@ def main():
             print(f"\nProcessed resolution: {width}x{height} (no scaling)")
         
         # Create temporary processor just for tile calculation
-        temp_processor = VideoFlowProcessor(device='cpu', fast_mode=False, tile_mode=True)
+        temp_processor = VideoFlowProcessor(device='cpu', fast_mode=False, tile_mode=True, sequence_length=args.sequence_length)
         
         print(f"\nTile grid analysis:")
         tile_width, tile_height, cols, rows, tiles_info = temp_processor.calculate_tile_grid(width, height)
@@ -994,7 +1001,7 @@ def main():
         print(f"  Total tiles: {len(tiles_info)}")
         return
     
-    processor = VideoFlowProcessor(device=args.device, fast_mode=args.fast, tile_mode=args.tile)
+    processor = VideoFlowProcessor(device=args.device, fast_mode=args.fast, tile_mode=args.tile, sequence_length=args.sequence_length)
     
     try:
         # Create output filename with frame/time range if not specified
