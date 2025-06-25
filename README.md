@@ -27,7 +27,11 @@ Optical flow is encoded into RG channels:
 
 ### Quick Setup
 
-1. **Download the repository** (VideoFlow source code and trained models are included)
+1. **Clone the repository with submodules:**
+```bash
+git clone --recursive https://github.com/your-repo/video-flow-ml.git
+cd video-flow-ml
+```
 
 2. **Run the setup script:**
 ```bash
@@ -36,6 +40,7 @@ setup.bat
 
 This will:
 - Check for Python and NVIDIA GPU
+- Initialize and update git submodules
 - Create virtual environment
 - Install PyTorch with CUDA support
 - Install all dependencies
@@ -50,15 +55,15 @@ venv_video_flow\Scripts\activate
 
 ```
 video-flow-ml/
-├── VideoFlow/                    # VideoFlow source code (included)
-├── VideoFlow_ckpt/               # Pre-trained models (included)
+├── VideoFlow/                    # VideoFlow source code (git submodule)
+├── VideoFlow_ckpt/               # Pre-trained models
 │   ├── MOF_sintel.pth           # Multi-frame model for Sintel
 │   ├── MOF_kitti.pth            # Multi-frame model for KITTI
 │   └── BOF_sintel.pth           # Bi-directional model
 ├── flow_processor.py            # Main processing script
-├── check_cuda.py                # CUDA verification script
 ├── setup.bat                    # Installation script
 ├── requirements.txt             # Python dependencies
+├── .gitmodules                  # Git submodule configuration
 └── README.md                    # This file
 ```
 
@@ -161,6 +166,12 @@ Run `python check_cuda.py` to verify GPU setup.
 
 ### Memory Issues
 Use `--fast` or `--tile` flags for large videos.
+
+### Updating VideoFlow Submodule
+To update the VideoFlow submodule to the latest version:
+```bash
+git submodule update --remote VideoFlow
+```
 
 ## References
 
