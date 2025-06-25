@@ -180,17 +180,6 @@ class VideoFlowProcessor:
         
         return frames, fps, width, height, start_frame
     
-    def preprocess_frame_for_flow(self, frame):
-        """Preprocess frame to ensure valid values for optical flow computation"""
-        # Convert to float32 for processing
-        frame_float = frame.astype(np.float32)
-        
-        # Handle NaN and inf values
-        frame_float = np.nan_to_num(frame_float, nan=128.0, posinf=255.0, neginf=0.0)
-        
-        # Final clamp and convert back to uint8
-        return np.clip(frame_float, 0, 255).astype(np.uint8)
-    
     def calculate_tile_grid(self, width, height, tile_size=1280):
         """
         Calculate tile grid for fixed square tiles (optimized for VideoFlow MOF model)
@@ -313,17 +302,9 @@ class VideoFlowProcessor:
         
         # Convert to tensors with preprocessing
         tensors = []
-        for frame in sequence:
-            # Preprocess frame to ensure valid values
-            processed_frame = frame # self.preprocess_frame_for_flow(frame)
-            
+        for frame in sequence:           
             # Convert to tensor and normalize to [0,1], then change HWC to CHW
-            tensor = torch.from_numpy(processed_frame.astype(np.float32)).permute(2, 0, 1) / 255.0
-            
-            # Additional tensor validation
-            tensor = torch.nan_to_num(tensor, nan=0.5, posinf=1.0, neginf=0.0)
-            tensor = torch.clamp(tensor, 0.0, 1.0)
-            
+            tensor = torch.from_numpy(frame.astype(np.float32)).permute(2, 0, 1) / 255.0            
             tensors.append(tensor)
         
         # Stack frames and add batch dimension
@@ -410,9 +391,7 @@ class VideoFlowProcessor:
         - Saturation: Flow magnitude (normalized by absolute pixel scale)
         - Value: Constant brightness
         """
-        # Handle NaN and inf values first
-        flow = np.nan_to_num(flow, nan=0.0, posinf=1.0, neginf=-1.0)
-        
+
         # Calculate magnitude and angle
         magnitude = np.sqrt(flow[:, :, 0]**2 + flow[:, :, 1]**2)
         angle = np.arctan2(flow[:, :, 1], flow[:, :, 0])
@@ -446,42 +425,62 @@ class VideoFlowProcessor:
         """
         Encode optical flow in gamedev format with absolute normalization:
         - Absolute scaling independent of frame/tile size
-        - Smooth mapping to prevent saturation
         - Map to [0, 1] range stored in RG channels
         """
-        # Handle NaN and inf values first
-        flow = np.nan_to_num(flow, nan=0.0, posinf=1.0, neginf=-1.0)
-        
+
         # Absolute scaling independent of image dimensions
         # Reference: 20 pixels motion = strong flow (tanh maps to ~0.96)
-        REFERENCE_FLOW_PIXELS = 20.0
+        REFERENCE_FLOW_PIXELS = 5.0
         
-        # Normalize flow by absolute scale
-        norm_flow = flow / REFERENCE_FLOW_PIXELS
-        
-        # Smooth mapping using tanh to prevent harsh cutoffs
-        # This maps infinite range to [-1, 1] smoothly
-        smooth_flow = np.tanh(norm_flow)
-        
-        # Map [-1, 1] to [0, 1] for storage
-        encoded = (smooth_flow + 1) / 2
-        encoded = np.clip(encoded, 0, 1)
+        encoded = (np.clip(flow / REFERENCE_FLOW_PIXELS, -1, 1) * 0.5 + 0.5)**2
         
         # Create RGB image
         h, w = flow.shape[:2]
         rgb = np.zeros((h, w, 3), dtype=np.float32)
         rgb[:, :, 0] = encoded[:, :, 0]  # R channel: horizontal flow
         rgb[:, :, 1] = encoded[:, :, 1]  # G channel: vertical flow
-        
-        # Blue channel shows flow magnitude for reference
-        flow_magnitude = np.sqrt(flow[:, :, 0]**2 + flow[:, :, 1]**2)
-        magnitude_normalized = 1 - np.exp(-flow_magnitude / REFERENCE_FLOW_PIXELS)  # Exponential mapping
-        rgb[:, :, 2] = magnitude_normalized * 0.3  # Subtle blue indicating flow strength
-        
-        # Convert to 8-bit, handle NaN and inf values
+    
+        # Convert to 8-bit
         rgb_8bit = rgb * 255
-        rgb_8bit = np.nan_to_num(rgb_8bit, nan=128.0, posinf=255.0, neginf=0.0)
         return rgb_8bit.astype(np.uint8)
+    
+    def encode_torchvision_format(self, flow, width, height):
+        """
+        Encode optical flow using torchvision.utils.flow_to_image format:
+        - Uses the standard torchvision visualization which creates a color wheel
+        - More accurate color mapping compared to custom HSV implementations
+        - Consistent with PyTorch/torchvision ecosystem
+        """
+        try:
+            from torchvision.utils import flow_to_image
+        except ImportError:
+            print("Warning: torchvision not available, falling back to HSV format")
+            return self.encode_hsv_format(flow, width, height)
+        
+        # Convert numpy flow to torch tensor
+        # torchvision expects flow in CHW format (channels first)
+        flow_tensor = torch.from_numpy(flow).permute(2, 0, 1).float()  # HWC -> CHW
+        
+        # Add batch dimension if needed
+        if flow_tensor.dim() == 3:
+            flow_tensor = flow_tensor.unsqueeze(0)  # Add batch dimension: CHW -> BCHW
+        
+        # Use torchvision's flow_to_image function
+        # This creates a color wheel visualization similar to Middlebury flow dataset
+        with torch.no_grad():
+            flow_image_tensor = flow_to_image(flow_tensor)
+        
+        # Remove batch dimension and convert back to numpy
+        if flow_image_tensor.dim() == 4:
+            flow_image_tensor = flow_image_tensor.squeeze(0)  # Remove batch: BCHW -> CHW
+        
+        # Convert from CHW to HWC and to numpy
+        flow_image_np = flow_image_tensor.permute(1, 2, 0).cpu().numpy()
+        
+        # torchvision returns values in [0, 1] range, convert to [0, 255]
+        flow_image_np = (flow_image_np * 255).astype(np.uint8)
+        
+        return flow_image_np
     
     def apply_taa_effect(self, current_frame, flow=None, previous_taa_frame=None, alpha=0.1, use_flow=True):
         """
@@ -522,11 +521,6 @@ class VideoFlowProcessor:
         # Calculate previous pixel positions using flow
         prev_x = x_coords + flow_pixels[:, :, 0]
         prev_y = y_coords + flow_pixels[:, :, 1]
-        
-        # Handle NaN and inf values
-        prev_x = np.nan_to_num(prev_x, nan=0.0, posinf=w-1, neginf=0.0)
-        prev_y = np.nan_to_num(prev_y, nan=0.0, posinf=h-1, neginf=0.0)
-        
         # Clamp coordinates to valid range
         prev_x = np.clip(prev_x, 0, w - 1)
         prev_y = np.clip(prev_y, 0, h - 1)
@@ -821,6 +815,8 @@ class VideoFlowProcessor:
             # Encode optical flow based on selected format
             if flow_format == 'hsv':
                 flow_viz = self.encode_hsv_format(flow, width, height)
+            elif flow_format == 'torchvision':
+                flow_viz = self.encode_torchvision_format(flow, width, height)
             else:
                 flow_viz = self.encode_gamedev_format(flow, width, height)
             
@@ -904,8 +900,8 @@ def main():
                        help='Output only optical flow visualization (no original video)')
     parser.add_argument('--taa', action='store_true',
                        help='Add TAA (Temporal Anti-Aliasing) effect visualization using optical flow')
-    parser.add_argument('--flow-format', choices=['gamedev', 'hsv'], default='gamedev',
-                       help='Optical flow encoding format: gamedev (RG channels) or hsv (standard visualization)')
+    parser.add_argument('--flow-format', choices=['gamedev', 'hsv', 'torchvision'], default='gamedev',
+                       help='Optical flow encoding format: gamedev (RG channels), hsv (standard visualization), or torchvision (color wheel)')
     parser.add_argument('--tile', action='store_true',
                        help='Enable tile-based processing: split frames into 1280x1280 square tiles (optimal for VideoFlow MOF model)')
     parser.add_argument('--show-tiles', action='store_true',
