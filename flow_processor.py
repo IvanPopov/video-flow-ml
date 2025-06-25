@@ -169,18 +169,6 @@ class VideoFlowProcessor:
         
         return frames, fps, width, height, start_frame
     
-    def preprocess_frame_for_flow(self, frame):
-        """Preprocess frame to ensure valid values for optical flow computation"""
-        # Convert to float32 for processing
-        frame_float = frame.astype(np.float32)
-        
-        # Handle NaN and inf values
-        frame_float = np.nan_to_num(frame_float, nan=128.0, posinf=255.0, neginf=0.0)
-        
-        # Final clamp and convert back to uint8
-        return np.clip(frame_float, 0, 255).astype(np.uint8)
-
-
     def calculate_tile_grid(self, width, height, tile_size=1280):
         """
         Calculate tile grid for fixed square tiles (optimized for VideoFlow MOF model)
@@ -285,7 +273,7 @@ class VideoFlowProcessor:
         return full_flow
         
     def prepare_frame_sequence(self, frames, frame_idx):
-        """Prepare 5-frame sequence for VideoFlow MOF model with preprocessing"""
+        """Prepare 5-frame sequence for VideoFlow MOF model"""
         # Multi-frame: use 5 consecutive frames centered around current frame
         start_idx = max(0, frame_idx - 2)
         end_idx = min(len(frames), frame_idx + 3)
@@ -301,19 +289,11 @@ class VideoFlowProcessor:
         # Ensure exactly 5 frames
         sequence = sequence[:5]
         
-        # Convert to tensors with preprocessing
+        # Convert to tensors (same format as VideoFlow inference.py)
         tensors = []
         for frame in sequence:
-            # Preprocess frame to ensure valid values
-            processed_frame = frame # self.preprocess_frame_for_flow(frame)
-            
             # Convert to tensor and normalize to [0,1], then change HWC to CHW
-            tensor = torch.from_numpy(processed_frame.astype(np.float32)).permute(2, 0, 1) / 255.0
-            
-            # Additional tensor validation
-            tensor = torch.nan_to_num(tensor, nan=0.5, posinf=1.0, neginf=0.0)
-            tensor = torch.clamp(tensor, 0.0, 1.0)
-            
+            tensor = torch.from_numpy(frame.astype(np.float32)).permute(2, 0, 1)
             tensors.append(tensor)
         
         # Stack frames and add batch dimension
@@ -433,34 +413,19 @@ class VideoFlowProcessor:
     
     def encode_gamedev_format(self, flow, width, height):
         """
-        Encode optical flow in gamedev format with enhanced visibility:
+        Encode optical flow in gamedev format:
         - Normalize flow by image dimensions
         - Scale and clamp to [-20, +20] range  
         - Map to [0, 1] where 0 = -20, 1 = +20
         - Store in RG channels (R=horizontal, G=vertical)
         """
-        # Handle NaN and inf values first
-        flow = np.nan_to_num(flow, nan=0.0, posinf=1.0, neginf=-1.0)
-        
         # Normalize flow by image dimensions
         norm_flow = flow.copy()
         norm_flow[:, :, 0] /= width    # Horizontal flow
         norm_flow[:, :, 1] /= height   # Vertical flow
         
-        # Calculate flow magnitude for adaptive scaling
-        flow_magnitude = np.sqrt(norm_flow[:, :, 0]**2 + norm_flow[:, :, 1]**2)
-        max_magnitude = np.max(flow_magnitude)
-        
-        # Adaptive scaling based on flow magnitude
-        if max_magnitude > 0:
-            # Scale to make motion visible, but adapt to actual flow range
-            scale_factor = min(200, 50 / max_magnitude)  # Adaptive scaling
-            norm_flow *= scale_factor
-            # print(f"Flow magnitude: max={max_magnitude:.4f}, scale={scale_factor:.1f}")
-        else:
-            # No motion detected, use default scaling
-            norm_flow *= 200
-            # print("No motion detected, using default scaling")
+        # Scale to make motion visible
+        norm_flow *= 200
         
         # Clamp to [-20, +20] range
         clamped = np.clip(norm_flow, -20, 20)
@@ -475,11 +440,6 @@ class VideoFlowProcessor:
         rgb[:, :, 0] = encoded[:, :, 0]  # R channel: horizontal flow
         rgb[:, :, 1] = encoded[:, :, 1]  # G channel: vertical flow
         rgb[:, :, 2] = 0.0               # B channel: unused
-        
-        # Add some base color if flow is too weak
-        if max_magnitude < 0.001:
-            # Add subtle pattern to show that processing occurred
-            rgb[:, :, 2] = 0.1  # Slight blue tint to indicate processed frame
         
         # Convert to 8-bit, handle NaN and inf values
         rgb_8bit = rgb * 255
