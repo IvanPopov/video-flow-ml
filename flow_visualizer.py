@@ -21,6 +21,8 @@ import glob
 from pathlib import Path
 import threading
 import queue
+from scipy import signal
+from scipy.ndimage import rotate
 
 # Add flow_processor to path for loading flow data
 sys.path.insert(0, os.getcwd())
@@ -65,6 +67,11 @@ class FlowVisualizer:
         
         # UI state
         self.show_quality_map = True  # Whether to show quality map
+        
+        # Detail analysis state
+        self.detail_analysis_mode = False
+        self.detail_analysis_data = None
+        self.detail_analysis_region_size = 25
         
         # Check for LOD data availability
         self.check_lod_availability()
@@ -283,11 +290,226 @@ class FlowVisualizer:
             if 0 <= frame_idx < self.max_pairs:
                 self.request_quality_map(frame_idx)
     
+    def phase_correlation_with_rotation(self, img1, img2):
+        """
+        Compute phase correlation between two images to find translation.
+        Rotation is not calculated and is returned as 0.
+        Returns: (dx, dy, angle, confidence)
+        """
+        # Ensure images are grayscale and float32
+        if len(img1.shape) == 3:
+            img1 = cv2.cvtColor(img1, cv2.COLOR_RGB2GRAY)
+        if len(img2.shape) == 3:
+            img2 = cv2.cvtColor(img2, cv2.COLOR_RGB2GRAY)
+        img1 = img1.astype(np.float32)
+        img2 = img2.astype(np.float32)
+
+        # Use phase correlation to find the translation
+        (dx, dy), confidence = cv2.phaseCorrelate(img1, img2)
+
+        # Angle is not calculated, return 0 as per requirement
+        angle = 0.0
+
+        return dx, dy, angle, confidence
+    
+    def get_highest_available_lod(self, frame_idx):
+        """Get the highest available LOD level for a frame"""
+        for lod_level in range(self.max_lod_levels - 1, -1, -1):
+            lod_data = self.load_lod_data(frame_idx, lod_level)
+            if lod_data is not None:
+                return lod_level, lod_data
+        return None, None
+    
+    def extract_region(self, image, center_x, center_y, radius):
+        """Extract a square region around a center point"""
+        h, w = image.shape[:2]
+        
+        # Calculate bounds
+        x1 = max(0, int(center_x - radius))
+        y1 = max(0, int(center_y - radius))
+        x2 = min(w, int(center_x + radius))
+        y2 = min(h, int(center_y + radius))
+        
+        # Extract region
+        region = image[y1:y2, x1:x2]
+        
+        # Pad if necessary to make square
+        target_size = 2 * radius
+        if region.shape[0] < target_size or region.shape[1] < target_size:
+            pad_h = max(0, target_size - region.shape[0])
+            pad_w = max(0, target_size - region.shape[1])
+            if len(image.shape) == 3:
+                region = np.pad(region, ((0, pad_h), (0, pad_w), (0, 0)), mode='constant')
+            else:
+                region = np.pad(region, ((0, pad_h), (0, pad_w)), mode='constant')
+        
+        return region, (x1, y1, x2, y2)
+    
+    def on_left_click(self, event):
+        """Handle left mouse click for detail analysis"""
+        if self.current_flow is None:
+            return
+            
+        # Check if click is on first frame
+        if (self.frame1_x <= event.x <= self.frame1_x + self.display_width and
+            self.frame1_y <= event.y <= self.frame1_y + self.display_height):
+            
+            # Convert display coordinates to original frame coordinates
+            display_x = event.x - self.frame1_x
+            display_y = event.y - self.frame1_y
+            
+            orig_x = int(display_x / self.display_scale)
+            orig_y = int(display_y / self.display_scale)
+            
+            # Clamp to frame bounds
+            orig_x = max(0, min(orig_x, self.orig_width - 1))
+            orig_y = max(0, min(orig_y, self.orig_height - 1))
+            
+            # Check if this is a different pixel while in detail mode
+            if (self.detail_analysis_mode and 
+                self.detail_analysis_data and
+                (orig_x, orig_y) != self.detail_analysis_data['source_pixel']):
+                
+                if not self.check_exit_detail_mode("Клик на другой пиксель"):
+                    return
+            
+            # Check if this pixel has poor flow quality
+            if self.current_flow is not None:
+                # Get target position using current flow
+                fh, fw = self.current_flow.shape[:2]
+                scale_x = fw / self.orig_width
+                scale_y = fh / self.orig_height
+                
+                flow_x_coord = int(orig_x * scale_x)
+                flow_y_coord = int(orig_y * scale_y)
+                flow_x_coord = max(0, min(flow_x_coord, fw - 1))
+                flow_y_coord = max(0, min(flow_y_coord, fh - 1))
+                
+                flow_x = self.current_flow[flow_y_coord, flow_x_coord, 0] / scale_x
+                flow_y = self.current_flow[flow_y_coord, flow_x_coord, 1] / scale_y
+                
+                target_orig_x = orig_x - flow_x
+                target_orig_y = orig_y - flow_y
+                
+                # Check color quality
+                arrow_color = self.get_arrow_color(orig_x, orig_y, target_orig_x, target_orig_y)
+                
+                if arrow_color == "red":
+                    # Poor quality - start detail analysis, pass original flow vector
+                    self.perform_detail_analysis(orig_x, orig_y, (flow_x, flow_y))
+                else:
+                    messagebox.showinfo("Информация", 
+                        f"Пиксель ({orig_x}, {orig_y}) имеет хорошее качество потока. "
+                        "Детальный анализ выполняется только для пикселей с плохим качеством (красные стрелки).")
+    
+    def perform_detail_analysis(self, orig_x, orig_y, original_flow):
+        """Perform detailed analysis on a pixel with poor flow quality"""
+        print(f"Starting detail analysis at pixel ({orig_x}, {orig_y})")
+        
+        # Get highest available LOD
+        lod_level, lod_flow = self.get_highest_available_lod(self.current_pair)
+        if lod_flow is None:
+            messagebox.showerror("Error", "No LOD data available for detail analysis")
+            return
+        
+        print(f"Using LOD level {lod_level}")
+        
+        # Get LOD flow vector
+        lod_h, lod_w = lod_flow.shape[:2]
+        lod_scale_x = lod_w / self.orig_width
+        lod_scale_y = lod_h / self.orig_height
+        
+        lod_x = int(orig_x * lod_scale_x)
+        lod_y = int(orig_y * lod_scale_y)
+        lod_x = max(0, min(lod_x, lod_w - 1))
+        lod_y = max(0, min(lod_y, lod_h - 1))
+        
+        # Get LOD flow vector and scale back to frame coordinates
+        lod_flow_x = lod_flow[lod_y, lod_x, 0] / lod_scale_x
+        lod_flow_y = lod_flow[lod_y, lod_x, 1] / lod_scale_y
+        
+        print(f"LOD flow vector: ({lod_flow_x:.2f}, {lod_flow_y:.2f})")
+        
+        # Calculate target position using LOD flow
+        lod_target_x = orig_x - lod_flow_x
+        lod_target_y = orig_y - lod_flow_y
+        
+        # Extract regions around source and LOD target
+        region1, bounds1 = self.extract_region(self.frame1, orig_x, orig_y, self.detail_analysis_region_size)
+        region2, bounds2 = self.extract_region(self.frame2, lod_target_x, lod_target_y, self.detail_analysis_region_size)
+        
+        # Perform phase correlation
+        dx, dy, angle, confidence = self.phase_correlation_with_rotation(region1, region2)
+        
+        print(f"Phase correlation result: dx={dx:.2f}, dy={dy:.2f}, angle={angle:.2f}, confidence={confidence:.3f}")
+        
+        # Calculate corrected flow vector
+        corrected_flow_x = lod_flow_x - dx
+        corrected_flow_y = lod_flow_y - dy
+        
+        # Calculate final target position
+        final_target_x = orig_x - corrected_flow_x
+        final_target_y = orig_y - corrected_flow_y
+        
+        print(f"Corrected flow vector: ({corrected_flow_x:.2f}, {corrected_flow_y:.2f})")
+        
+        # Store analysis data
+        self.detail_analysis_data = {
+            'source_pixel': (orig_x, orig_y),
+            'original_flow': original_flow,
+            'lod_flow': (lod_flow_x, lod_flow_y),
+            'lod_target': (lod_target_x, lod_target_y),
+            'corrected_flow': (corrected_flow_x, corrected_flow_y),
+            'final_target': (final_target_x, final_target_y),
+            'region1': region1,
+            'region2': region2,
+            'bounds1': bounds1,
+            'bounds2': bounds2,
+            'phase_shift': (dx, dy),
+            'angle': angle,
+            'confidence': confidence,
+            'lod_level': lod_level
+        }
+        
+        # Enter detail analysis mode
+        self.detail_analysis_mode = True
+        
+        # Show exit button
+        self.exit_detail_btn.pack(side=tk.RIGHT, padx=(10, 0))
+        
+        # Update display
+        self.update_display()
+    
+    def check_exit_detail_mode(self, action_description):
+        """Check if user wants to exit detail analysis mode"""
+        if self.detail_analysis_mode:
+            result = messagebox.askyesno(
+                "Выход из режима анализа",
+                f"{action_description} приведет к сбросу всех дополнительных визуализаций. Продолжить?"
+            )
+            if result:
+                self.exit_detail_analysis_mode()
+                return True
+            else:
+                return False
+        return True
+    
+    def exit_detail_analysis_mode(self):
+        """Exit detail analysis mode and return to normal operation"""
+        self.detail_analysis_mode = False
+        self.detail_analysis_data = None
+        # Hide exit button
+        self.exit_detail_btn.pack_forget()
+        # Clear detail analysis graphics
+        self.canvas.delete("detail_analysis")
+        # Update display
+        self.update_display()
+    
     def setup_ui(self):
         """Setup the GUI"""
         self.root = tk.Tk()
         self.root.title("Interactive Optical Flow Visualizer")
-        self.root.geometry("1200x1400")
+        self.root.geometry("1200x1700")
         
         # Bind window resize event
         self.root.bind('<Configure>', self.on_window_resize)
@@ -320,6 +542,7 @@ class FlowVisualizer:
         # Bind mouse events
         self.canvas.bind('<Motion>', self.on_mouse_move)
         self.canvas.bind('<Leave>', self.on_mouse_leave)
+        self.canvas.bind('<Button-1>', self.on_left_click)  # Left click for detail analysis
         self.canvas.bind('<MouseWheel>', self.on_mouse_wheel)
         self.canvas.bind('<Button-4>', self.on_mouse_wheel)  # Linux scroll up
         self.canvas.bind('<Button-5>', self.on_mouse_wheel)  # Linux scroll down
@@ -374,7 +597,7 @@ class FlowVisualizer:
         reset_pos_btn = ttk.Button(zoom_frame, text="Center", width=8, command=self.reset_position)
         reset_pos_btn.pack(side=tk.LEFT, padx=(10, 10))
         
-        ttk.Label(zoom_frame, text="(Mouse wheel: zoom, Middle button: drag, Double-click: reset)").pack(side=tk.LEFT, padx=(20, 0))
+        ttk.Label(zoom_frame, text="(Mouse wheel: zoom, Middle button: drag, Double-click: reset, Left click on red arrow: detail analysis)").pack(side=tk.LEFT, padx=(20, 0))
         
         # Quality map and vector controls
         vector_frame = ttk.Frame(control_frame)
@@ -425,6 +648,11 @@ class FlowVisualizer:
         
         self.zoom_label = ttk.Label(status_frame, text="Zoom: 100%")
         self.zoom_label.pack(side=tk.RIGHT, padx=(20, 10))
+        
+        # Exit detail analysis button (initially hidden)
+        self.exit_detail_btn = ttk.Button(status_frame, text="Exit Detail Analysis", 
+                                         command=self.exit_detail_analysis_mode)
+        # Don't pack initially - will be shown only in detail mode
         
     def resize_frame_for_display(self, frame):
         """Resize frame to fit display with zoom while maintaining aspect ratio"""
@@ -485,12 +713,9 @@ class FlowVisualizer:
             if self.current_pair in self.quality_maps:
                 quality_frame = self.quality_maps[self.current_pair]
             else:
-                # Request computation in background
                 self.request_quality_map(self.current_pair)
-                # Use black frame as placeholder
                 quality_frame = np.zeros_like(frame1)
         else:
-            # Use black frame when quality map is disabled
             quality_frame = np.zeros_like(frame1)
         
         # Resize frames for display
@@ -571,9 +796,19 @@ class FlowVisualizer:
                                text=f"Pair {self.current_pair}", fill="cyan", font=("Arial", 10, "bold"))
         self.canvas.create_text(x_offset + self.display_width - 5, y2_offset + 5, anchor=tk.NE, 
                                text=f"Next", fill="cyan", font=("Arial", 10, "bold"))
-        quality_text = f"Red=Bad, Green=Good" if self.show_quality_map else "Quality Map Disabled"
+        
+        if self.detail_analysis_mode:
+            quality_text = "Detail Analysis Mode"
+        else:
+            quality_text = f"Red=Bad, Green=Good" if self.show_quality_map else "Quality Map Disabled"
+        
         self.canvas.create_text(x_offset + self.display_width - 5, y3_offset + 5, anchor=tk.NE, 
                                text=quality_text, fill="cyan", font=("Arial", 10, "bold"))
+        
+        # Draw detail analysis overlays if in detail mode
+        if self.detail_analysis_mode:
+            self.draw_detail_analysis_overlays(x_offset, y1_offset, x_offset, y2_offset)
+            self.draw_detail_analysis_view()
         
         # Update labels
         self.frame_label.config(text=f"{self.current_pair}/{self.max_pairs-1}")
@@ -581,6 +816,14 @@ class FlowVisualizer:
         # Update status with current mode info
         if self.current_flow is not None:
             flow_status = f"Flow loaded: {self.current_flow.shape}"
+            
+            # Detail analysis mode status
+            if self.detail_analysis_mode:
+                data = self.detail_analysis_data
+                px, py = data['source_pixel']
+                analysis_status = f"Detail Analysis: Pixel ({px},{py}), LOD{data['lod_level']}, Confidence={data['confidence']:.3f}"
+                self.status_label.config(text=f"{flow_status} | {analysis_status}")
+                return
             
             # Quality map status
             if self.show_quality_map:
@@ -729,7 +972,16 @@ class FlowVisualizer:
     
     def on_slider_change(self, value):
         """Handle slider change"""
-        self.current_pair = int(float(value))
+        new_pair = int(float(value))
+        
+        # Check if we need to exit detail mode
+        if new_pair != self.current_pair:
+            if not self.check_exit_detail_mode("Смена кадра"):
+                # Revert slider to current position
+                self.frame_var.set(self.current_pair)
+                return
+        
+        self.current_pair = new_pair
         
         # Only update display during dragging, no computations
         if self.slider_dragging:
@@ -800,17 +1052,56 @@ class FlowVisualizer:
                 canvas_target_x = self.frame2_x + target_display_x
                 canvas_target_y = self.frame2_y + target_display_y
                 
-                # Check color consistency to determine arrow color
-                arrow_color = self.get_arrow_color(orig_x, orig_y, target_orig_x, target_orig_y)
+                # Check color consistency to determine arrow color and get details
+                arrow_color, src_color, target_color, similarity = self.get_arrow_color_details(orig_x, orig_y, target_orig_x, target_orig_y)
                 
                 # Draw arrow from exact pixel on first frame to corresponding pixel on second frame
                 self.draw_arrow(canvas_source_x, canvas_source_y, canvas_target_x, canvas_target_y, arrow_color)
                 
-                # Update mouse info with color quality
-                color_quality = "Good" if arrow_color == "green" else "Poor"
+                # Update mouse info in status bar (general info)
                 self.mouse_label.config(
-                    text=f"Pixel ({orig_x},{orig_y}) → Flow ({flow_x:.1f},{flow_y:.1f}) → Target ({target_orig_x:.1f},{target_orig_y:.1f}) | Quality: {color_quality}"
+                    text=(f"Pixel ({orig_x},{orig_y}) → Flow ({flow_x:.1f},{flow_y:.1f}) | Similarity: {similarity:.3f}")
                 )
+                
+                # --- Draw detailed color info with squares next to the arrow ---
+                info_box_x = canvas_source_x + 20
+                info_box_y = canvas_source_y
+                square_size = 32
+
+                # Convert RGB to hex for tkinter
+                src_hex_color = f"#{src_color[0]:02x}{src_color[1]:02x}{src_color[2]:02x}"
+                tgt_hex_color = f"#{target_color[0]:02x}{target_color[1]:02x}{target_color[2]:02x}"
+                
+                # Draw source color square
+                self.canvas.create_rectangle(
+                    info_box_x, info_box_y, 
+                    info_box_x + square_size, info_box_y + square_size,
+                    fill=src_hex_color, outline="white", width=1, tags="flow_arrow"
+                )
+
+                # Draw target color square
+                self.canvas.create_rectangle(
+                    info_box_x + square_size + 5, info_box_y, 
+                    info_box_x + square_size * 2 + 5, info_box_y + square_size,
+                    fill=tgt_hex_color, outline="white", width=1, tags="flow_arrow"
+                )
+                
+                # Draw similarity text below the squares
+                text_y = info_box_y + square_size + 5
+                text_x_centered = info_box_x + (square_size * 2 + 5) / 2
+                info_text = f"{similarity:.3f}"
+                
+                # Background for text
+                self.canvas.create_text(text_x_centered + 1, text_y + 1, text=info_text, 
+                                        anchor=tk.N, fill="black", font=("Arial", 10, "bold"), 
+                                        tags="flow_arrow")
+                # Foreground text
+                self.canvas.create_text(text_x_centered, text_y, text=info_text, 
+                                        anchor=tk.N, fill="white", font=("Arial", 10, "bold"), 
+                                        tags="flow_arrow")
+                
+                self.canvas.tag_raise("flow_arrow") # Ensure it's drawn on top
+
             else:
                 self.mouse_label.config(text="")
         else:
@@ -944,24 +1235,31 @@ class FlowVisualizer:
     
     def calculate_pixel_quality(self, src_color, target_color):
         """Calculate quality score for a single pixel pair"""
-        # Calculate color distance using multiple metrics
+        src_f = src_color.astype(float)
+        tgt_f = target_color.astype(float)
+
         # 1. Euclidean distance in RGB space
-        rgb_distance = np.sqrt(np.sum((src_color.astype(float) - target_color.astype(float)) ** 2))
+        rgb_distance = np.sqrt(np.sum((src_f - tgt_f) ** 2))
         rgb_max_distance = np.sqrt(3 * 255**2)  # Maximum possible distance
         rgb_similarity = 1.0 - (rgb_distance / rgb_max_distance)
         
         # 2. Normalized absolute difference
-        abs_diff = np.mean(np.abs(src_color.astype(float) - target_color.astype(float))) / 255.0
+        abs_diff = np.mean(np.abs(src_f - tgt_f)) / 255.0
         abs_similarity = 1.0 - abs_diff
         
         # 3. Cosine similarity (treating colors as vectors)
-        src_norm = np.linalg.norm(src_color.astype(float))
-        target_norm = np.linalg.norm(target_color.astype(float))
-        if src_norm > 0 and target_norm > 0:
-            cosine_sim = np.dot(src_color.astype(float), target_color.astype(float)) / (src_norm * target_norm)
+        src_norm = np.linalg.norm(src_f)
+        target_norm = np.linalg.norm(tgt_f)
+        
+        # Use a small epsilon to avoid division by zero and handle near-black colors robustly
+        if src_norm > 1e-6 and target_norm > 1e-6:
+            cosine_sim = np.dot(src_f, tgt_f) / (src_norm * target_norm)
             cosine_similarity = (cosine_sim + 1.0) / 2.0  # Normalize to [0,1]
         else:
-            cosine_similarity = 1.0 if src_norm == target_norm == 0 else 0.0
+            # If one or both colors are black/near-black, angle is not a good metric.
+            # Instead, base similarity on the difference in their brightness (norms).
+            norm_diff = np.abs(src_norm - target_norm)
+            cosine_similarity = 1.0 - (norm_diff / rgb_max_distance)
         
         # Use the average of all similarity metrics
         overall_similarity = (rgb_similarity + abs_similarity + cosine_similarity) / 3.0
@@ -1034,9 +1332,9 @@ class FlowVisualizer:
             # Good quality pixels - green
             good_indices = np.where(good_mask)[0]
             if len(good_indices) > 0:
-                intensities = (255 * similarities[good_indices]).astype(int)
+                intensities = (255 * (similarities[good_indices] - 0.5) * 2).astype(int) # Scale green intensity
                 quality_frame[valid_y[good_indices], valid_x[good_indices]] = np.column_stack([
-                    np.zeros_like(intensities), intensities, np.zeros_like(intensities)
+                    np.zeros_like(intensities), np.clip(intensities, 0, 255), np.zeros_like(intensities)
                 ])
             
             # Bad quality pixels - red
@@ -1100,15 +1398,14 @@ class FlowVisualizer:
                     src_color = frame1[y, x]
                     target_color = frame2[int(target_y), int(target_x)]
                     
-                    # Simple quality metric for speed
-                    diff = np.mean(np.abs(src_color.astype(float) - target_color.astype(float)))
-                    similarity = 1.0 - (diff / 255.0)
+                    # Use the consistent, robust quality metric
+                    similarity = self.calculate_pixel_quality(src_color, target_color)
                     
                     # Color coding
                     if similarity > 0.8:
-                        # Good quality - green
-                        intensity = int(255 * similarity)
-                        color = [0, intensity, 0]
+                        # Good quality - green, scaled for better visibility
+                        intensity = int(255 * (similarity - 0.5) * 2)
+                        color = [0, np.clip(intensity, 0, 255), 0]
                     else:
                         # Bad quality - red
                         intensity = int(255 * (1.0 - similarity))
@@ -1126,10 +1423,21 @@ class FlowVisualizer:
     
     def get_arrow_color(self, src_x, src_y, target_x, target_y):
         """Determine arrow color based on color consistency between source and target pixels"""
+        color, _, _, _ = self.get_arrow_color_details(src_x, src_y, target_x, target_y)
+        return color
+
+    def get_arrow_color_details(self, src_x, src_y, target_x, target_y):
+        """Get arrow color and detailed color information for the hover label."""
+        # Default values for out-of-bounds cases
+        default_color = "red"
+        default_src_color = (0,0,0)
+        default_tgt_color = (0,0,0)
+        default_similarity = 0.0
+
         # Check bounds for both frames
         if (src_x < 0 or src_x >= self.orig_width or src_y < 0 or src_y >= self.orig_height or
             target_x < 0 or target_x >= self.orig_width or target_y < 0 or target_y >= self.orig_height):
-            return "red"  # Out of bounds
+            return default_color, default_src_color, default_tgt_color, default_similarity
         
         # Get pixel colors from both frames
         src_color = self.frame1[int(src_y), int(src_x)]
@@ -1138,9 +1446,11 @@ class FlowVisualizer:
         # Calculate quality using shared method
         overall_similarity = self.calculate_pixel_quality(src_color, target_color)
         
-        # Threshold: green if similarity > 80% (difference < 20%), red otherwise
-        return "green" if overall_similarity > 0.8 else "red"
-    
+        # Threshold: green if similarity > 80%, red otherwise
+        arrow_color = "green" if overall_similarity > 0.8 else "red"
+        
+        return arrow_color, tuple(src_color), tuple(target_color), overall_similarity
+
     def draw_flow_vectors(self, frame_x_offset, frame_y_offset):
         """Draw flow vectors as white lines over the first frame"""
         # Choose flow data source based on current mode
@@ -1212,8 +1522,8 @@ class FlowVisualizer:
                 self.canvas.create_oval(start_x-1, start_y-1, start_x+1, start_y+1, 
                                       fill="white", outline="white", tags="flow_vectors")
 
-    def draw_arrow(self, x1, y1, x2, y2, color="red"):
-        """Draw arrow from (x1,y1) to (x2,y2) with specified color"""
+    def draw_arrow(self, x1, y1, x2, y2, color="red", tags="flow_arrow"):
+        """Draw arrow from (x1,y1) to (x2,y2) with specified color and tags"""
         # Clamp target to canvas bounds
         canvas_width = self.canvas.winfo_width()
         canvas_height = self.canvas.winfo_height()
@@ -1244,15 +1554,174 @@ class FlowVisualizer:
         head_y2 = y2 - head_length * (dx * np.sin(-head_angle) + dy * np.cos(-head_angle))
         
         # Draw arrow line
-        self.canvas.create_line(x1, y1, x2, y2, fill=color, width=2, tags="flow_arrow")
+        self.canvas.create_line(x1, y1, x2, y2, fill=color, width=2, tags=tags)
         
         # Draw arrow head
-        self.canvas.create_line(x2, y2, head_x1, head_y1, fill=color, width=2, tags="flow_arrow")
-        self.canvas.create_line(x2, y2, head_x2, head_y2, fill=color, width=2, tags="flow_arrow")
+        self.canvas.create_line(x2, y2, head_x1, head_y1, fill=color, width=2, tags=tags)
+        self.canvas.create_line(x2, y2, head_x2, head_y2, fill=color, width=2, tags=tags)
         
         # Draw circle at start point
-        self.canvas.create_oval(x1-3, y1-3, x1+3, y1+3, fill=color, outline="white", tags="flow_arrow")
+        self.canvas.create_oval(x1-3, y1-3, x1+3, y1+3, fill=color, outline="white", tags=tags)
     
+    def draw_detail_analysis_view(self):
+        """Draw the detail analysis panel directly on the canvas."""
+        if not self.detail_analysis_data:
+            return
+
+        canvas = self.canvas
+        data = self.detail_analysis_data
+        
+        # --- 1. Sizing and Scaling ---
+        display_size = 200  # We want to display them as 200x200
+        border_size = 2
+        
+        # Scale 50x50 regions to 200x200
+        scale_factor = display_size / (self.detail_analysis_region_size * 2)
+
+        region1_scaled = cv2.resize(data['region1'], (display_size, display_size), interpolation=cv2.INTER_NEAREST)
+        region2_scaled = cv2.resize(data['region2'], (display_size, display_size), interpolation=cv2.INTER_NEAREST)
+
+        # --- 2. Marker Drawing ---
+        def draw_marker(image, coords_in_region, color):
+            marker_x = int(coords_in_region[0] * scale_factor)
+            marker_y = int(coords_in_region[1] * scale_factor)
+            cv2.rectangle(image, (marker_x - 2, marker_y - 2), (marker_x + 2, marker_y + 2), color, -1)
+
+        draw_marker(region1_scaled, (25, 25), (255, 255, 0))
+
+        orig_flow_x, orig_flow_y = data['original_flow']
+        orig_target_x = data['source_pixel'][0] - orig_flow_x
+        orig_target_y = data['source_pixel'][1] - orig_flow_y
+        # Original Target (from original, bad flow) -> Orange
+        draw_marker(region2_scaled, (orig_target_x - data['bounds2'][0], orig_target_y - data['bounds2'][1]), (255, 165, 0))
+        
+        # LOD Target (center of patch, from reliable flow) -> Red
+        draw_marker(region2_scaled, (25, 25), (255, 0, 0))
+
+        final_target_x, final_target_y = data['final_target']
+        draw_marker(region2_scaled, (final_target_x - data['bounds2'][0], final_target_y - data['bounds2'][1]), (0, 255, 0))
+
+        # --- 3. Difference View Calculation ---
+        h_s, w_s = region2_scaled.shape[:2]
+        center_scaled = (w_s / 2, h_s / 2)
+        dx, dy, angle = data['phase_shift'][0], data['phase_shift'][1], data.get('angle', 0)
+        
+        # --- 3a. Create transformation matrices ---
+        M_rot = cv2.getRotationMatrix2D(center_scaled, -angle, 1.0)
+        shift_dx = dx * scale_factor
+        shift_dy = dy * scale_factor
+        # FIX 1: Correct sign for transformation matrix. It should be a positive shift.
+        M_trans = np.float32([[1, 0, shift_dx], [0, 1, shift_dy]])
+        
+        # --- 3b. Apply transformations ---
+        # Apply to the target region itself
+        rotated_region2 = cv2.warpAffine(region2_scaled, M_rot, (w_s, h_s))
+        transformed_region2 = cv2.warpAffine(rotated_region2, M_trans, (w_s, h_s))
+
+        # FIX 2: Create and apply a mask to calculate difference only on the overlapping area
+        # Create a white mask and apply the same transformations to it
+        mask = np.ones_like(region2_scaled, dtype=np.uint8) * 255
+        rotated_mask = cv2.warpAffine(mask, M_rot, (w_s, h_s), flags=cv2.INTER_NEAREST)
+        transformed_mask = cv2.warpAffine(rotated_mask, M_trans, (w_s, h_s), flags=cv2.INTER_NEAREST)
+        
+        # Calculate difference and then mask it
+        diff = cv2.absdiff(region1_scaled, transformed_region2)
+        diff[transformed_mask < 255] = 0 # Black out areas outside the transformed region
+
+        overlay_content = np.clip(diff * 2, 0, 255).astype(np.uint8)
+
+        # --- 3c. Draw alignment frames ---
+        # Source frame (static white box)
+        cv2.rectangle(overlay_content, (0, 0), (w_s - 1, h_s - 1), (255, 255, 255), 1)
+        
+        # Target frame (transformed green box)
+        src_pts = np.float32([[0,0], [w_s,0], [w_s,h_s], [0,h_s]]).reshape(-1,1,2)
+        
+        # Create a combined 3x3 transformation matrix for transforming the points of the polygon
+        M_rot_3x3 = np.vstack([M_rot, [0, 0, 1]])
+        M_trans_3x3 = np.float32([[1, 0, shift_dx], [0, 1, shift_dy], [0, 0, 1]])
+        M_combined = np.dot(M_trans_3x3, M_rot_3x3)
+        
+        # Apply the combined transform to the corners of the frame
+        transformed_pts = cv2.transform(src_pts, M_combined[:2, :]).astype(np.int32)
+        cv2.polylines(overlay_content, [transformed_pts], True, (0, 255, 0), 1)
+        
+        # --- 4. Add Borders & Finalize Images ---
+        region1_bordered = cv2.copyMakeBorder(region1_scaled, border_size, border_size, border_size, border_size, cv2.BORDER_CONSTANT, value=[255,255,255])
+        region2_bordered = cv2.copyMakeBorder(region2_scaled, border_size, border_size, border_size, border_size, cv2.BORDER_CONSTANT, value=[255,255,255])
+        overlay_bordered = cv2.copyMakeBorder(overlay_content, border_size, border_size, border_size, border_size, cv2.BORDER_CONSTANT, value=[255,255,255])
+
+        # --- 5. Canvas Drawing ---
+        base_y = self.frame3_y + self.display_height + 40
+        spacing = 20
+        region_h, region_w = region1_bordered.shape[:2]
+
+        x1 = spacing
+        x2 = x1 + region_w + spacing
+        x3 = x2 + region_w + spacing
+
+        # Convert to PhotoImage and store references
+        self.analysis_photo1 = ImageTk.PhotoImage(Image.fromarray(region1_bordered))
+        self.analysis_photo2 = ImageTk.PhotoImage(Image.fromarray(region2_bordered))
+        self.analysis_photo_diff = ImageTk.PhotoImage(Image.fromarray(overlay_bordered))
+
+        canvas.create_image(x1, base_y, anchor=tk.NW, image=self.analysis_photo1, tags="detail_analysis")
+        canvas.create_image(x2, base_y, anchor=tk.NW, image=self.analysis_photo2, tags="detail_analysis")
+        canvas.create_image(x3, base_y, anchor=tk.NW, image=self.analysis_photo_diff, tags="detail_analysis")
+        
+        # --- 6. Labels and Legends ---
+        font_details = ("Arial", 8)
+        legend_y_offset = base_y + region_h + 15
+        
+        canvas.create_text(x1, base_y - 5, text="Source", anchor=tk.SW, fill="white", tags="detail_analysis")
+        canvas.create_text(x1, legend_y_offset, text="■ Yellow: Selected Pixel", anchor=tk.NW, fill="yellow", font=font_details, tags="detail_analysis")
+        
+        canvas.create_text(x2, base_y - 5, text="Target", anchor=tk.SW, fill="white", tags="detail_analysis")
+        canvas.create_text(x2, legend_y_offset, text="■ Orange: Original Target", anchor=tk.NW, fill="orange", font=font_details, tags="detail_analysis")
+        canvas.create_text(x2, legend_y_offset + 12, text="■ Red: LOD Target", anchor=tk.NW, fill="red", font=font_details, tags="detail_analysis")
+        canvas.create_text(x2, legend_y_offset + 24, text="■ Green: Corrected Target", anchor=tk.NW, fill="lime", font=font_details, tags="detail_analysis")
+
+        canvas.create_text(x3, base_y - 5, text="Difference & Alignment", anchor=tk.SW, fill="white", tags="detail_analysis")
+        canvas.create_text(x3, legend_y_offset, text="White: Source Frame", anchor=tk.NW, fill="white", font=font_details, tags="detail_analysis")
+        canvas.create_text(x3, legend_y_offset + 12, text="Green: Target Frame (Aligned)", anchor=tk.NW, fill="lime", font=font_details, tags="detail_analysis")
+    
+    def draw_detail_analysis_overlays(self, frame1_x, frame1_y, frame2_x, frame2_y):
+        """Draw overlay vectors for detail analysis mode on the main frames."""
+        if not self.detail_analysis_data:
+            return
+
+        data = self.detail_analysis_data
+        source_x, source_y = data['source_pixel']
+
+        # Calculate original target
+        orig_flow_x, orig_flow_y = data['original_flow']
+        orig_target_x = source_x - orig_flow_x
+        orig_target_y = source_y - orig_flow_y
+        
+        # Get LOD target
+        lod_target_x, lod_target_y = data['lod_target']
+        
+        def to_display_coords(orig_x, orig_y, frame_x_offset, frame_y_offset):
+            return (frame_x_offset + orig_x * self.display_scale,
+                    frame_y_offset + orig_y * self.display_scale)
+        
+        # Convert points to canvas coordinates
+        src_display_x, src_display_y = to_display_coords(source_x, source_y, frame1_x, frame1_y)
+        orig_tgt_display_x, orig_tgt_display_y = to_display_coords(orig_target_x, orig_target_y, frame2_x, frame2_y)
+        lod_tgt_display_x, lod_tgt_display_y = to_display_coords(lod_target_x, lod_target_y, frame2_x, frame2_y)
+        
+        # Draw Original Flow Vector (Red)
+        self.draw_arrow(src_display_x, src_display_y, orig_tgt_display_x, orig_tgt_display_y, 
+                        color="red", tags="detail_analysis")
+        
+        # Draw LOD Flow Vector (Orange)
+        self.draw_arrow(src_display_x, src_display_y, lod_tgt_display_x, lod_tgt_display_y, 
+                        color="orange", tags="detail_analysis")
+
+        # Draw source point circle
+        self.canvas.create_oval(src_display_x-3, src_display_y-3, src_display_x+3, src_display_y+3, 
+                               fill="yellow", outline="white", tags="detail_analysis")
+
     def run(self):
         """Run the GUI"""
         self.root.mainloop()
