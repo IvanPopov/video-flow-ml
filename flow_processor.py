@@ -24,6 +24,9 @@ from core.Networks import build_network
 from utils.utils import InputPadder
 from configs.multiframes_sintel_submission import get_cfg
 
+# Import our config module
+from config import DeviceManager
+
 class AdaptiveOpticalFlowKalmanFilter:
     """
     Adaptive Kalman Filter for optical flow smoothing with support for sudden motion changes
@@ -323,13 +326,9 @@ class VideoFlowProcessor:
                  kalman_process_noise=0.01, kalman_measurement_noise=0.1, kalman_prediction_confidence=0.7,
                  kalman_motion_model='constant_acceleration', kalman_outlier_threshold=3.0, kalman_min_track_length=3):
         """Initialize VideoFlow processor with pure VideoFlow implementation"""
-        if device == 'auto':
-            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        elif device == 'cuda' and not torch.cuda.is_available():
-            print("Warning: CUDA requested but not available, falling back to CPU")
-            self.device = 'cpu'
-        else:
-            self.device = device
+        # Initialize device manager
+        self.device_manager = DeviceManager()
+        self.device = self.device_manager.get_device(device)
             
         self.fast_mode = fast_mode
         self.tile_mode = tile_mode
@@ -353,10 +352,7 @@ class VideoFlowProcessor:
         self.taa_compare_kalman_filters = {}
         
         print(f"VideoFlow Processor initialized - Device: {self.device}")
-        print(f"CUDA available: {torch.cuda.is_available()}")
-        if torch.cuda.is_available():
-            print(f"GPU: {torch.cuda.get_device_name(0)}")
-            print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+        self.device_manager.print_device_info()
         print(f"Fast mode: {fast_mode}")
         print(f"Tile mode: {tile_mode}")
         print(f"Sequence length: {sequence_length} frames")
