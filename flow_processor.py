@@ -24,8 +24,304 @@ from core.Networks import build_network
 from utils.utils import InputPadder
 from configs.multiframes_sintel_submission import get_cfg
 
+class AdaptiveOpticalFlowKalmanFilter:
+    """
+    Adaptive Kalman Filter for optical flow smoothing with support for sudden motion changes
+    """
+    def __init__(self, process_noise=0.01, measurement_noise=0.1, prediction_confidence=0.7, 
+                 motion_model='constant_acceleration', outlier_threshold=3.0, min_track_length=3):
+        self.base_process_noise = process_noise
+        self.base_measurement_noise = measurement_noise
+        self.prediction_confidence = prediction_confidence
+        self.motion_model = motion_model
+        self.outlier_threshold = outlier_threshold
+        self.min_track_length = min_track_length
+        
+        # Adaptive parameters
+        self.adaptation_factor = 2.0  # How much to increase noise during sudden changes
+        self.motion_threshold = 5.0   # Threshold for detecting sudden motion changes
+        self.adaptation_decay = 0.9   # How quickly to return to normal after adaptation
+        
+        # State tracking
+        self.kalman_filters = {}      # Dict of Kalman filters per pixel
+        self.motion_history = {}      # Motion history for adaptation
+        self.frame_count = 0
+        self.is_initialized = False
+        
+        # Statistics for monitoring
+        self.adaptation_map = None    # Map of current adaptation levels
+        self.outlier_count = 0
+        self.total_pixels = 0
+        
+    def _create_kalman_filter(self, initial_position, initial_velocity):
+        """Create a new Kalman filter for a pixel"""
+        if self.motion_model == 'constant_velocity':
+            # State: [x, y, vx, vy]
+            state_size = 4
+            measurement_size = 2
+            
+            # State transition matrix (constant velocity model)
+            dt = 1.0
+            transition_matrix = np.array([
+                [1, 0, dt, 0],
+                [0, 1, 0, dt],
+                [0, 0, 1, 0],
+                [0, 0, 0, 1]
+            ], dtype=np.float32)
+            
+        else:  # constant_acceleration
+            # State: [x, y, vx, vy, ax, ay]
+            state_size = 6
+            measurement_size = 2
+            
+            # State transition matrix (constant acceleration model)
+            dt = 1.0
+            dt2 = dt * dt / 2
+            transition_matrix = np.array([
+                [1, 0, dt, 0, dt2, 0],
+                [0, 1, 0, dt, 0, dt2],
+                [0, 0, 1, 0, dt, 0],
+                [0, 0, 0, 1, 0, dt],
+                [0, 0, 0, 0, 1, 0],
+                [0, 0, 0, 0, 0, 1]
+            ], dtype=np.float32)
+        
+        # Create Kalman filter
+        kf = cv2.KalmanFilter(state_size, measurement_size)
+        
+        # Set matrices
+        kf.transitionMatrix = transition_matrix
+        
+        # Measurement matrix (we observe position)
+        kf.measurementMatrix = np.zeros((measurement_size, state_size), dtype=np.float32)
+        kf.measurementMatrix[0, 0] = 1  # x
+        kf.measurementMatrix[1, 1] = 1  # y
+        
+        # Process noise covariance
+        kf.processNoiseCov = np.eye(state_size, dtype=np.float32) * self.base_process_noise
+        
+        # Measurement noise covariance
+        kf.measurementNoiseCov = np.eye(measurement_size, dtype=np.float32) * self.base_measurement_noise
+        
+        # Error covariance
+        kf.errorCovPost = np.eye(state_size, dtype=np.float32)
+        
+        # Initialize state
+        if self.motion_model == 'constant_velocity':
+            kf.statePre = np.array([initial_position[0], initial_position[1], 
+                                   initial_velocity[0], initial_velocity[1]], dtype=np.float32)
+        else:  # constant_acceleration
+            kf.statePre = np.array([initial_position[0], initial_position[1], 
+                                   initial_velocity[0], initial_velocity[1], 0, 0], dtype=np.float32)
+        
+        kf.statePost = kf.statePre.copy()
+        
+        return kf
+    
+    def _detect_sudden_motion(self, pixel_key, current_velocity, predicted_velocity):
+        """Detect sudden changes in motion for adaptive filtering"""
+        if pixel_key not in self.motion_history:
+            self.motion_history[pixel_key] = {'velocities': [], 'adaptations': []}
+            return False, 1.0
+        
+        history = self.motion_history[pixel_key]
+        
+        # Calculate velocity change
+        velocity_change = np.linalg.norm(current_velocity - predicted_velocity)
+        
+        # Calculate recent average velocity change
+        if len(history['velocities']) > 0:
+            recent_changes = history['velocities'][-3:]  # Last 3 frames
+            avg_change = np.mean(recent_changes)
+            std_change = np.std(recent_changes) if len(recent_changes) > 1 else 1.0
+            
+            # Detect sudden motion if change is significantly larger than recent average
+            threshold = avg_change + self.motion_threshold * max(std_change, 0.1)
+            sudden_motion = velocity_change > threshold
+            
+            # Calculate adaptation factor
+            if sudden_motion:
+                adaptation = min(self.adaptation_factor, 1.0 + velocity_change / max(avg_change, 0.1))
+            else:
+                # Gradually return to normal
+                last_adaptation = history['adaptations'][-1] if history['adaptations'] else 1.0
+                adaptation = max(1.0, last_adaptation * self.adaptation_decay)
+        else:
+            sudden_motion = False
+            adaptation = 1.0
+        
+        # Update history
+        history['velocities'].append(velocity_change)
+        history['adaptations'].append(adaptation)
+        
+        # Keep only recent history
+        if len(history['velocities']) > 10:
+            history['velocities'] = history['velocities'][-10:]
+            history['adaptations'] = history['adaptations'][-10:]
+        
+        return sudden_motion, adaptation
+    
+    def _is_outlier(self, measurement, prediction, covariance):
+        """Detect outlier measurements using Mahalanobis distance"""
+        if covariance is None:
+            return False
+        
+        diff = measurement - prediction
+        
+        # Calculate Mahalanobis distance
+        try:
+            inv_cov = np.linalg.inv(covariance + np.eye(2) * 1e-6)  # Add small regularization
+            mahal_dist = np.sqrt(diff.T @ inv_cov @ diff)
+            return mahal_dist > self.outlier_threshold
+        except:
+            # Fallback to Euclidean distance
+            euclidean_dist = np.linalg.norm(diff)
+            return euclidean_dist > self.outlier_threshold * 2
+    
+    def update(self, flow_field, frame_idx):
+        """Update Kalman filters for entire flow field"""
+        if flow_field is None:
+            return flow_field
+        
+        h, w = flow_field.shape[:2]
+        smoothed_flow = np.zeros_like(flow_field)
+        
+        # Initialize adaptation map
+        if self.adaptation_map is None or self.adaptation_map.shape[:2] != (h, w):
+            self.adaptation_map = np.ones((h, w), dtype=np.float32)
+        
+        self.frame_count += 1
+        self.outlier_count = 0
+        self.total_pixels = 0
+        
+        # Process pixels with subsampling for performance
+        step = max(1, min(8, max(h, w) // 100))  # Adaptive step size
+        
+        for y in range(0, h, step):
+            for x in range(0, w, step):
+                pixel_key = (y, x)
+                current_flow = flow_field[y, x]
+                current_position = np.array([x, y], dtype=np.float32)
+                current_velocity = current_flow.astype(np.float32)
+                
+                self.total_pixels += 1
+                
+                # Skip zero flow during initialization
+                if self.frame_count <= self.min_track_length and np.linalg.norm(current_velocity) < 0.1:
+                    smoothed_flow[y, x] = current_flow
+                    continue
+                
+                # Create new filter if needed
+                if pixel_key not in self.kalman_filters:
+                    self.kalman_filters[pixel_key] = self._create_kalman_filter(current_position, current_velocity)
+                    smoothed_flow[y, x] = current_flow
+                    continue
+                
+                kf = self.kalman_filters[pixel_key]
+                
+                # Predict
+                predicted_state = kf.predict()
+                predicted_position = predicted_state[:2]
+                predicted_velocity = predicted_state[2:4] if self.motion_model == 'constant_velocity' else predicted_state[2:4]
+                
+                # Detect sudden motion and adapt
+                sudden_motion, adaptation = self._detect_sudden_motion(pixel_key, current_velocity, predicted_velocity)
+                self.adaptation_map[y, x] = adaptation
+                
+                # Adjust noise based on adaptation
+                if adaptation > 1.1:  # Significant adaptation needed
+                    # Temporarily increase process noise to allow faster adaptation
+                    kf.processNoiseCov *= adaptation
+                    kf.measurementNoiseCov /= np.sqrt(adaptation)  # Trust measurements more during sudden changes
+                
+                # Check for outliers
+                measurement_position = current_position + current_velocity  # Where pixel moved to
+                prediction_position = predicted_position + predicted_velocity
+                
+                if self._is_outlier(measurement_position, prediction_position, kf.errorCovPost[:2, :2]):
+                    # Outlier detected - skip this measurement
+                    self.outlier_count += 1
+                    if self.motion_model == 'constant_velocity':
+                        smoothed_velocity = predicted_state[2:4]
+                    else:
+                        smoothed_velocity = predicted_state[2:4]
+                    smoothed_flow[y, x] = smoothed_velocity
+                else:
+                    # Normal measurement - update filter
+                    measurement = current_position + current_velocity  # End position
+                    kf.correct(measurement)
+                    
+                    # Get smoothed velocity from updated state
+                    if self.motion_model == 'constant_velocity':
+                        smoothed_velocity = kf.statePost[2:4]
+                    else:
+                        smoothed_velocity = kf.statePost[2:4]
+                    
+                    # Blend with original based on confidence
+                    confidence = self.prediction_confidence * (2.0 - adaptation)  # Lower confidence during adaptation
+                    confidence = np.clip(confidence, 0.1, 0.9)
+                    
+                    smoothed_flow[y, x] = (confidence * smoothed_velocity + 
+                                         (1 - confidence) * current_velocity)
+                
+                # Restore normal noise levels
+                if adaptation > 1.1:
+                    kf.processNoiseCov /= adaptation
+                    kf.measurementNoiseCov *= np.sqrt(adaptation)
+        
+        # Interpolate smoothed flow to full resolution
+        if step > 1:
+            smoothed_flow = self._interpolate_flow(smoothed_flow, flow_field, step)
+        
+        # Print statistics
+        if self.frame_count % 30 == 0:  # Every 30 frames
+            outlier_rate = self.outlier_count / max(self.total_pixels, 1) * 100
+            avg_adaptation = np.mean(self.adaptation_map)
+            print(f"Kalman Filter Stats - Frame {self.frame_count}: "
+                  f"Outliers: {outlier_rate:.1f}%, Avg Adaptation: {avg_adaptation:.2f}")
+        
+        self.is_initialized = True
+        return smoothed_flow
+    
+    def _interpolate_flow(self, sparse_flow, full_flow, step):
+        """Interpolate sparse smoothed flow to full resolution"""
+        h, w = full_flow.shape[:2]
+        
+        # Create coordinate grids
+        y_sparse, x_sparse = np.mgrid[0:h:step, 0:w:step]
+        y_full, x_full = np.mgrid[0:h, 0:w]
+        
+        # Interpolate each flow component
+        from scipy.interpolate import griddata
+        
+        points = np.column_stack([y_sparse.ravel(), x_sparse.ravel()])
+        
+        # Interpolate flow_x
+        values_x = sparse_flow[::step, ::step, 0].ravel()
+        flow_x_interp = griddata(points, values_x, (y_full, x_full), method='linear', fill_value=0)
+        
+        # Interpolate flow_y  
+        values_y = sparse_flow[::step, ::step, 1].ravel()
+        flow_y_interp = griddata(points, values_y, (y_full, x_full), method='linear', fill_value=0)
+        
+        # Combine and blend with original
+        interpolated = np.stack([flow_x_interp, flow_y_interp], axis=2)
+        
+        # Blend with original flow in areas without sparse coverage
+        mask = np.zeros((h, w), dtype=np.float32)
+        mask[::step, ::step] = 1
+        mask = cv2.GaussianBlur(mask, (step*2+1, step*2+1), step/2)
+        
+        result = full_flow.copy()
+        for c in range(2):
+            result[:, :, c] = mask * interpolated[:, :, c] + (1 - mask) * full_flow[:, :, c]
+        
+        return result
+
 class VideoFlowProcessor:
-    def __init__(self, device='auto', fast_mode=False, tile_mode=False, sequence_length=5, flow_smoothing=0.0):
+    def __init__(self, device='auto', fast_mode=False, tile_mode=False, sequence_length=5, flow_smoothing=0.0,
+                 kalman_process_noise=0.01, kalman_measurement_noise=0.1, kalman_prediction_confidence=0.7,
+                 kalman_motion_model='constant_acceleration', kalman_outlier_threshold=3.0, kalman_min_track_length=3):
         """Initialize VideoFlow processor with pure VideoFlow implementation"""
         if device == 'auto':
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -43,6 +339,18 @@ class VideoFlowProcessor:
         self.input_padder = None
         self.cfg = None
         self.previous_smoothed_flow = None  # For temporal flow smoothing
+        
+        # Kalman filter parameters
+        self.kalman_process_noise = kalman_process_noise
+        self.kalman_measurement_noise = kalman_measurement_noise
+        self.kalman_prediction_confidence = kalman_prediction_confidence
+        self.kalman_motion_model = kalman_motion_model
+        self.kalman_outlier_threshold = kalman_outlier_threshold
+        self.kalman_min_track_length = kalman_min_track_length
+        self.kalman_filter = None
+        
+        # TAA compare mode state
+        self.taa_compare_kalman_filters = {}
         
         print(f"VideoFlow Processor initialized - Device: {self.device}")
         print(f"CUDA available: {torch.cuda.is_available()}")
@@ -382,10 +690,7 @@ class VideoFlowProcessor:
     
     def stabilize_optical_flow(self, current_flow, current_frame, previous_frame):
         """
-        Apply color-consistency based stabilization to optical flow
-        
-        This method stabilizes flow vectors by testing multiple candidates and selecting
-        the one that best preserves color when used for reprojection (TAA-style validation).
+        Apply adaptive Kalman filter based stabilization to optical flow
         
         Args:
             current_flow: Current frame's optical flow (HWC numpy array)
@@ -399,121 +704,25 @@ class VideoFlowProcessor:
             # No stabilization - return original flow
             return current_flow
             
-        if self.previous_smoothed_flow is None:
-            # First frame - initialize with current flow
-            self.previous_smoothed_flow = current_flow.copy()
-            return current_flow
+        # Initialize Kalman filter if needed
+        if self.kalman_filter is None:
+            self.kalman_filter = AdaptiveOpticalFlowKalmanFilter(
+                process_noise=self.kalman_process_noise,
+                measurement_noise=self.kalman_measurement_noise,
+                prediction_confidence=self.kalman_prediction_confidence,
+                motion_model=self.kalman_motion_model,
+                outlier_threshold=self.kalman_outlier_threshold,
+                min_track_length=self.kalman_min_track_length
+            )
+            print(f"Initialized adaptive Kalman filter:")
+            print(f"  Model: {self.kalman_motion_model}")
+            print(f"  Process noise: {self.kalman_process_noise}")
+            print(f"  Measurement noise: {self.kalman_measurement_noise}")
+            print(f"  Prediction confidence: {self.kalman_prediction_confidence}")
+            print(f"  Outlier threshold: {self.kalman_outlier_threshold}")
         
-        h, w = current_flow.shape[:2]
-        stabilized_flow = current_flow.copy()
-        
-        # Convert frames to float for processing
-        current_float = current_frame.astype(np.float32)
-        previous_float = previous_frame.astype(np.float32)
-        
-        # Create coordinate grids
-        y_coords, x_coords = np.mgrid[0:h, 0:w]
-        
-        # Generate flow candidates for testing
-        candidates = []
-        weights = []
-        
-        # Candidate 1: Current raw flow
-        candidates.append(current_flow)
-        weights.append(0.4)
-        
-        # Candidate 2: Previous smoothed flow (temporal consistency)
-        candidates.append(self.previous_smoothed_flow)
-        weights.append(0.3)
-        
-        # Candidate 3: Exponentially smoothed flow
-        alpha = 1.0 - self.flow_smoothing
-        smooth_flow = alpha * current_flow + self.flow_smoothing * self.previous_smoothed_flow
-        candidates.append(smooth_flow)
-        weights.append(0.3)
-        
-        # Test each candidate and compute color consistency score
-        best_flow = current_flow.copy()
-        
-        # Process in blocks to avoid memory issues
-        block_size = 64
-        for by in range(0, h, block_size):
-            for bx in range(0, w, block_size):
-                # Define block boundaries
-                y_end = min(by + block_size, h)
-                x_end = min(bx + block_size, w)
-                
-                block_h = y_end - by
-                block_w = x_end - bx
-                
-                # Extract block data
-                block_current = current_float[by:y_end, bx:x_end]
-                block_y_coords = y_coords[by:y_end, bx:x_end]
-                block_x_coords = x_coords[by:y_end, bx:x_end]
-                
-                best_score = np.full((block_h, block_w), float('inf'))
-                best_block_flow = current_flow[by:y_end, bx:x_end].copy()
-                
-                # Test each candidate flow
-                for candidate_flow, weight in zip(candidates, weights):
-                    block_flow = candidate_flow[by:y_end, bx:x_end]
-                    
-                    # Calculate reprojection coordinates using inverted flow (TAA-style)
-                    # Invert flow to get "where did this pixel come from"
-                    inv_flow = -block_flow
-                    
-                    prev_x = block_x_coords + inv_flow[:, :, 0]
-                    prev_y = block_y_coords + inv_flow[:, :, 1]
-                    
-                    # Clamp coordinates to valid range
-                    prev_x = np.clip(prev_x, 0, w - 1)
-                    prev_y = np.clip(prev_y, 0, h - 1)
-                    
-                    # Bilinear interpolation from previous frame
-                    x0 = np.floor(prev_x).astype(int)
-                    x1 = np.minimum(x0 + 1, w - 1)
-                    y0 = np.floor(prev_y).astype(int)
-                    y1 = np.minimum(y0 + 1, h - 1)
-                    
-                    # Interpolation weights
-                    wx = prev_x - x0
-                    wy = prev_y - y0
-                    
-                    # Sample previous frame with bilinear interpolation
-                    reprojected = np.zeros_like(block_current)
-                    
-                    for c in range(3):  # RGB channels
-                        reprojected[:, :, c] = (
-                            previous_float[y0, x0, c] * (1 - wx) * (1 - wy) +
-                            previous_float[y0, x1, c] * wx * (1 - wy) +
-                            previous_float[y1, x0, c] * (1 - wx) * wy +
-                            previous_float[y1, x1, c] * wx * wy
-                        )
-                    
-                    # Calculate color consistency score (lower is better)
-                    color_diff = np.mean((block_current - reprojected) ** 2, axis=2)
-                    
-                    # Apply weight to the score
-                    weighted_score = color_diff / weight
-                    
-                    # Update best flow where this candidate is better
-                    better_mask = weighted_score < best_score
-                    best_score[better_mask] = weighted_score[better_mask]
-                    best_block_flow[better_mask] = block_flow[better_mask]
-                
-                # Store the best flow for this block
-                best_flow[by:y_end, bx:x_end] = best_block_flow
-        
-        # Apply additional smoothing to reduce remaining jitter
-        # Use bilateral filter to preserve edges while smoothing
-        best_flow_u = cv2.bilateralFilter(best_flow[:,:,0].astype(np.float32), 5, 10.0, 10.0)
-        best_flow_v = cv2.bilateralFilter(best_flow[:,:,1].astype(np.float32), 5, 10.0, 10.0)
-        best_flow = np.stack([best_flow_u, best_flow_v], axis=2)
-        
-        # Update previous smoothed flow for next iteration
-        self.previous_smoothed_flow = best_flow.copy()
-        
-        return best_flow
+        # Apply Kalman filtering
+        return self.kalman_filter.update(current_flow, self.kalman_filter.frame_count)
         
     def save_flow_flo(self, flow, filename):
         """
@@ -1113,7 +1322,7 @@ class VideoFlowProcessor:
         Args:
             frame: Input frame (BGR format for OpenCV)
             text: Text to add
-            position: 'top-left', 'top-right', 'bottom-left', 'bottom-right'
+            position: 'top-left', 'top-right', 'bottom-left', 'bottom-right' or tuple (x, y)
             font_scale: Size of the font
             color: Text color (BGR)
             thickness: Text thickness
@@ -1130,7 +1339,10 @@ class VideoFlowProcessor:
         
         # Calculate position
         margin = 5
-        if position == 'top-left':
+        if isinstance(position, tuple):
+            # Direct coordinates provided
+            pos = position
+        elif position == 'top-left':
             pos = (margin, text_size[1] + margin)
         elif position == 'top-right':
             pos = (w - text_size[0] - margin, text_size[1] + margin)
@@ -1263,9 +1475,24 @@ class VideoFlowProcessor:
     
     def process_video(self, input_path, output_path, max_frames=1000, start_frame=0, 
                      start_time=None, duration=None, vertical=False, flow_only=False, taa=False, flow_format='gamedev', 
-                     save_flow=None, force_recompute=False, use_flow_cache=None):
+                     save_flow=None, force_recompute=False, use_flow_cache=None, auto_play=True,
+                     taa_compare=False):
         """Main processing function"""
         import os
+        
+        # TAA Compare Mode Setup
+        if taa_compare:
+            if not taa or self.flow_smoothing <= 0:
+                print("Warning: --taa-compare requires --taa and --flow-smoothing to be enabled. Disabling compare mode.")
+                taa_compare = False
+            else:
+                print("TAA Compare Mode Enabled: Generating multiple stabilization strengths.")
+                self.taa_compare_kalman_filters = {
+                    'Original': None,  # No stabilization (original flow)
+                    'Weak': AdaptiveOpticalFlowKalmanFilter(process_noise=0.05, measurement_noise=0.2, prediction_confidence=0.5),
+                    'Medium': AdaptiveOpticalFlowKalmanFilter(process_noise=0.01, measurement_noise=0.1, prediction_confidence=0.7),
+                    'Strong': AdaptiveOpticalFlowKalmanFilter(process_noise=0.001, measurement_noise=0.05, prediction_confidence=0.9)
+                }
         
         # Handle time-based parameters
         if start_time is not None or duration is not None:
@@ -1368,7 +1595,15 @@ class VideoFlowProcessor:
         
         # Setup output video using processed frame dimensions
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        if flow_only:
+        
+        if taa_compare:
+            # For 6 videos (orig, flow, 4x TAA), use 2x3 grid (2 cols, 3 rows) for more square aspect
+            grid_cols = 2
+            grid_rows = 3
+            canvas_w = grid_cols * width
+            canvas_h = int(canvas_w / (4/3))  # Target 4:3 aspect ratio instead of 16:9
+            output_size = (canvas_w, canvas_h)
+        elif flow_only:
             output_size = (width, height)  # Flow only: processed dimensions
         elif taa:
             if vertical:
@@ -1393,6 +1628,9 @@ class VideoFlowProcessor:
         previous_taa_simple_frame = None
         previous_flow = None  # Store previous frame's optical flow for TAA
         
+        # TAA Compare state
+        taa_compare_frames = {name: None for name in self.taa_compare_kalman_filters.keys()}
+
         # Create progress bars for tile mode or single progress bar for normal mode
         if self.tile_mode:
             # Calculate tile count for first frame to setup progress bars
@@ -1472,8 +1710,23 @@ class VideoFlowProcessor:
             if taa:
                 # Use previous frame's flow with inverted direction for TAA
                 if previous_flow is not None:
-                    # Apply flow-based TAA with alpha=0.1 (90% history, 10% current)
-                    taa_result = self.apply_taa_effect(frames[i], previous_flow, previous_taa_frame, alpha=0.1, use_flow=True)
+                    # TAA compare mode generates multiple versions
+                    if taa_compare:
+                        for name, kalman_filter in self.taa_compare_kalman_filters.items():
+                            if name == 'Original':
+                                # Use original unstabilized flow
+                                stabilized_flow = raw_flow
+                            else:
+                                # Stabilize flow with this filter's strength
+                                stabilized_flow = kalman_filter.update(raw_flow, kalman_filter.frame_count)
+                            
+                            # Apply TAA
+                            prev_taa = taa_compare_frames[name]
+                            taa_result = self.apply_taa_effect(frames[i], stabilized_flow, prev_taa, alpha=0.1, use_flow=True)
+                            taa_compare_frames[name] = taa_result.copy()
+                    
+                    # Normal TAA processing (for backward compatibility)
+                    taa_result = self.apply_taa_effect(frames[i], flow, previous_taa_frame, alpha=0.1, use_flow=True)
                     previous_taa_frame = taa_result.copy()
                     taa_frame = taa_result
                 else:
@@ -1481,20 +1734,42 @@ class VideoFlowProcessor:
                     taa_result = frames[i].astype(np.float32)
                     previous_taa_frame = taa_result.copy()
                     taa_frame = taa_result
-                
+                    if taa_compare:
+                        for name in self.taa_compare_kalman_filters.keys():
+                            taa_compare_frames[name] = taa_result.copy()
+
                 # Apply simple TAA (no flow) with alpha=0.1
                 taa_simple_result = self.apply_taa_effect(frames[i], None, previous_taa_simple_frame, alpha=0.1, use_flow=False)
                 previous_taa_simple_frame = taa_simple_result.copy()
-                taa_simple_frame = taa_simple_result
+                taa_simple_frame = taa_result
                 
             # Store current flow for next frame's TAA
             previous_flow = flow.copy()
             
-            # Create combined frame (side-by-side, top-bottom, flow-only, or with TAA)
-            model_name = "MOF_sintel" if hasattr(self, 'model') else "VideoFlow"
-            combined = self.create_side_by_side(frames[i], flow_viz, vertical=vertical, flow_only=flow_only, 
-                                              taa_frame=taa_frame, taa_simple_frame=taa_simple_frame,
-                                              model_name=model_name, fast_mode=self.fast_mode, flow_format=flow_format)
+            # Create combined frame
+            if taa_compare:
+                frames_to_display = {
+                    'Original': frames[i],
+                    'Flow Viz': flow_viz
+                }
+                
+                # Add TAA versions with parameter labels
+                for name, kalman_filter in self.taa_compare_kalman_filters.items():
+                    if name == 'Original':
+                        label = f'TAA-{name}\n(No Stabilization)'
+                    else:
+                        pn = kalman_filter.base_process_noise
+                        mn = kalman_filter.base_measurement_noise  
+                        pc = kalman_filter.prediction_confidence
+                        label = f'TAA-{name}\n(PN:{pn} MN:{mn} PC:{pc})'
+                    frames_to_display[label] = taa_compare_frames[name].astype(np.uint8)
+                
+                combined = self.create_video_grid(frames_to_display, grid_shape=(3, 2), target_aspect=4/3)
+            else:
+                model_name = "MOF_sintel" if hasattr(self, 'model') else "VideoFlow"
+                combined = self.create_side_by_side(frames[i], flow_viz, vertical=vertical, flow_only=flow_only, 
+                                                  taa_frame=taa_frame, taa_simple_frame=taa_simple_frame,
+                                                  model_name=model_name, fast_mode=self.fast_mode, flow_format=flow_format)
             
             # Write frame
             out.write(combined)
@@ -1532,6 +1807,150 @@ class VideoFlowProcessor:
             print("Generating LOD pyramids for computed flow...")
             self.generate_lods_for_cache(flow_cache_dir, len(frames))
             print("LOD pyramids generated!")
+        
+        # Auto-play the resulting video if enabled
+        if auto_play:
+            self.auto_play_video(output_path)
+    
+    def auto_play_video(self, video_path):
+        """Automatically play the resulting video using system default player"""
+        import subprocess
+        import platform
+        import os
+        
+        if not os.path.exists(video_path):
+            print(f"Video file not found for auto-play: {video_path}")
+            return
+        
+        try:
+            system = platform.system().lower()
+            
+            if system == "windows":
+                # Windows: use start command
+                subprocess.run(['cmd', '/c', 'start', '', video_path], check=False)
+                print(f"Launching video with default Windows player: {os.path.basename(video_path)}")
+            
+            elif system == "darwin":  # macOS
+                # macOS: use open command
+                subprocess.run(['open', video_path], check=False)
+                print(f"Launching video with default macOS player: {os.path.basename(video_path)}")
+            
+            elif system == "linux":
+                # Linux: use xdg-open
+                subprocess.run(['xdg-open', video_path], check=False)
+                print(f"Launching video with default Linux player: {os.path.basename(video_path)}")
+            
+            else:
+                print(f"Unknown operating system '{system}' - cannot auto-play video")
+                print(f"Please manually open: {video_path}")
+        
+        except subprocess.SubprocessError as e:
+            print(f"Error launching video player: {e}")
+            print(f"Please manually open: {video_path}")
+        except Exception as e:
+            print(f"Unexpected error launching video: {e}")
+            print(f"Please manually open: {video_path}")
+
+    def create_video_grid(self, frames_dict, grid_shape, target_aspect=16/9):
+        """
+        Arrange multiple video frames into a grid with a target aspect ratio.
+        
+        Args:
+            frames_dict: Dictionary {'label': frame} of frames to arrange.
+            grid_shape: (rows, cols) for the grid layout.
+            target_aspect: Target aspect ratio for the final output.
+            
+        Returns:
+            A single frame containing the grid.
+        """
+        if not frames_dict:
+            return None
+            
+        rows, cols = grid_shape
+        
+        # Get dimensions from the first frame
+        first_frame = next(iter(frames_dict.values()))
+        h, w = first_frame.shape[:2]
+        
+        # Calculate canvas size to match target aspect ratio
+        canvas_w = cols * w
+        canvas_h = int(canvas_w / target_aspect)
+        
+        # Create black canvas
+        grid_canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+        
+        # Calculate cell size and position
+        cell_h = h
+        cell_w = w
+        
+        y_offset = (canvas_h - rows * cell_h) // 2
+        x_offset = (canvas_w - cols * cell_w) // 2
+        
+        frames = list(frames_dict.items())
+        
+        for i in range(rows * cols):
+            if i >= len(frames):
+                break
+                
+            label, frame = frames[i]
+            
+            row = i // cols
+            col = i % cols
+            
+            y_start = y_offset + row * cell_h
+            x_start = x_offset + col * cell_w
+            
+            # Convert frame to BGR format for video output (handle different input formats)
+            if label == 'Flow Viz':
+                # Flow visualization is in RGB format, convert to BGR
+                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            elif 'TAA-' in label:
+                # TAA frames might be in float format, ensure uint8 and convert RGB to BGR
+                frame_uint8 = np.clip(frame, 0, 255).astype(np.uint8)
+                if len(frame_uint8.shape) == 3 and frame_uint8.shape[2] == 3:
+                    frame_bgr = cv2.cvtColor(frame_uint8, cv2.COLOR_RGB2BGR)
+                else:
+                    frame_bgr = frame_uint8
+            else:
+                # Original frames are typically in RGB format, convert to BGR
+                if len(frame.shape) == 3 and frame.shape[2] == 3:
+                    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                else:
+                    frame_bgr = frame
+            
+            # Add text label to frame with multi-line support
+            labeled_frame = frame_bgr.copy()
+            lines = label.split('\n')
+            font_scale = 0.7  # Увеличиваем размер шрифта
+            thickness = 2
+            line_height = 30  # Увеличиваем высоту строки
+            start_y = 25
+            
+            # Добавляем темную подложку для лучшей читаемости
+            max_text_width = 0
+            for line in lines:
+                text_size = cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)[0]
+                max_text_width = max(max_text_width, text_size[0])
+            
+            # Рисуем полупрозрачную темную подложку
+            overlay = labeled_frame.copy()
+            cv2.rectangle(overlay, (0, 0), (max_text_width + 15, len(lines) * line_height + 10), (0, 0, 0), -1)
+            cv2.addWeighted(overlay, 0.7, labeled_frame, 0.3, 0, labeled_frame)
+            
+            for line_idx, line in enumerate(lines):
+                y_pos = start_y + line_idx * line_height
+                # Добавляем черную обводку для контраста
+                cv2.putText(labeled_frame, line, (8, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 
+                           font_scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+                # Добавляем белый текст
+                cv2.putText(labeled_frame, line, (8, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 
+                           font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+            
+            # Place frame on canvas
+            if y_start + cell_h <= canvas_h and x_start + cell_w <= canvas_w:
+                grid_canvas[y_start:y_start+cell_h, x_start:x_start+cell_w] = labeled_frame
+                
+        return grid_canvas
 
 def main():
     parser = argparse.ArgumentParser(description='VideoFlow Optical Flow Processor')
@@ -1564,7 +1983,19 @@ def main():
     parser.add_argument('--sequence-length', type=int, default=5,
                        help='Number of frames to use in sequence for VideoFlow processing (default: 5, recommended: 5-9)')
     parser.add_argument('--flow-smoothing', type=float, default=0.0,
-                       help='Color-consistency flow stabilization (0.0=disabled, 0.1-0.3=light, 0.4-0.7=medium, 0.8+=strong)')
+                       help='Enable Kalman filter flow stabilization (0.0=disabled, 0.1-0.9=enabled with increasing strength)')
+    parser.add_argument('--kalman-process-noise', type=float, default=0.01,
+                       help='Kalman filter process noise (0.001-0.1, default: 0.01)')
+    parser.add_argument('--kalman-measurement-noise', type=float, default=0.1,
+                       help='Kalman filter measurement noise (0.01-1.0, default: 0.1)')
+    parser.add_argument('--kalman-prediction-confidence', type=float, default=0.7,
+                       help='Kalman filter prediction confidence (0.1-0.9, default: 0.7)')
+    parser.add_argument('--kalman-motion-model', choices=['constant_velocity', 'constant_acceleration'], default='constant_acceleration',
+                       help='Kalman filter motion model (default: constant_acceleration)')
+    parser.add_argument('--kalman-outlier-threshold', type=float, default=3.0,
+                       help='Kalman filter outlier detection threshold in std deviations (1.0-5.0, default: 3.0)')
+    parser.add_argument('--kalman-min-track-length', type=int, default=3,
+                       help='Minimum track length before applying Kalman filtering (2-10, default: 3)')
     parser.add_argument('--save-flow', choices=['flo', 'npz', 'both'], default=None,
                        help='Save raw optical flow data: flo (Middlebury format), npz (NumPy format), both')
     parser.add_argument('--force-recompute', action='store_true',
@@ -1575,6 +2006,10 @@ def main():
                        help='Launch interactive flow visualizer instead of creating video output')
     parser.add_argument('--show-tiles', action='store_true',
                        help='Only show tile grid calculation without processing video')
+    parser.add_argument('--no-autoplay', action='store_true',
+                       help='Disable automatic video playback after processing')
+    parser.add_argument('--taa-compare', action='store_true',
+                       help='Enable TAA comparison mode with multiple stabilization strengths')
     
     args = parser.parse_args()
     
@@ -1600,7 +2035,13 @@ def main():
         
         # Create processor to compute or find flow cache
         processor = VideoFlowProcessor(device=args.device, fast_mode=args.fast, tile_mode=args.tile, 
-                                      sequence_length=args.sequence_length, flow_smoothing=0.0)
+                                      sequence_length=args.sequence_length, flow_smoothing=0.0,
+                                      kalman_process_noise=args.kalman_process_noise,
+                                      kalman_measurement_noise=args.kalman_measurement_noise,
+                                      kalman_prediction_confidence=args.kalman_prediction_confidence,
+                                      kalman_motion_model=args.kalman_motion_model,
+                                      kalman_outlier_threshold=args.kalman_outlier_threshold,
+                                      kalman_min_track_length=args.kalman_min_track_length)
         
         # Handle time-based parameters for frame extraction
         if args.start_time is not None or args.duration is not None:
@@ -1766,7 +2207,13 @@ def main():
         return
     
     processor = VideoFlowProcessor(device=args.device, fast_mode=args.fast, tile_mode=args.tile, 
-                                  sequence_length=args.sequence_length, flow_smoothing=args.flow_smoothing)
+                                  sequence_length=args.sequence_length, flow_smoothing=args.flow_smoothing,
+                                  kalman_process_noise=args.kalman_process_noise,
+                                  kalman_measurement_noise=args.kalman_measurement_noise,
+                                  kalman_prediction_confidence=args.kalman_prediction_confidence,
+                                  kalman_motion_model=args.kalman_motion_model,
+                                  kalman_outlier_threshold=args.kalman_outlier_threshold,
+                                  kalman_min_track_length=args.kalman_min_track_length)
     
     try:
         # Create output filename with frame/time range if not specified
@@ -1802,8 +2249,14 @@ def main():
         processor.process_video(args.input, args.output, max_frames=args.frames, start_frame=args.start_frame,
                               start_time=args.start_time, duration=args.duration, vertical=args.vertical, 
                               flow_only=args.flow_only, taa=args.taa, flow_format=args.flow_format, save_flow=args.save_flow,
-                              force_recompute=args.force_recompute, use_flow_cache=args.use_flow_cache)
-        print("\n✓ VideoFlow processing completed successfully!")
+                              force_recompute=args.force_recompute, use_flow_cache=args.use_flow_cache, 
+                              auto_play=not args.no_autoplay,
+                              taa_compare=args.taa_compare)
+        
+        if not args.no_autoplay and not args.taa_compare:
+            print("\n✓ VideoFlow processing completed successfully! Video should open automatically.")
+        else:
+            print("\n✓ VideoFlow processing completed successfully!")
         
     except Exception as e:
         print(f"\n✗ Error: {e}")
