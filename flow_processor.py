@@ -29,6 +29,7 @@ from config import DeviceManager
 from video import VideoInfo, FrameExtractor
 from encoding import FlowEncoderFactory, encode_flow
 from effects import TAAProcessor, apply_taa_effect
+from storage import FlowCacheManager
 
 class AdaptiveOpticalFlowKalmanFilter:
     """
@@ -358,6 +359,9 @@ class VideoFlowProcessor:
         self.taa_flow_processor = TAAProcessor(alpha=0.1)
         self.taa_simple_processor = TAAProcessor(alpha=0.1)
         
+        # Initialize storage manager
+        self.cache_manager = FlowCacheManager()
+        
         print(f"VideoFlow Processor initialized - Device: {self.device}")
         self.device_manager.print_device_info()
         print(f"Fast mode: {fast_mode}")
@@ -654,409 +658,56 @@ class VideoFlowProcessor:
         return self.kalman_filter.update(current_flow, self.kalman_filter.frame_count)
         
     def save_flow_flo(self, flow, filename):
-        """
-        Save optical flow in Middlebury .flo format (lossless)
-        
-        Args:
-            flow: Raw optical flow data [H, W, 2]
-            filename: Output filename with .flo extension
-        """
-        # Convert to numpy if tensor
-        if torch.is_tensor(flow):
-            flow = flow.cpu().numpy()
-        
-        height, width = flow.shape[:2]
-        
-        with open(filename, 'wb') as f:
-            # Write magic number
-            f.write(b'PIEH')
-            
-            # Write dimensions
-            import struct
-            f.write(struct.pack('<I', width))
-            f.write(struct.pack('<I', height))
-            
-            # Write flow data as float32
-            flow_data = flow.astype(np.float32)
-            f.write(flow_data.tobytes())
+        """Save optical flow in Middlebury .flo format (lossless)"""
+        return self.cache_manager.file_handler.save_flow_flo(flow, filename)
     
     def save_flow_npz(self, flow, filename, frame_idx=None, metadata=None):
-        """
-        Save optical flow in NumPy .npz format (lossless, compressed)
-        
-        Args:
-            flow: Raw optical flow data [H, W, 2]
-            filename: Output filename with .npz extension
-            frame_idx: Frame index for metadata
-            metadata: Additional metadata dictionary
-        """
-        # Convert to numpy if tensor
-        if torch.is_tensor(flow):
-            flow = flow.cpu().numpy()
-        
-        # Prepare save data
-        save_data = {'flow': flow.astype(np.float32)}
-        
-        if frame_idx is not None:
-            save_data['frame_idx'] = frame_idx
-            
-        if metadata is not None:
-            save_data.update(metadata)
-            
-        # Save with compression
-        np.savez_compressed(filename, **save_data)
+        """Save optical flow in NumPy .npz format (lossless, compressed)"""
+        return self.cache_manager.file_handler.save_flow_npz(flow, filename, frame_idx, metadata)
     
     def save_optical_flow_files(self, flow, base_filename, frame_idx, save_format):
-        """
-        Save optical flow in specified format(s)
-        
-        Args:
-            flow: Raw optical flow data [H, W, 2]
-            base_filename: Base filename without extension
-            frame_idx: Current frame index
-            save_format: Format to save ('flo', 'npz', or 'both')
-        """
-        if save_format in ['flo', 'both']:
-            flo_filename = f"{base_filename}_frame_{frame_idx:06d}.flo"
-            self.save_flow_flo(flow, flo_filename)
-            
-        if save_format in ['npz', 'both']:
-            npz_filename = f"{base_filename}_frame_{frame_idx:06d}.npz"
-            metadata = {
-                'frame_idx': frame_idx,
-                'shape': flow.shape,
-                'dtype': str(flow.dtype)
-            }
-            self.save_flow_npz(flow, npz_filename, frame_idx, metadata)
+        """Save optical flow in specified format(s)"""
+        return self.cache_manager.save_optical_flow_files(flow, base_filename, frame_idx, save_format)
     
     def load_flow_flo(self, filename):
-        """
-        Load optical flow from Middlebury .flo format
-        
-        Args:
-            filename: Input .flo filename
-            
-        Returns:
-            Optical flow data [H, W, 2] as numpy array
-        """
-        with open(filename, 'rb') as f:
-            # Read magic number
-            magic = f.read(4)
-            if magic != b'PIEH':
-                raise ValueError(f"Invalid .flo file magic number: {magic}")
-            
-            # Read dimensions
-            import struct
-            width = struct.unpack('<I', f.read(4))[0]
-            height = struct.unpack('<I', f.read(4))[0]
-            
-            # Read flow data
-            flow_data = f.read(width * height * 2 * 4)  # 2 channels, 4 bytes per float32
-            flow = np.frombuffer(flow_data, dtype=np.float32)
-            flow = flow.reshape(height, width, 2)
-            
-        return flow
+        """Load optical flow from Middlebury .flo format"""
+        return self.cache_manager.file_handler.load_flow_flo(filename)
     
     def load_flow_npz(self, filename):
-        """
-        Load optical flow from NumPy .npz format
-        
-        Args:
-            filename: Input .npz filename
-            
-        Returns:
-            Dictionary with 'flow' and metadata
-        """
-        data = np.load(filename)
-        return dict(data)
+        """Load optical flow from NumPy .npz format"""
+        return self.cache_manager.file_handler.load_flow_npz(filename)
     
     def generate_flow_cache_path(self, input_path, start_frame, max_frames, sequence_length, fast_mode, tile_mode):
-        """
-        Generate cache directory path based on video processing parameters that affect raw optical flow computation
-        
-        Args:
-            input_path: Input video path
-            start_frame: Starting frame
-            max_frames: Number of frames to process
-            sequence_length: VideoFlow sequence length
-            fast_mode: Fast mode flag
-            tile_mode: Tile mode flag
-            
-        Returns:
-            Cache directory path
-        """
-        # Create cache identifier based on processing parameters that affect raw flow computation
-        # NOTE: flow_smoothing is NOT included because cache stores raw flow before stabilization
-        video_name = Path(input_path).stem
-        cache_params = [
-            f"seq{sequence_length}",
-            f"start{start_frame}",
-            f"frames{max_frames}"
-        ]
-        
-        if fast_mode:
-            cache_params.append("fast")
-        if tile_mode:
-            cache_params.append("tile")
-            
-        cache_id = "_".join(cache_params)
-        cache_dir_name = f"{video_name}_flow_cache_{cache_id}"
-        
-        # Place cache next to input video
-        cache_path = Path(input_path).parent / cache_dir_name
-        return str(cache_path)
+        """Generate cache directory path based on video processing parameters"""
+        return self.cache_manager.generate_cache_path(input_path, start_frame, max_frames, sequence_length, fast_mode, tile_mode)
     
     def check_flow_cache_exists(self, cache_dir, max_frames):
-        """
-        Check if complete flow cache exists for the requested number of frames
-        
-        Args:
-            cache_dir: Cache directory path
-            max_frames: Expected number of frames
-            
-        Returns:
-            (exists, format) where format is 'flo', 'npz', or None
-        """
-        if not os.path.exists(cache_dir):
-            return False, None
-            
-        # Check for .flo files
-        flo_files = []
-        npz_files = []
-        
-        for i in range(max_frames):
-            flo_file = os.path.join(cache_dir, f"flow_frame_{i:06d}.flo")
-            npz_file = os.path.join(cache_dir, f"flow_frame_{i:06d}.npz")
-            
-            if os.path.exists(flo_file):
-                flo_files.append(flo_file)
-            if os.path.exists(npz_file):
-                npz_files.append(npz_file)
-        
-        # Determine which format is complete
-        if len(flo_files) == max_frames:
-            return True, 'flo'
-        elif len(npz_files) == max_frames:
-            return True, 'npz'
-        else:
-            return False, None
+        """Check if complete flow cache exists for the requested number of frames"""
+        return self.cache_manager.check_cache_exists(cache_dir, max_frames)
     
     def load_cached_flow(self, cache_dir, frame_idx, format_type='auto'):
-        """
-        Load cached optical flow for specific frame
-        
-        Args:
-            cache_dir: Cache directory path
-            frame_idx: Frame index to load
-            format_type: 'flo', 'npz', or 'auto'
-            
-        Returns:
-            Optical flow data [H, W, 2]
-        """
-        if format_type == 'auto':
-            # Try .flo first, then .npz
-            flo_file = os.path.join(cache_dir, f"flow_frame_{frame_idx:06d}.flo")
-            npz_file = os.path.join(cache_dir, f"flow_frame_{frame_idx:06d}.npz")
-            
-            if os.path.exists(flo_file):
-                return self.load_flow_flo(flo_file)
-            elif os.path.exists(npz_file):
-                npz_data = self.load_flow_npz(npz_file)
-                return npz_data['flow']
-            else:
-                raise FileNotFoundError(f"No cached flow found for frame {frame_idx}")
-        
-        elif format_type == 'flo':
-            flo_file = os.path.join(cache_dir, f"flow_frame_{frame_idx:06d}.flo")
-            return self.load_flow_flo(flo_file)
-            
-        elif format_type == 'npz':
-            npz_file = os.path.join(cache_dir, f"flow_frame_{frame_idx:06d}.npz")
-            npz_data = self.load_flow_npz(npz_file)
-            return npz_data['flow']
-        
-        else:
-            raise ValueError(f"Unknown format type: {format_type}")
+        """Load cached optical flow for specific frame"""
+        return self.cache_manager.load_cached_flow(cache_dir, frame_idx, format_type)
     
     def generate_flow_lods(self, flow_data, num_lods=5):
-        """
-        Generate Level-of-Detail (LOD) pyramid for flow data using arithmetic averaging
-        
-        Args:
-            flow_data: Original flow data [H, W, 2]
-            num_lods: Number of LOD levels to generate (default: 5)
-            
-        Returns:
-            List of flow data at different LOD levels [original, lod1, lod2, ...]
-        """
-        lods = [flow_data]  # LOD 0 is original
-        
-        current_flow = flow_data.copy()
-        
-        for lod_level in range(1, num_lods):
-            h, w = current_flow.shape[:2]
-            
-            # Check if we can create another LOD level
-            if h < 4 or w < 4:
-                # Need padding
-                target_h = max(4, h)
-                target_w = max(4, w)
-                
-                # Calculate padding
-                pad_h = target_h - h
-                pad_w = target_w - w
-                pad_top = pad_h // 2
-                pad_bottom = pad_h - pad_top
-                pad_left = pad_w // 2
-                pad_right = pad_w - pad_left
-                
-                # Create weight mask (1 for original data, 0 for padding)
-                weight_mask = np.ones((h, w), dtype=np.float32)
-                padded_weight = np.pad(weight_mask, ((pad_top, pad_bottom), (pad_left, pad_right)), 
-                                     mode='constant', constant_values=0)
-                
-                # Pad flow data
-                padded_flow = np.pad(current_flow, ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0)), 
-                                   mode='constant', constant_values=0)
-                
-                current_flow = padded_flow
-                h, w = current_flow.shape[:2]
-            else:
-                # Create uniform weight mask
-                padded_weight = np.ones((h, w), dtype=np.float32)
-            
-            # Downsample by factor of 2 using weighted averaging
-            new_h = h // 2
-            new_w = w // 2
-            
-            downsampled_flow = np.zeros((new_h, new_w, 2), dtype=np.float32)
-            
-            for y in range(new_h):
-                for x in range(new_w):
-                    # Get 2x2 block
-                    y_start, y_end = y * 2, min((y + 1) * 2, h)
-                    x_start, x_end = x * 2, min((x + 1) * 2, w)
-                    
-                    flow_block = current_flow[y_start:y_end, x_start:x_end]
-                    weight_block = padded_weight[y_start:y_end, x_start:x_end]
-                    
-                    # Calculate weighted average
-                    total_weight = np.sum(weight_block)
-                    if total_weight > 0:
-                        # Weighted average for each channel
-                        weighted_flow_u = np.sum(flow_block[:, :, 0] * weight_block) / total_weight
-                        weighted_flow_v = np.sum(flow_block[:, :, 1] * weight_block) / total_weight
-                        
-                        # Scale flow vectors by 0.5 (since we're downsampling by 2)
-                        downsampled_flow[y, x, 0] = weighted_flow_u * 0.5
-                        downsampled_flow[y, x, 1] = weighted_flow_v * 0.5
-                    else:
-                        downsampled_flow[y, x] = 0
-            
-            lods.append(downsampled_flow)
-            current_flow = downsampled_flow
-            
-            # Update weight mask for next iteration
-            padded_weight = np.ones((new_h, new_w), dtype=np.float32)
-        
-        return lods
+        """Generate Level-of-Detail (LOD) pyramid for flow data"""
+        return self.cache_manager.lod_generator.generate_lods(flow_data, num_lods)
     
     def save_flow_lods(self, lods, cache_dir, frame_idx):
-        """
-        Save LOD pyramid for a frame
-        
-        Args:
-            lods: List of LOD flow data
-            cache_dir: Cache directory
-            frame_idx: Frame index
-        """
-        lod_dir = os.path.join(cache_dir, 'lods')
-        os.makedirs(lod_dir, exist_ok=True)
-        
-        for lod_level, lod_data in enumerate(lods):
-            filename = os.path.join(lod_dir, f"flow_frame_{frame_idx:06d}_lod{lod_level}.npz")
-            metadata = {
-                'frame_idx': frame_idx,
-                'lod_level': lod_level,
-                'shape': lod_data.shape,
-                'dtype': str(lod_data.dtype)
-            }
-            self.save_flow_npz(lod_data, filename, frame_idx, metadata)
+        """Save LOD pyramid for a frame"""
+        return self.cache_manager.save_flow_lods(lods, cache_dir, frame_idx)
     
     def load_flow_lod(self, cache_dir, frame_idx, lod_level=0):
-        """
-        Load specific LOD level for a frame
-        
-        Args:
-            cache_dir: Cache directory
-            frame_idx: Frame index
-            lod_level: LOD level to load (0 = original)
-            
-        Returns:
-            Flow data for specified LOD level
-        """
-        lod_dir = os.path.join(cache_dir, 'lods')
-        filename = os.path.join(lod_dir, f"flow_frame_{frame_idx:06d}_lod{lod_level}.npz")
-        
-        if os.path.exists(filename):
-            npz_data = self.load_flow_npz(filename)
-            return npz_data['flow']
-        else:
-            raise FileNotFoundError(f"LOD {lod_level} not found for frame {frame_idx}")
+        """Load specific LOD level for a frame"""
+        return self.cache_manager.load_flow_lod(cache_dir, frame_idx, lod_level)
     
     def check_flow_lods_exist(self, cache_dir, max_frames, num_lods=5):
-        """
-        Check if LOD pyramid exists for all frames
-        
-        Args:
-            cache_dir: Cache directory path
-            max_frames: Expected number of frames
-            num_lods: Number of LOD levels expected
-            
-        Returns:
-            True if all LODs exist for all frames
-        """
-        lod_dir = os.path.join(cache_dir, 'lods')
-        if not os.path.exists(lod_dir):
-            return False
-        
-        for frame_idx in range(max_frames):
-            for lod_level in range(num_lods):
-                filename = os.path.join(lod_dir, f"flow_frame_{frame_idx:06d}_lod{lod_level}.npz")
-                if not os.path.exists(filename):
-                    return False
-        
-        return True
+        """Check if LOD pyramid exists for all frames"""
+        return self.cache_manager.check_flow_lods_exist(cache_dir, max_frames, num_lods)
     
     def generate_lods_for_cache(self, cache_dir, max_frames, num_lods=5):
-        """
-        Generate LOD pyramids for all frames in cache
-        
-        Args:
-            cache_dir: Cache directory path
-            max_frames: Number of frames to process
-            num_lods: Number of LOD levels to generate
-        """
-        print(f"Generating {num_lods} LOD levels for {max_frames} frames...")
-        
-        with tqdm(total=max_frames, desc="Generating LODs") as pbar:
-            for frame_idx in range(max_frames):
-                try:
-                    # Load original flow data
-                    flow_data = self.load_cached_flow(cache_dir, frame_idx)
-                    
-                    # Generate LOD pyramid
-                    lods = self.generate_flow_lods(flow_data, num_lods)
-                    
-                    # Save LOD pyramid
-                    self.save_flow_lods(lods, cache_dir, frame_idx)
-                    
-                    pbar.update(1)
-                    
-                except Exception as e:
-                    print(f"Error generating LODs for frame {frame_idx}: {e}")
-                    pbar.update(1)
-                    continue
+        """Generate LOD pyramids for all frames in cache"""
+        return self.cache_manager.generate_lods_for_cache(cache_dir, max_frames, num_lods)
 
     def encode_hsv_format(self, flow, width, height):
         """Encode optical flow in HSV format using encoding module"""
@@ -1459,8 +1110,7 @@ class VideoFlowProcessor:
                     raw_flow = self.compute_optical_flow_tiled(frames, i)
                 
                 # Save raw flow to cache BEFORE stabilization
-                cache_base_filename = os.path.join(flow_cache_dir, "flow")
-                self.save_optical_flow_files(raw_flow, cache_base_filename, i, cache_save_format)
+                self.cache_manager.save_flow_to_cache(raw_flow, flow_cache_dir, i, cache_save_format)
             
             # Save raw optical flow if explicitly requested (before stabilization)
             if save_flow is not None and flow_base_filename is not None:
@@ -1877,8 +1527,7 @@ def main():
                     flow = processor.compute_optical_flow(frames, i)
                 
                 # Save to cache
-                cache_base_filename = os.path.join(flow_cache_dir, "flow")
-                processor.save_optical_flow_files(flow, cache_base_filename, i, 'npz')
+                processor.cache_manager.save_flow_to_cache(flow, flow_cache_dir, i, 'npz')
                 
                 pbar.update(1)
             
