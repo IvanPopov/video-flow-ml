@@ -28,6 +28,7 @@ from configs.multiframes_sintel_submission import get_cfg
 from config import DeviceManager
 from video import VideoInfo, FrameExtractor
 from encoding import FlowEncoderFactory, encode_flow
+from effects import TAAProcessor, apply_taa_effect
 
 class AdaptiveOpticalFlowKalmanFilter:
     """
@@ -352,6 +353,10 @@ class VideoFlowProcessor:
         
         # TAA compare mode state
         self.taa_compare_kalman_filters = {}
+        
+        # TAA processors for consistent state management
+        self.taa_flow_processor = TAAProcessor(alpha=0.1)
+        self.taa_simple_processor = TAAProcessor(alpha=0.1)
         
         print(f"VideoFlow Processor initialized - Device: {self.device}")
         self.device_manager.print_device_info()
@@ -1066,79 +1071,25 @@ class VideoFlowProcessor:
         return encode_flow(flow, width, height, 'torchvision')
     
     def apply_taa_effect(self, current_frame, flow_pixels=None, previous_taa_frame=None, alpha=0.1, use_flow=True):
-        """
-        Apply TAA (Temporal Anti-Aliasing) effect with or without optical flow
-        
-        Args:
-            current_frame: Current frame (RGB, 0-255)
-            flow: Inverted optical flow from previous frame (HWC, normalized) - only used if use_flow=True
-            previous_taa_frame: Previous TAA result frame
-            alpha: Blending weight (0.0 = full history, 1.0 = no history)
-            use_flow: Whether to use optical flow for reprojection
-        
-        Returns:
-            TAA processed frame
-        """
-        if previous_taa_frame is None:
-            # First frame, no history
-            return current_frame.astype(np.float32)
-        
-        current_float = current_frame.astype(np.float32)
-        
-        if not use_flow or flow_pixels is None:
-            # Simple temporal blending without flow (basic TAA)
-            taa_result = alpha * current_float + (1 - alpha) * previous_taa_frame
-            return taa_result
-        
-        # Flow-based TAA (motion-compensated)
-        h, w = current_frame.shape[:2]
-        
-        # Create coordinate grids
-        y_coords, x_coords = np.mgrid[0:h, 0:w]
-        
-        # Calculate previous pixel positions using flow
-        prev_x = x_coords + flow_pixels[:, :, 0]
-        prev_y = y_coords + flow_pixels[:, :, 1]
-        
-        # Handle NaN and inf values
-        prev_x = np.nan_to_num(prev_x, nan=0.0, posinf=w-1, neginf=0.0)
-        prev_y = np.nan_to_num(prev_y, nan=0.0, posinf=h-1, neginf=0.0)
-        
-        # Clamp coordinates to valid range
-        prev_x = np.clip(prev_x, 0, w - 1)
-        prev_y = np.clip(prev_y, 0, h - 1)
-        
-        # Bilinear interpolation from previous frame
-        x0 = np.floor(prev_x).astype(int)
-        x1 = np.minimum(x0 + 1, w - 1)
-        y0 = np.floor(prev_y).astype(int)
-        y1 = np.minimum(y0 + 1, h - 1)
-        
-        # Ensure indices are valid
-        x0 = np.clip(x0, 0, w - 1)
-        x1 = np.clip(x1, 0, w - 1)
-        y0 = np.clip(y0, 0, h - 1)
-        y1 = np.clip(y1, 0, h - 1)
-        
-        # Interpolation weights
-        wx = prev_x - x0
-        wy = prev_y - y0
-        
-        # Sample previous TAA frame with bilinear interpolation
-        reprojected = np.zeros_like(current_frame, dtype=np.float32)
-        
-        for c in range(3):  # RGB channels
-            reprojected[:, :, c] = (
-                previous_taa_frame[y0, x0, c] * (1 - wx) * (1 - wy) +
-                previous_taa_frame[y0, x1, c] * wx * (1 - wy) +
-                previous_taa_frame[y1, x0, c] * (1 - wx) * wy +
-                previous_taa_frame[y1, x1, c] * wx * wy
+        """Apply TAA effect using effects module with persistent processors"""
+        if use_flow:
+            return self.taa_flow_processor.apply_taa(
+                current_frame=current_frame,
+                flow_pixels=flow_pixels,
+                previous_taa_frame=previous_taa_frame,
+                alpha=alpha,
+                use_flow=True,
+                sequence_id='flow_taa'
             )
-        
-        # Exponential moving average (TAA blending)
-        taa_result = alpha * current_float + (1 - alpha) * reprojected
-        
-        return taa_result
+        else:
+            return self.taa_simple_processor.apply_taa(
+                current_frame=current_frame,
+                flow_pixels=None,
+                previous_taa_frame=previous_taa_frame,
+                alpha=alpha,
+                use_flow=False,
+                sequence_id='simple_taa'
+            )
     
     def add_text_overlay(self, frame, text, position='top-left', font_scale=0.4, color=(255, 255, 255), thickness=1):
         """
@@ -1455,8 +1406,9 @@ class VideoFlowProcessor:
         frame_times = []
         
         # TAA state
-        previous_taa_frame = None
-        previous_taa_simple_frame = None
+        # Reset TAA processors for new video
+        self.taa_flow_processor.reset_history()
+        self.taa_simple_processor.reset_history()
         previous_flow = None  # Store previous frame's optical flow for TAA
         
         # TAA Compare state
@@ -1557,22 +1509,19 @@ class VideoFlowProcessor:
                             taa_compare_frames[name] = taa_result.copy()
                     
                     # Normal TAA processing (for backward compatibility)
-                    taa_result = self.apply_taa_effect(frames[i], flow, previous_taa_frame, alpha=0.1, use_flow=True)
-                    previous_taa_frame = taa_result.copy()
+                    taa_result = self.apply_taa_effect(frames[i], flow, None, alpha=0.1, use_flow=True)
                     taa_frame = taa_result
                 else:
-                    # First frame or no previous flow - just copy current frame
-                    taa_result = frames[i].astype(np.float32)
-                    previous_taa_frame = taa_result.copy()
+                    # First frame or no previous flow - apply TAA without flow
+                    taa_result = self.apply_taa_effect(frames[i], None, None, alpha=0.1, use_flow=True)
                     taa_frame = taa_result
                     if taa_compare:
                         for name in self.taa_compare_kalman_filters.keys():
                             taa_compare_frames[name] = taa_result.copy()
 
                 # Apply simple TAA (no flow) with alpha=0.1
-                taa_simple_result = self.apply_taa_effect(frames[i], None, previous_taa_simple_frame, alpha=0.1, use_flow=False)
-                previous_taa_simple_frame = taa_simple_result.copy()
-                taa_simple_frame = taa_result
+                taa_simple_result = self.apply_taa_effect(frames[i], None, None, alpha=0.1, use_flow=False)
+                taa_simple_frame = taa_simple_result
                 
             # Store current flow for next frame's TAA
             previous_flow = flow.copy()
