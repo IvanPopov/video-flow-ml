@@ -24,8 +24,9 @@ from core.Networks import build_network
 from utils.utils import InputPadder
 from configs.multiframes_sintel_submission import get_cfg
 
-# Import our config module
+# Import our modules
 from config import DeviceManager
+from video import VideoInfo, FrameExtractor
 
 class AdaptiveOpticalFlowKalmanFilter:
     """
@@ -393,10 +394,8 @@ class VideoFlowProcessor:
         
     def get_video_fps(self, video_path):
         """Get video FPS for time calculations"""
-        cap = cv2.VideoCapture(video_path)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        cap.release()
-        return fps
+        video_info = VideoInfo(video_path)
+        return video_info.get_fps()
     
     def time_to_frame(self, time_seconds, fps):
         """Convert time in seconds to frame number"""
@@ -404,80 +403,8 @@ class VideoFlowProcessor:
     
     def extract_frames(self, video_path, max_frames=1000, start_frame=0):
         """Extract frames from video starting at start_frame"""
-        end_frame = start_frame + max_frames
-        
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            raise ValueError(f"Cannot open video: {video_path}")
-        
-        # Get video properties
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        orig_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        orig_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        
-        # Check bounds
-        if start_frame >= total_frames:
-            raise ValueError(f"Start frame {start_frame} exceeds total frames {total_frames}")
-        
-        actual_end = min(end_frame, total_frames)
-        frames_to_extract = actual_end - start_frame
-        
-        # Apply fast mode resolution reduction
-        if self.fast_mode:
-            # More aggressive resolution reduction for fast mode
-            # Target maximum 256x256, but maintain aspect ratio
-            max_dimension = 256
-            scale_factor = min(max_dimension / orig_width, max_dimension / orig_height)
-            
-            # Don't upscale if already small
-            if scale_factor > 1.0:
-                scale_factor = 1.0
-            
-            # Apply additional reduction for large videos
-            if max(orig_width, orig_height) > 512:
-                scale_factor = min(scale_factor, 0.25)  # Quarter size for very large videos
-            elif max(orig_width, orig_height) > 256:
-                scale_factor = min(scale_factor, 0.5)   # Half size for medium videos
-            
-            width = int(orig_width * scale_factor)
-            height = int(orig_height * scale_factor)
-            
-            # Ensure dimensions are even (required for some codecs) and minimum 64x64
-            width = max(64, width - (width % 2))
-            height = max(64, height - (height % 2))
-            
-            print(f"Fast mode: aggressive resolution reduction from {orig_width}x{orig_height} to {width}x{height} (scale: {scale_factor:.2f})")
-        else:
-            width = orig_width
-            height = orig_height
-
-        # Seek to start frame
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-        
-        # Extract frames
-        frames = []
-        pbar = tqdm(total=frames_to_extract, desc="Extracting frames")
-        
-        for i in range(frames_to_extract):
-            ret, frame = cap.read()
-            if not ret:
-                break
-            
-            # Convert BGR to RGB
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            # Resize if in fast mode
-            if self.fast_mode:
-                frame_rgb = cv2.resize(frame_rgb, (width, height))
-            
-            frames.append(frame_rgb)
-            pbar.update(1)
-        
-        cap.release()
-        pbar.close()
-        
-        return frames, fps, width, height, start_frame
+        frame_extractor = FrameExtractor(video_path, fast_mode=self.fast_mode)
+        return frame_extractor.extract_frames(max_frames=max_frames, start_frame=start_frame)
     
     def calculate_tile_grid(self, width, height, tile_size=1280):
         """
@@ -1515,7 +1442,13 @@ class VideoFlowProcessor:
         print(f"Frame range: {start_frame} to {start_frame + max_frames - 1}")
         
         # Extract frames first
-        frames, fps, width, height, actual_start = self.extract_frames(input_path, max_frames=max_frames, start_frame=start_frame)
+        frame_extractor = FrameExtractor(input_path, fast_mode=self.fast_mode)
+        frames, fps, width, height, actual_start = frame_extractor.extract_frames(
+            max_frames=max_frames, 
+            start_frame=start_frame,
+            start_time=start_time,
+            duration=duration
+        )
         
         # Setup flow caching
         flow_cache_dir = None
