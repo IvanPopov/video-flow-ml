@@ -739,6 +739,186 @@ class VideoFlowProcessor:
         
         else:
             raise ValueError(f"Unknown format type: {format_type}")
+    
+    def generate_flow_lods(self, flow_data, num_lods=5):
+        """
+        Generate Level-of-Detail (LOD) pyramid for flow data using arithmetic averaging
+        
+        Args:
+            flow_data: Original flow data [H, W, 2]
+            num_lods: Number of LOD levels to generate (default: 5)
+            
+        Returns:
+            List of flow data at different LOD levels [original, lod1, lod2, ...]
+        """
+        lods = [flow_data]  # LOD 0 is original
+        
+        current_flow = flow_data.copy()
+        
+        for lod_level in range(1, num_lods):
+            h, w = current_flow.shape[:2]
+            
+            # Check if we can create another LOD level
+            if h < 4 or w < 4:
+                # Need padding
+                target_h = max(4, h)
+                target_w = max(4, w)
+                
+                # Calculate padding
+                pad_h = target_h - h
+                pad_w = target_w - w
+                pad_top = pad_h // 2
+                pad_bottom = pad_h - pad_top
+                pad_left = pad_w // 2
+                pad_right = pad_w - pad_left
+                
+                # Create weight mask (1 for original data, 0 for padding)
+                weight_mask = np.ones((h, w), dtype=np.float32)
+                padded_weight = np.pad(weight_mask, ((pad_top, pad_bottom), (pad_left, pad_right)), 
+                                     mode='constant', constant_values=0)
+                
+                # Pad flow data
+                padded_flow = np.pad(current_flow, ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0)), 
+                                   mode='constant', constant_values=0)
+                
+                current_flow = padded_flow
+                h, w = current_flow.shape[:2]
+            else:
+                # Create uniform weight mask
+                padded_weight = np.ones((h, w), dtype=np.float32)
+            
+            # Downsample by factor of 2 using weighted averaging
+            new_h = h // 2
+            new_w = w // 2
+            
+            downsampled_flow = np.zeros((new_h, new_w, 2), dtype=np.float32)
+            
+            for y in range(new_h):
+                for x in range(new_w):
+                    # Get 2x2 block
+                    y_start, y_end = y * 2, min((y + 1) * 2, h)
+                    x_start, x_end = x * 2, min((x + 1) * 2, w)
+                    
+                    flow_block = current_flow[y_start:y_end, x_start:x_end]
+                    weight_block = padded_weight[y_start:y_end, x_start:x_end]
+                    
+                    # Calculate weighted average
+                    total_weight = np.sum(weight_block)
+                    if total_weight > 0:
+                        # Weighted average for each channel
+                        weighted_flow_u = np.sum(flow_block[:, :, 0] * weight_block) / total_weight
+                        weighted_flow_v = np.sum(flow_block[:, :, 1] * weight_block) / total_weight
+                        
+                        # Scale flow vectors by 0.5 (since we're downsampling by 2)
+                        downsampled_flow[y, x, 0] = weighted_flow_u * 0.5
+                        downsampled_flow[y, x, 1] = weighted_flow_v * 0.5
+                    else:
+                        downsampled_flow[y, x] = 0
+            
+            lods.append(downsampled_flow)
+            current_flow = downsampled_flow
+            
+            # Update weight mask for next iteration
+            padded_weight = np.ones((new_h, new_w), dtype=np.float32)
+        
+        return lods
+    
+    def save_flow_lods(self, lods, cache_dir, frame_idx):
+        """
+        Save LOD pyramid for a frame
+        
+        Args:
+            lods: List of LOD flow data
+            cache_dir: Cache directory
+            frame_idx: Frame index
+        """
+        lod_dir = os.path.join(cache_dir, 'lods')
+        os.makedirs(lod_dir, exist_ok=True)
+        
+        for lod_level, lod_data in enumerate(lods):
+            filename = os.path.join(lod_dir, f"flow_frame_{frame_idx:06d}_lod{lod_level}.npz")
+            metadata = {
+                'frame_idx': frame_idx,
+                'lod_level': lod_level,
+                'shape': lod_data.shape,
+                'dtype': str(lod_data.dtype)
+            }
+            self.save_flow_npz(lod_data, filename, frame_idx, metadata)
+    
+    def load_flow_lod(self, cache_dir, frame_idx, lod_level=0):
+        """
+        Load specific LOD level for a frame
+        
+        Args:
+            cache_dir: Cache directory
+            frame_idx: Frame index
+            lod_level: LOD level to load (0 = original)
+            
+        Returns:
+            Flow data for specified LOD level
+        """
+        lod_dir = os.path.join(cache_dir, 'lods')
+        filename = os.path.join(lod_dir, f"flow_frame_{frame_idx:06d}_lod{lod_level}.npz")
+        
+        if os.path.exists(filename):
+            npz_data = self.load_flow_npz(filename)
+            return npz_data['flow']
+        else:
+            raise FileNotFoundError(f"LOD {lod_level} not found for frame {frame_idx}")
+    
+    def check_flow_lods_exist(self, cache_dir, max_frames, num_lods=5):
+        """
+        Check if LOD pyramid exists for all frames
+        
+        Args:
+            cache_dir: Cache directory path
+            max_frames: Expected number of frames
+            num_lods: Number of LOD levels expected
+            
+        Returns:
+            True if all LODs exist for all frames
+        """
+        lod_dir = os.path.join(cache_dir, 'lods')
+        if not os.path.exists(lod_dir):
+            return False
+        
+        for frame_idx in range(max_frames):
+            for lod_level in range(num_lods):
+                filename = os.path.join(lod_dir, f"flow_frame_{frame_idx:06d}_lod{lod_level}.npz")
+                if not os.path.exists(filename):
+                    return False
+        
+        return True
+    
+    def generate_lods_for_cache(self, cache_dir, max_frames, num_lods=5):
+        """
+        Generate LOD pyramids for all frames in cache
+        
+        Args:
+            cache_dir: Cache directory path
+            max_frames: Number of frames to process
+            num_lods: Number of LOD levels to generate
+        """
+        print(f"Generating {num_lods} LOD levels for {max_frames} frames...")
+        
+        with tqdm(total=max_frames, desc="Generating LODs") as pbar:
+            for frame_idx in range(max_frames):
+                try:
+                    # Load original flow data
+                    flow_data = self.load_cached_flow(cache_dir, frame_idx)
+                    
+                    # Generate LOD pyramid
+                    lods = self.generate_flow_lods(flow_data, num_lods)
+                    
+                    # Save LOD pyramid
+                    self.save_flow_lods(lods, cache_dir, frame_idx)
+                    
+                    pbar.update(1)
+                    
+                except Exception as e:
+                    print(f"Error generating LODs for frame {frame_idx}: {e}")
+                    pbar.update(1)
+                    continue
 
     def encode_hsv_format(self, flow, width, height):
         """
@@ -1149,6 +1329,17 @@ class VideoFlowProcessor:
             else:
                 print(f"Force recompute enabled, will overwrite cache: {flow_cache_dir}")
         
+        # Check and generate LOD pyramids if needed
+        if use_cached_flow:
+            # Check if LOD pyramids exist
+            lods_exist = self.check_flow_lods_exist(flow_cache_dir, len(frames))
+            if not lods_exist:
+                print("LOD pyramids not found, generating...")
+                self.generate_lods_for_cache(flow_cache_dir, len(frames))
+                print("LOD pyramids generated successfully!")
+            else:
+                print("LOD pyramids found in cache")
+        
         # Load VideoFlow model only if we need to compute flow
         if not use_cached_flow:
             self.load_videoflow_model()
@@ -1335,6 +1526,12 @@ class VideoFlowProcessor:
             overall_tile_pbar.close()
             print()  # Add spacing after tile progress bars
         out.release()
+        
+        # Generate LOD pyramids for cached flow if we computed new flow
+        if not use_cached_flow and flow_cache_dir:
+            print("Generating LOD pyramids for computed flow...")
+            self.generate_lods_for_cache(flow_cache_dir, len(frames))
+            print("LOD pyramids generated!")
 
 def main():
     parser = argparse.ArgumentParser(description='VideoFlow Optical Flow Processor')
@@ -1374,6 +1571,8 @@ def main():
                        help='Force recomputation of optical flow even if cached data exists')
     parser.add_argument('--use-flow-cache', type=str, default=None,
                        help='Use optical flow from specific cache directory instead of computing')
+    parser.add_argument('--interactive', action='store_true',
+                       help='Launch interactive flow visualizer instead of creating video output')
     parser.add_argument('--show-tiles', action='store_true',
                        help='Only show tile grid calculation without processing video')
     
@@ -1393,6 +1592,114 @@ def main():
         print("Please download MOF_sintel.pth from:")
         print("https://github.com/XiaoyuShi97/VideoFlow")
         print("and place it in VideoFlow_ckpt/")
+        return
+    
+    # Special mode: interactive flow visualizer
+    if args.interactive:
+        print(f"Interactive mode: computing/loading optical flow for {args.input}")
+        
+        # Create processor to compute or find flow cache
+        processor = VideoFlowProcessor(device=args.device, fast_mode=args.fast, tile_mode=args.tile, 
+                                      sequence_length=args.sequence_length, flow_smoothing=0.0)
+        
+        # Handle time-based parameters for frame extraction
+        if args.start_time is not None or args.duration is not None:
+            fps = processor.get_video_fps(args.input)
+            print(f"Video FPS: {fps:.2f}")
+            
+            if args.start_time is not None:
+                start_frame = processor.time_to_frame(args.start_time, fps)
+                print(f"Start time: {args.start_time}s -> frame {start_frame}")
+            else:
+                start_frame = args.start_frame
+            
+            if args.duration is not None:
+                max_frames = processor.time_to_frame(args.duration, fps)
+                print(f"Duration: {args.duration}s -> {max_frames} frames")
+            else:
+                max_frames = args.frames
+        else:
+            start_frame = args.start_frame
+            max_frames = args.frames
+        
+        # Extract frames to determine actual count
+        frames, fps, width, height, actual_start = processor.extract_frames(args.input, max_frames=max_frames, start_frame=start_frame)
+        
+        # Determine flow cache directory
+        if args.use_flow_cache is not None:
+            flow_cache_dir = args.use_flow_cache
+        else:
+            flow_cache_dir = processor.generate_flow_cache_path(
+                args.input, start_frame, len(frames), args.sequence_length, 
+                args.fast, args.tile
+            )
+        
+        # Check if cache exists, if not compute it
+        cache_exists, cached_flow_format = processor.check_flow_cache_exists(flow_cache_dir, len(frames))
+        
+        if not cache_exists or args.force_recompute:
+            print(f"Computing optical flow and saving to cache: {flow_cache_dir}")
+            
+            # Load model and compute flow
+            processor.load_videoflow_model()
+            os.makedirs(flow_cache_dir, exist_ok=True)
+            
+            # Compute flow for all frames
+            from tqdm import tqdm
+            pbar = tqdm(total=len(frames), desc="Computing optical flow", unit="frame")
+            
+            for i in range(len(frames)):
+                # Compute flow
+                if processor.tile_mode:
+                    flow = processor.compute_optical_flow_tiled(frames, i)
+                else:
+                    flow = processor.compute_optical_flow(frames, i)
+                
+                # Save to cache
+                cache_base_filename = os.path.join(flow_cache_dir, "flow")
+                processor.save_optical_flow_files(flow, cache_base_filename, i, 'npz')
+                
+                pbar.update(1)
+            
+            pbar.close()
+            print("Flow computation completed!")
+            
+            # Generate LOD pyramids for the computed flow
+            print("Generating LOD pyramids...")
+            processor.generate_lods_for_cache(flow_cache_dir, len(frames))
+            print("LOD pyramids generated!")
+        else:
+            print(f"Using existing flow cache: {flow_cache_dir}")
+            
+            # Check and generate LOD pyramids if needed
+            lods_exist = processor.check_flow_lods_exist(flow_cache_dir, len(frames))
+            if not lods_exist:
+                print("LOD pyramids not found, generating...")
+                processor.generate_lods_for_cache(flow_cache_dir, len(frames))
+                print("LOD pyramids generated successfully!")
+            else:
+                print("LOD pyramids found in cache")
+        
+        # Launch interactive visualizer
+        print("Launching interactive flow visualizer...")
+        import subprocess
+        import sys
+        
+        visualizer_cmd = [
+            sys.executable, "flow_visualizer.py",
+            "--video", args.input,
+            "--flow-dir", flow_cache_dir,
+            "--start-frame", str(start_frame),
+            "--max-frames", str(len(frames))
+        ]
+        
+        try:
+            subprocess.run(visualizer_cmd, check=True)
+        except subprocess.CalledProcessError as e:
+            print(f"Error launching visualizer: {e}")
+        except FileNotFoundError:
+            print("Error: flow_visualizer.py not found. Make sure it's in the same directory.")
+        
         return
     
     # Special mode: only show tile grid calculation
