@@ -21,6 +21,7 @@ import glob
 from pathlib import Path
 import threading
 import queue
+import time
 from scipy import signal
 from scipy.ndimage import rotate
 
@@ -2017,6 +2018,11 @@ class FlowVisualizer:
         Identifies bad pixels, calculates corrected vectors, and
         schedules UI updates on the main thread.
         """
+        timings = {}
+        total_start_time = time.time()
+        
+        # --- Block 1: Setup ---
+        start_time = time.time()
         # Get copies of data for thread safety
         frame1 = self.frame1.copy()
         frame2 = self.frame2.copy()
@@ -2034,8 +2040,10 @@ class FlowVisualizer:
             flow_for_calc = cv2.resize(flow, (w, h), interpolation=cv2.INTER_LINEAR)
             flow_for_calc[:, :, 0] *= scale_x_to_frame
             flow_for_calc[:, :, 1] *= scale_y_to_frame
+        timings['1. Setup'] = time.time() - start_time
         
-        # 1. Identify all "bad" pixels
+        # --- Block 2: Initial Error Scan ---
+        start_time = time.time()
         bad_pixels_coords = []
         for y in range(h):
             for x in range(w):
@@ -2051,31 +2059,35 @@ class FlowVisualizer:
                 else:
                     # Out of bounds is also a bad pixel
                     bad_pixels_coords.append((x, y))
+        timings['2. Initial Error Scan'] = time.time() - start_time
 
         initial_error_count = len(bad_pixels_coords)
         if not bad_pixels_coords:
-            self.root.after(0, self._finish_correction, flow, True, initial_error_count, 0, 0)
+            self.root.after(0, self._finish_correction, flow, True, initial_error_count, 0, 0, timings)
             return
 
-        # 2. Setup progress bar on main thread
+        # Setup progress bar on main thread
         total_bad = len(bad_pixels_coords)
         def setup_progress():
             self.progress_label.config(text=f"Correcting 0/{total_bad} pixels...")
             self.progressbar.config(maximum=total_bad)
         self.root.after(0, setup_progress)
         
-        # 3. Get highest LOD data once
+        # --- Block 3: LOD Preparation ---
+        start_time = time.time()
         lod_level, lod_flow = self.get_highest_available_lod(self.current_pair)
         if lod_flow is None:
             print("No LOD data available for correction.")
-            self.root.after(0, self._finish_correction, flow, True, initial_error_count, initial_error_count, 0) # Abort
+            self.root.after(0, self._finish_correction, flow, True, initial_error_count, initial_error_count, 0, timings) # Abort
             return
 
         lod_h, lod_w = lod_flow.shape[:2]
         lod_scale_x = lod_w / w
         lod_scale_y = lod_h / h
+        timings['3. LOD Preparation'] = time.time() - start_time
 
-        # 4. Loop through bad pixels and correct them
+        # --- Block 4: Correction Loop ---
+        start_time = time.time()
         corrected_count = 0
         skipped_count = 0
         for orig_x, orig_y in bad_pixels_coords:
@@ -2130,8 +2142,10 @@ class FlowVisualizer:
                     self.progressbar.config(value=cc)
                     self.progress_label.config(text=f"Correcting {cc}/{total_bad} (skipped: {sc})...")
                 self.root.after(0, update_progress)
+        timings['4. Correction Loop'] = time.time() - start_time
         
-        # 5. Count final errors
+        # --- Block 5: Final Error Scan ---
+        start_time = time.time()
         final_flow_for_calc = flow
         if (fh != h or fw != w):
             final_flow_for_calc = cv2.resize(flow, (w, h), interpolation=cv2.INTER_LINEAR)
@@ -2151,15 +2165,20 @@ class FlowVisualizer:
                         final_error_count += 1
                 else:
                     final_error_count += 1
+        timings['5. Final Error Scan'] = time.time() - start_time
         
-        # 6. Schedule finalization on main thread
-        self.root.after(0, self._finish_correction, flow, False, initial_error_count, final_error_count, skipped_count)
+        # --- Block 6: Schedule finalization ---
+        timings['Total Worker Time'] = time.time() - total_start_time
+        self.root.after(0, self._finish_correction, flow, False, initial_error_count, final_error_count, skipped_count, timings)
 
-    def _finish_correction(self, corrected_flow, was_aborted, initial_error_count=0, final_error_count=0, skipped_count=0):
+    def _finish_correction(self, corrected_flow, was_aborted, initial_error_count=0, final_error_count=0, skipped_count=0, timings=None):
         """
         Finalizes the correction process on the main thread.
         Updates flow data, recalculates quality map, and refreshes UI.
         """
+        if timings is None:
+            timings = {}
+
         if was_aborted:
             self.progress_label.config(text="Correction aborted or not needed.")
             if initial_error_count == 0:
@@ -2171,6 +2190,9 @@ class FlowVisualizer:
             self.current_flow = corrected_flow
             self.flow_data_cache[self.current_pair] = corrected_flow
 
+            # --- Block 6: Finalization (Main Thread) ---
+            start_time = time.time()
+            
             # Recalculate LODs for the corrected flow and update them in the session cache
             self.progress_label.config(text="Recalculating and caching LODs...")
             self.root.update_idletasks()
@@ -2182,11 +2204,15 @@ class FlowVisualizer:
             except Exception as e:
                 print(f"Error recalculating LODs: {e}")
                 messagebox.showerror("LOD Error", "Could not recalculate LODs for this session.")
+            
+            timings['6a. LOD Recalculation'] = time.time() - start_time
 
             # Recalculate quality map
+            start_time_quality = time.time()
             self.progress_label.config(text="Recalculating quality map...")
             self.root.update_idletasks()
             self.quality_maps[self.current_pair] = self.generate_quality_frame_fast(self.frame1, self.frame2, self.current_flow)
+            timings['6b. Quality Map Recalculation'] = time.time() - start_time_quality
             
             # Update display
             self.update_display()
@@ -2204,6 +2230,20 @@ class FlowVisualizer:
         
         # Re-enable button
         self.correct_errors_btn.config(state=tk.NORMAL)
+
+        # --- Log timing statistics ---
+        if timings:
+            total_time = sum(timings.values())
+            # Ensure total time is not zero to avoid division by zero error
+            if total_time > 0:
+                print("\n--- Correction Performance Stats ---")
+                # Use Total Worker Time if available, otherwise sum all parts
+                overall_time = timings.get('Total Worker Time', total_time)
+                print(f"Total time: {overall_time:.4f}s")
+                for stage, duration in sorted(timings.items()):
+                    if stage != 'Total Worker Time':
+                        print(f"  - {stage:<30}: {duration:.4f}s ({duration/overall_time*100:.1f}%)")
+                print("------------------------------------")
 
     def run(self):
         """Run the GUI"""
