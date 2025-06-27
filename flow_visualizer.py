@@ -622,14 +622,16 @@ class FlowVisualizer:
                 
                 # Check color quality
                 arrow_color = self.get_arrow_color(orig_x, orig_y, target_orig_x, target_orig_y)
+                shift_pressed = (event.state & 0x0001)
                 
-                if arrow_color == "red":
-                    # Poor quality - start detail analysis, pass original flow vector
+                if arrow_color == "red" or shift_pressed:
+                    # Poor quality or Shift pressed - start detail analysis, pass original flow vector
                     self.perform_detail_analysis(orig_x, orig_y, (flow_x, flow_y))
                 else:
                     messagebox.showinfo("Information", 
                         f"Pixel ({orig_x}, {orig_y}) has good flow quality. "
-                        f"Detail analysis is only performed for pixels with poor quality (red arrows).")
+                        f"Detail analysis is only performed for pixels with poor quality (red arrows).\n\n"
+                        f"To analyze any pixel, hold Shift while clicking.")
     
     def _is_good_quality(self, similarity):
         """Check if a similarity score is above the defined quality threshold."""
@@ -663,6 +665,13 @@ class FlowVisualizer:
         
         print(f"LOD flow vector: ({lod_flow_x:.2f}, {lod_flow_y:.2f})")
         
+        # --- Stage 0: Check for Inconsistency ---
+        # Check if this pixel was previously marked as 'failed' to correct
+        is_previously_failed = False
+        failed_pixels = self.failed_correction_pixels.get(self.current_pair)
+        if failed_pixels and (orig_x, orig_y) in failed_pixels:
+            is_previously_failed = True
+        
         # --- Stage 1: Coarse Correction ---
         coarse_result = self._perform_coarse_correction(self.frame1, self.frame2, (orig_x, orig_y), (lod_flow_x, lod_flow_y))
         print(f"Coarse correction result: flow=({coarse_result['flow'][0]:.2f}, {coarse_result['flow'][1]:.2f}), similarity={coarse_result['similarity']:.3f}")
@@ -682,11 +691,13 @@ class FlowVisualizer:
         if fine_result and fine_result['similarity'] > coarse_result['similarity']:
             final_flow = fine_result['flow']
             final_target = fine_result['target']
+            final_similarity = fine_result['similarity']
             confidence = fine_result['confidence']
             print("Using fine correction result.")
         else:
             final_flow = coarse_result['flow']
             final_target = coarse_result['target']
+            final_similarity = coarse_result['similarity']
             confidence = coarse_result['confidence']
             print("Using coarse correction result.")
             
@@ -704,6 +715,27 @@ class FlowVisualizer:
             'lod_level': lod_level
         }
         
+        # --- Final Check for Inconsistency ---
+        if is_previously_failed and self._is_good_quality(final_similarity):
+            error_title = "Logic Inconsistency Detected"
+            error_message = (
+                "Detail analysis found a 'good' correction (similarity > "
+                f"{self.GOOD_QUALITY_THRESHOLD}) for a pixel that was previously "
+                "marked as 'failed to correct' by the batch process.\n\n"
+                "This may indicate a discrepancy between the single-pixel analysis "
+                "and the batch correction logic. Please check the console for debug information."
+            )
+            print(f"--- LOGIC INCONSISTENCY ---")
+            print(f"Pixel: ({orig_x}, {orig_y})")
+            print(f"Previously marked as: FAILED")
+            print(f"Detail analysis found similarity: {final_similarity:.4f} (Good)")
+            print(f"Original Flow: {self.detail_analysis_data['original_flow']}")
+            print(f"LOD Flow: {self.detail_analysis_data['lod_flow']}")
+            print(f"Coarse Result: {coarse_result}")
+            print(f"Fine Result: {fine_result}")
+            print(f"--------------------------")
+            messagebox.showerror(error_title, error_message)
+
         # Enter detail analysis mode
         self.detail_analysis_mode = True
         
@@ -831,7 +863,7 @@ class FlowVisualizer:
         reset_pos_btn = ttk.Button(zoom_frame, text="Center", width=8, command=self.reset_position)
         reset_pos_btn.pack(side=tk.LEFT, padx=(10, 10))
         
-        ttk.Label(zoom_frame, text="(Mouse wheel: zoom, Middle button: drag, Double-click: reset, Left click on red arrow: detail analysis)").pack(side=tk.LEFT, padx=(20, 0))
+        ttk.Label(zoom_frame, text="(Mouse wheel: zoom, Middle button: drag, Double-click: reset, Left click on red arrow or Shift+Click: detail analysis)").pack(side=tk.LEFT, padx=(20, 0))
         
         # Quality map and vector controls
         vector_frame = ttk.Frame(control_frame)
@@ -1262,6 +1294,10 @@ class FlowVisualizer:
     
     def on_mouse_move(self, event):
         """Handle mouse movement over canvas"""
+        # Guard against calls before the first display update
+        if not hasattr(self, 'frame1_x'):
+            return
+
         # Clear previous arrow (but keep flow vectors)
         self.canvas.delete("flow_arrow")
         
@@ -2158,50 +2194,65 @@ class FlowVisualizer:
         self.progress_label.config(text=f"Step 4/6: Correcting {initial_error_count} pixels...")
         self.root.update_idletasks()
         
-        # This scaled-up flow is used for reading original vectors during the loop
-        flow_for_calc = flow.copy()
-        if (fh != h or fw != w):
-            scale_x_to_frame = w / fw
-            scale_y_to_frame = h / fh
-            flow_for_calc = cv2.resize(flow, (w, h), interpolation=cv2.INTER_LINEAR)
-            flow_for_calc[:, :, 0] *= scale_x_to_frame
-            flow_for_calc[:, :, 1] *= scale_y_to_frame
+        # --- This section is now aligned with on_mouse_move to ensure identical vector retrieval ---
+        flow_data = self.current_flow
+        fh, fw = flow_data.shape[:2]
+        scale_x_frame_to_flow = fw / w if w > 0 else 1.0
+        scale_y_frame_to_flow = fh / h if h > 0 else 1.0
         
         lod_h, lod_w = lod_flow.shape[:2]
-        lod_scale_x = lod_w / w
-        lod_scale_y = lod_h / h
+        lod_scale_x_frame_to_lod = lod_w / w
+        lod_scale_y_frame_to_lod = lod_h / h
+        
         skipped_count = 0
         improved_pixels_set = set() # Track pixels that are improved but not fully corrected
 
         for i, (orig_x, orig_y) in enumerate(bad_pixels_coords):
-            original_flow_x, original_flow_y = flow_for_calc[orig_y, orig_x]
+            # Calculate original flow vector with precision, matching on_mouse_move
+            flow_x_coord = int(orig_x * scale_x_frame_to_flow)
+            flow_y_coord = int(orig_y * scale_y_frame_to_flow)
+            flow_x_coord = max(0, min(flow_x_coord, fw - 1))
+            flow_y_coord = max(0, min(flow_y_coord, fh - 1))
+            
+            # Scale vector back to frame resolution
+            original_flow_x = flow_data[flow_y_coord, flow_x_coord, 0] / scale_x_frame_to_flow
+            original_flow_y = flow_data[flow_y_coord, flow_x_coord, 1] / scale_y_frame_to_flow
+
             original_target_x, original_target_y = orig_x - original_flow_x, orig_y - original_flow_y
             
             original_similarity = 0.0
             if (0 <= original_target_x < w and 0 <= original_target_y < h):
                 original_similarity = self.calculate_pixel_quality(frame1[orig_y, orig_x], frame2[int(original_target_y), int(original_target_x)])
 
-            lod_x = max(0, min(int(orig_x * lod_scale_x), lod_w - 1))
-            lod_y = max(0, min(int(orig_y * lod_scale_y), lod_h - 1))
-            lod_flow_x = lod_flow[lod_y, lod_x, 0] / lod_scale_x
-            lod_flow_y = lod_flow[lod_y, lod_x, 1] / lod_scale_y
+            lod_x = max(0, min(int(orig_x * lod_scale_x_frame_to_lod), lod_w - 1))
+            lod_y = max(0, min(int(orig_y * lod_scale_y_frame_to_lod), lod_h - 1))
+            lod_flow_x = lod_flow[lod_y, lod_x, 0] / lod_scale_x_frame_to_lod
+            lod_flow_y = lod_flow[lod_y, lod_x, 1] / lod_scale_y_frame_to_lod
             
             coarse_result = self._perform_coarse_correction(frame1, frame2, (orig_x, orig_y), (lod_flow_x, lod_flow_y))
             
+            # Start with the coarse result as the current best
             final_flow = coarse_result['flow']
             final_similarity = coarse_result['similarity']
 
-            if coarse_result['similarity'] > original_similarity and coarse_result['similarity'] < self.FINE_CORRECTION_THRESHOLD:
+            # If the coarse result isn't great, try to refine it
+            if coarse_result['similarity'] < self.FINE_CORRECTION_THRESHOLD:
                 fine_result = self._perform_fine_correction(frame1, frame2, (orig_x, orig_y), coarse_result['target'])
+                # Only use the fine result if it's an improvement over the coarse one
                 if fine_result and fine_result['similarity'] > coarse_result['similarity']:
-                    final_flow, final_similarity = fine_result['flow'], fine_result['similarity']
+                    final_flow = fine_result['flow']
+                    final_similarity = fine_result['similarity']
 
-            if final_similarity > original_similarity:
-                flow_y_coord, flow_x_coord = int(orig_y / h * fh), int(orig_x / w * fw)
+            # Now, compare the best result found (coarse or fine) against the original flow
+            # A correction is accepted if it's objectively "good", or if it's at least an improvement over the original "bad" flow.
+            if self._is_good_quality(final_similarity) or (final_similarity > original_similarity):
+                # We need to scale the final corrected flow vector *back* to the resolution of the stored flow map
+                final_flow_x_scaled = final_flow[0] * scale_x_frame_to_flow
+                final_flow_y_scaled = final_flow[1] * scale_y_frame_to_flow
+
+                flow_y_coord, flow_x_coord = int(orig_y * scale_y_frame_to_flow), int(orig_x * scale_x_frame_to_flow)
                 flow_y_coord, flow_x_coord = max(0, min(flow_y_coord, fh - 1)), max(0, min(flow_x_coord, fw - 1))
                 
-                final_flow_x_scaled = final_flow[0] * (fw / w if w > 0 else 1.0)
-                final_flow_y_scaled = final_flow[1] * (fh / h if h > 0 else 1.0)
                 flow[flow_y_coord, flow_x_coord] = [final_flow_x_scaled, final_flow_y_scaled]
 
                 # If it's improved but still not "good", add to improved set
@@ -2254,12 +2305,9 @@ class FlowVisualizer:
         self.flow_data_cache[self.current_pair] = flow
         self.quality_maps[self.current_pair] = new_quality_map
         
-        try:
-            lods = self.processor.generate_flow_lods(self.current_flow, num_lods=self.max_lod_levels)
-            for i, lod_data in enumerate(lods):
-                self.lod_data_cache[(self.current_pair, i)] = lod_data
-        except Exception as e:
-            messagebox.showerror("LOD Error", f"Could not recalculate LODs for this session: {e}")
+        # CRITICAL FIX: Do not recalculate LODs here. The manual analysis (Shift+Click)
+        # must use the same original LODs to validate the results of the batch correction.
+        # Recalculating them mid-session was the root cause of the logic inconsistency.
         
         timings['7. Finalization (Cache & LODs)'] = time.time() - start_time_final
 
@@ -2313,19 +2361,23 @@ class FlowVisualizer:
         target_x = x_coords - flow_t[..., 0]
         target_y = y_coords - flow_t[..., 1]
         
-        # --- 3. Sample Target Colors using grid_sample (GPU-accelerated) ---
-        # Normalize coordinates to [-1, 1] range for grid_sample
-        normalized_target_x = 2 * (target_x / (w - 1)) - 1
-        normalized_target_y = 2 * (target_y / (h - 1)) - 1
+        # --- 3. Sample Target Colors using manual "floor" indexing to match CPU logic ---
+        # `grid_sample` with `mode='nearest'` rounds, while CPU logic truncates (`int()`).
+        # This discrepancy was the source of major inconsistencies. We now manually replicate
+        # the truncation ('floor') behavior on the GPU for 1:1 matching with the correction algorithm.
+        out_of_bounds_mask = (target_x < 0) | (target_x >= w) | (target_y < 0) | (target_y >= h)
+
+        # Truncate coordinates to integers (equivalent to `int()` in CPU code)
+        target_x_int = target_x.long()
+        target_y_int = target_y.long()
+
+        # Clamp coordinates to be within valid range to prevent indexing errors
+        target_x_clamped = torch.clamp(target_x_int, 0, w - 1)
+        target_y_clamped = torch.clamp(target_y_int, 0, h - 1)
         
-        # Create sampling grid and unsqueeze for batch dimension
-        grid = torch.stack((normalized_target_x, normalized_target_y), dim=-1).unsqueeze(0)
-        
-        # Reshape frame2 for grid_sample (N, C, H, W)
-        frame2_t_reshaped = frame2_t.permute(2, 0, 1).unsqueeze(0)
-        
-        # Sample colors from frame2 using the calculated grid
-        sampled_colors = torch.nn.functional.grid_sample(frame2_t_reshaped, grid, mode='bilinear', padding_mode='zeros', align_corners=False).squeeze(0).permute(1, 2, 0)
+        # Use advanced indexing to gather colors from the target frame. This is the GPU equivalent
+        # of `frame2[int(y), int(x)]`
+        sampled_colors = frame2_t[target_y_clamped, target_x_clamped]
 
         # --- 4. Calculate Pixel Quality on GPU ---
         src_colors = frame1_t
@@ -2364,7 +2416,6 @@ class FlowVisualizer:
         quality_frame_t[..., 0] = torch.where(is_good_mask, 0, red_intensity)
         
         # Correctly handle out-of-bounds pixels by checking coordinates, not sampled color
-        out_of_bounds_mask = (target_x < 0) | (target_x >= w) | (target_y < 0) | (target_y >= h)
         red_color = torch.tensor([1.0, 0.0, 0.0], device=device)
         quality_frame_t = torch.where(out_of_bounds_mask.unsqueeze(-1), red_color, quality_frame_t)
 
