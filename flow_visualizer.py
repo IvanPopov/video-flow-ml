@@ -72,6 +72,8 @@ class FlowVisualizer:
         self.detail_analysis_mode = False
         self.detail_analysis_data = None
         self.detail_analysis_region_size = 25
+        self.template_radius = 5.5  # For 11x11 template
+        self.search_radius = self.detail_analysis_region_size # Search in the whole 50x50 region
         
         # Check for LOD data availability
         self.check_lod_availability()
@@ -312,6 +314,99 @@ class FlowVisualizer:
 
         return dx, dy, angle, confidence
     
+    def _perform_coarse_correction(self, frame1, frame2, source_pixel, lod_flow_vector):
+        """Performs coarse correction using phase correlation."""
+        orig_x, orig_y = source_pixel
+        lod_flow_x, lod_flow_y = lod_flow_vector
+
+        # Calculate target position using LOD flow
+        lod_target_x = orig_x - lod_flow_x
+        lod_target_y = orig_y - lod_flow_y
+        
+        # Extract regions around source and LOD target
+        region1, _ = self.extract_region(frame1, orig_x, orig_y, self.detail_analysis_region_size)
+        region2, _ = self.extract_region(frame2, lod_target_x, lod_target_y, self.detail_analysis_region_size)
+        
+        # Perform phase correlation
+        dx, dy, angle, confidence = self.phase_correlation_with_rotation(region1, region2)
+        
+        # Calculate corrected flow vector and target
+        corrected_flow_x = lod_flow_x - dx
+        corrected_flow_y = lod_flow_y - dy
+        final_target_x = orig_x - corrected_flow_x
+        final_target_y = orig_y - corrected_flow_y
+
+        # Calculate quality of this correction
+        h, w = frame1.shape[:2]
+        similarity = 0.0
+        if (0 <= final_target_x < w and 0 <= final_target_y < h):
+            similarity = self.calculate_pixel_quality(
+                frame1[orig_y, orig_x],
+                frame2[int(final_target_y), int(final_target_x)]
+            )
+
+        return {
+            'flow': (corrected_flow_x, corrected_flow_y),
+            'target': (final_target_x, final_target_y),
+            'similarity': similarity,
+            'phase_shift': (dx, dy),
+            'angle': angle,
+            'confidence': confidence
+        }
+
+    def _perform_fine_correction(self, frame1, frame2, source_pixel, coarse_target_pixel):
+        """Performs fine-tuning correction using template matching (NCC)."""
+        src_x, src_y = source_pixel
+        
+        # 1. Extract template from frame1
+        template, _ = self.extract_region(frame1, src_x, src_y, self.template_radius)
+
+        # 2. Extract search area from frame2
+        search_area, search_bounds = self.extract_region(frame2, coarse_target_pixel[0], coarse_target_pixel[1], self.search_radius)
+
+        # Ensure regions are valid
+        if template.shape[0] != int(2 * self.template_radius) or search_area.shape[0] != int(2 * self.search_radius):
+            return None
+
+        # 3. Perform template matching
+        res = cv2.matchTemplate(search_area, template, cv2.TM_CCOEFF_NORMED)
+        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+        
+        # 4. Calculate final position
+        top_left_in_search = max_loc
+        center_in_search_x = top_left_in_search[0] + self.template_radius
+        center_in_search_y = top_left_in_search[1] + self.template_radius
+
+        final_target_x = search_bounds[0] + center_in_search_x
+        final_target_y = search_bounds[1] + center_in_search_y
+        
+        # 5. Calculate new flow and quality
+        final_flow_x = src_x - final_target_x
+        final_flow_y = src_y - final_target_y
+        
+        h, w = frame1.shape[:2]
+        final_similarity = 0.0
+        if (0 <= final_target_x < w and 0 <= final_target_y < h):
+            final_similarity = self.calculate_pixel_quality(
+                frame1[src_y, int(src_y)],
+                frame2[int(final_target_y), int(final_target_x)]
+            )
+        
+        res_vis = cv2.normalize(res, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
+        res_vis = cv2.cvtColor(res_vis, cv2.COLOR_GRAY2BGR)
+        cv2.circle(res_vis, max_loc, 5, (0,255,0), 1)
+
+        return {
+            'flow': (final_flow_x, final_flow_y),
+            'target': (final_target_x, final_target_y),
+            'similarity': final_similarity,
+            'confidence': max_val,
+            'template': template,
+            'search_area': search_area,
+            'response_map': res_vis,
+            'match_location': max_loc
+        }
+
     def get_highest_available_lod(self, frame_idx):
         """Get the highest available LOD level for a frame"""
         for lod_level in range(self.max_lod_levels - 1, -1, -1):
@@ -370,7 +465,7 @@ class FlowVisualizer:
                 self.detail_analysis_data and
                 (orig_x, orig_y) != self.detail_analysis_data['source_pixel']):
                 
-                if not self.check_exit_detail_mode("Клик на другой пиксель"):
+                if not self.check_exit_detail_mode("Clicking on another pixel"):
                     return
             
             # Check if this pixel has poor flow quality
@@ -398,9 +493,9 @@ class FlowVisualizer:
                     # Poor quality - start detail analysis, pass original flow vector
                     self.perform_detail_analysis(orig_x, orig_y, (flow_x, flow_y))
                 else:
-                    messagebox.showinfo("Информация", 
-                        f"Пиксель ({orig_x}, {orig_y}) имеет хорошее качество потока. "
-                        "Детальный анализ выполняется только для пикселей с плохим качеством (красные стрелки).")
+                    messagebox.showinfo("Information", 
+                        f"Pixel ({orig_x}, {orig_y}) has good flow quality. "
+                        f"Detail analysis is only performed for pixels with poor quality (red arrows).")
     
     def perform_detail_analysis(self, orig_x, orig_y, original_flow):
         """Perform detailed analysis on a pixel with poor flow quality"""
@@ -430,44 +525,41 @@ class FlowVisualizer:
         
         print(f"LOD flow vector: ({lod_flow_x:.2f}, {lod_flow_y:.2f})")
         
-        # Calculate target position using LOD flow
-        lod_target_x = orig_x - lod_flow_x
-        lod_target_y = orig_y - lod_flow_y
-        
-        # Extract regions around source and LOD target
-        region1, bounds1 = self.extract_region(self.frame1, orig_x, orig_y, self.detail_analysis_region_size)
-        region2, bounds2 = self.extract_region(self.frame2, lod_target_x, lod_target_y, self.detail_analysis_region_size)
-        
-        # Perform phase correlation
-        dx, dy, angle, confidence = self.phase_correlation_with_rotation(region1, region2)
-        
-        print(f"Phase correlation result: dx={dx:.2f}, dy={dy:.2f}, angle={angle:.2f}, confidence={confidence:.3f}")
-        
-        # Calculate corrected flow vector
-        corrected_flow_x = lod_flow_x - dx
-        corrected_flow_y = lod_flow_y - dy
-        
-        # Calculate final target position
-        final_target_x = orig_x - corrected_flow_x
-        final_target_y = orig_y - corrected_flow_y
-        
-        print(f"Corrected flow vector: ({corrected_flow_x:.2f}, {corrected_flow_y:.2f})")
-        
+        # --- Stage 1: Coarse Correction ---
+        coarse_result = self._perform_coarse_correction(self.frame1, self.frame2, (orig_x, orig_y), (lod_flow_x, lod_flow_y))
+        print(f"Coarse correction result: flow=({coarse_result['flow'][0]:.2f}, {coarse_result['flow'][1]:.2f}), similarity={coarse_result['similarity']:.3f}")
+
+        # --- Stage 2: Fine Correction (if needed) ---
+        fine_result = None
+        # If coarse correction is not good enough, try to refine it.
+        if coarse_result['similarity'] < 0.9: 
+            print("Coarse result is not good enough, performing fine correction...")
+            fine_result = self._perform_fine_correction(self.frame1, self.frame2, (orig_x, orig_y), coarse_result['target'])
+            if fine_result:
+                print(f"Fine correction result: flow=({fine_result['flow'][0]:.2f}, {fine_result['flow'][1]:.2f}), similarity={fine_result['similarity']:.3f}")
+            else:
+                print("Fine correction failed (likely out of bounds).")
+
+        # Determine final corrected flow
+        if fine_result and fine_result['similarity'] > coarse_result['similarity']:
+            final_flow = fine_result['flow']
+            final_target = fine_result['target']
+            print("Using fine correction result.")
+        else:
+            final_flow = coarse_result['flow']
+            final_target = coarse_result['target']
+            print("Using coarse correction result.")
+            
         # Store analysis data
         self.detail_analysis_data = {
             'source_pixel': (orig_x, orig_y),
             'original_flow': original_flow,
             'lod_flow': (lod_flow_x, lod_flow_y),
-            'lod_target': (lod_target_x, lod_target_y),
-            'corrected_flow': (corrected_flow_x, corrected_flow_y),
-            'final_target': (final_target_x, final_target_y),
-            'region1': region1,
-            'region2': region2,
-            'bounds1': bounds1,
-            'bounds2': bounds2,
-            'phase_shift': (dx, dy),
-            'angle': angle,
-            'confidence': confidence,
+            'lod_target': (orig_x - lod_flow_x, orig_y - lod_flow_y),
+            'coarse_result': coarse_result,
+            'fine_result': fine_result,
+            'final_flow': final_flow,
+            'final_target': final_target,
             'lod_level': lod_level
         }
         
@@ -484,8 +576,8 @@ class FlowVisualizer:
         """Check if user wants to exit detail analysis mode"""
         if self.detail_analysis_mode:
             result = messagebox.askyesno(
-                "Выход из режима анализа",
-                f"{action_description} приведет к сбросу всех дополнительных визуализаций. Продолжить?"
+                "Exit Analysis Mode",
+                f"{action_description} will reset all additional visualizations. Continue?"
             )
             if result:
                 self.exit_detail_analysis_mode()
@@ -991,7 +1083,7 @@ class FlowVisualizer:
         
         # Check if we need to exit detail mode
         if new_pair != self.current_pair:
-            if not self.check_exit_detail_mode("Смена кадра"):
+            if not self.check_exit_detail_mode("Changing frame"):
                 # Revert slider to current position
                 self.frame_var.set(self.current_pair)
                 return
@@ -1579,7 +1671,7 @@ class FlowVisualizer:
         self.canvas.create_oval(x1-3, y1-3, x1+3, y1+3, fill=color, outline="white", tags=tags)
     
     def draw_detail_analysis_view(self):
-        """Draw the detail analysis panel directly on the canvas."""
+        """Draw the detail analysis panel directly on the canvas, combining the best of all previous versions."""
         if not self.detail_analysis_data:
             return
 
@@ -1587,118 +1679,144 @@ class FlowVisualizer:
         data = self.detail_analysis_data
         
         # --- 1. Sizing and Scaling ---
-        display_size = 200  # We want to display them as 200x200
+        display_size = 200  # Size for each of the three panels
         border_size = 2
         
-        # Scale 50x50 regions to 200x200
+        # Helper to draw a square marker for a pixel
+        def draw_pixel_marker(image, coords, color, size=2):
+            # Coordinates are relative to the image top-left
+            cv2.rectangle(image, (coords[0] - size//2, coords[1] - size//2), (coords[0] + size//2, coords[1] + size//2), color, -1)
+        
+        # Helper to draw a thin rectangle frame
+        def draw_thin_frame(image, top_left, bottom_right, color):
+            cv2.rectangle(image, top_left, bottom_right, color, 1)
+
+        # --- 2. Prepare Source Panel ---
+        source_region, _ = self.extract_region(self.frame1, data['source_pixel'][0], data['source_pixel'][1], self.detail_analysis_region_size)
+        source_scaled = cv2.resize(source_region, (display_size, display_size), interpolation=cv2.INTER_NEAREST)
+        
+        # Draw center pixel marker
+        center_coords_scaled = (display_size // 2, display_size // 2)
+        draw_pixel_marker(source_scaled, center_coords_scaled, (255, 255, 0), size=4) # Yellow
+        
+        # Draw template frame
+        template_w_scaled = int(self.template_radius * 2 * (display_size / (self.detail_analysis_region_size * 2)))
+        tl = (center_coords_scaled[0] - template_w_scaled // 2, center_coords_scaled[1] - template_w_scaled // 2)
+        br = (center_coords_scaled[0] + template_w_scaled // 2, center_coords_scaled[1] + template_w_scaled // 2)
+        draw_thin_frame(source_scaled, tl, br, (255, 255, 0)) # Yellow
+
+        # --- 3. Prepare Target Panel ---
+        target_region, target_bounds = self.extract_region(self.frame2, data['lod_target'][0], data['lod_target'][1], self.detail_analysis_region_size)
+        target_scaled = cv2.resize(target_region, (display_size, display_size), interpolation=cv2.INTER_NEAREST)
+
+        def absolute_to_scaled_local(abs_coords):
+            """Converts absolute frame coordinates to local coordinates in the scaled panel."""
+            if abs_coords is None or abs_coords[0] is None: return None
+            scale = display_size / (self.detail_analysis_region_size * 2)
+            local_x = (abs_coords[0] - target_bounds[0]) * scale
+            local_y = (abs_coords[1] - target_bounds[1]) * scale
+            # Check if inside the scaled display
+            if 0 <= local_x < display_size and 0 <= local_y < display_size:
+                return (int(local_x), int(local_y))
+            return None
+
+        # Draw pixel markers for all stages
+        marker_positions = {
+            'original': (data['original_flow'], (255, 165, 0)),
+            'lod': (data['lod_target'], (255, 0, 0)),
+            'coarse': (data['coarse_result']['target'], (0, 255, 0)),
+            'fine': (data['fine_result']['target'] if data['fine_result'] else None, (0, 255, 255))
+        }
+        for name, (coords, color) in marker_positions.items():
+            scaled_pos = absolute_to_scaled_local(coords)
+            if scaled_pos:
+                draw_pixel_marker(target_scaled, scaled_pos, color, size=4)
+        
+        # Draw best match frame
+        if data['fine_result']:
+            fine_pos_scaled = absolute_to_scaled_local(data['fine_result']['target'])
+            if fine_pos_scaled:
+                tl = (fine_pos_scaled[0] - template_w_scaled // 2, fine_pos_scaled[1] - template_w_scaled // 2)
+                br = (fine_pos_scaled[0] + template_w_scaled // 2, fine_pos_scaled[1] + template_w_scaled // 2)
+                draw_thin_frame(target_scaled, tl, br, (0, 255, 255))
+
+        # --- 4. Prepare Difference Panel ---
+        coarse_res = data['coarse_result']
+        dx, dy, angle = coarse_res['phase_shift'][0], coarse_res['phase_shift'][1], coarse_res.get('angle', 0)
+        
+        # Scale shift values to the display size
         scale_factor = display_size / (self.detail_analysis_region_size * 2)
-
-        region1_scaled = cv2.resize(data['region1'], (display_size, display_size), interpolation=cv2.INTER_NEAREST)
-        region2_scaled = cv2.resize(data['region2'], (display_size, display_size), interpolation=cv2.INTER_NEAREST)
-
-        # --- 2. Marker Drawing ---
-        def draw_marker(image, coords_in_region, color):
-            marker_x = int(coords_in_region[0] * scale_factor)
-            marker_y = int(coords_in_region[1] * scale_factor)
-            cv2.rectangle(image, (marker_x - 2, marker_y - 2), (marker_x + 2, marker_y + 2), color, -1)
-
-        draw_marker(region1_scaled, (25, 25), (255, 255, 0))
-
-        orig_flow_x, orig_flow_y = data['original_flow']
-        orig_target_x = data['source_pixel'][0] - orig_flow_x
-        orig_target_y = data['source_pixel'][1] - orig_flow_y
-        # Original Target (from original, bad flow) -> Orange
-        draw_marker(region2_scaled, (orig_target_x - data['bounds2'][0], orig_target_y - data['bounds2'][1]), (255, 165, 0))
-        
-        # LOD Target (center of patch, from reliable flow) -> Red
-        draw_marker(region2_scaled, (25, 25), (255, 0, 0))
-
-        final_target_x, final_target_y = data['final_target']
-        draw_marker(region2_scaled, (final_target_x - data['bounds2'][0], final_target_y - data['bounds2'][1]), (0, 255, 0))
-
-        # --- 3. Difference View Calculation ---
-        h_s, w_s = region2_scaled.shape[:2]
-        center_scaled = (w_s / 2, h_s / 2)
-        dx, dy, angle = data['phase_shift'][0], data['phase_shift'][1], data.get('angle', 0)
-        
-        # --- 3a. Create transformation matrices ---
-        M_rot = cv2.getRotationMatrix2D(center_scaled, -angle, 1.0)
         shift_dx = dx * scale_factor
         shift_dy = dy * scale_factor
-        # FIX 1: Correct sign for transformation matrix. It should be a positive shift.
+        
+        # Create transformation matrix
+        center_scaled = (display_size / 2, display_size / 2)
+        M_rot = cv2.getRotationMatrix2D(center_scaled, -angle, 1.0)
         M_trans = np.float32([[1, 0, shift_dx], [0, 1, shift_dy]])
         
-        # --- 3b. Apply transformations ---
-        # Apply to the target region itself
-        rotated_region2 = cv2.warpAffine(region2_scaled, M_rot, (w_s, h_s))
-        transformed_region2 = cv2.warpAffine(rotated_region2, M_trans, (w_s, h_s))
+        # Apply transformations to target region
+        transformed_target = cv2.warpAffine(target_scaled, M_rot, (display_size, display_size))
+        transformed_target = cv2.warpAffine(transformed_target, M_trans, (display_size, display_size))
+        
+        # Create a mask to handle non-overlapping areas
+        mask = np.ones_like(target_scaled, dtype=np.uint8) * 255
+        rotated_mask = cv2.warpAffine(mask, M_rot, (display_size, display_size), flags=cv2.INTER_NEAREST)
+        transformed_mask = cv2.warpAffine(rotated_mask, M_trans, (display_size, display_size), flags=cv2.INTER_NEAREST)
+        
+        # Calculate difference and apply mask
+        diff = cv2.absdiff(source_scaled, transformed_target)
+        diff[transformed_mask < 255] = 0
+        diff_panel = np.clip(diff * 2, 0, 255).astype(np.uint8)
+        
+        # Draw alignment frames on the difference panel
+        draw_thin_frame(diff_panel, (0, 0), (display_size - 1, display_size - 1), (255, 255, 255)) # White
+        
+        src_pts = np.float32([[0,0], [display_size,0], [display_size,display_size], [0,display_size]]).reshape(-1,1,2)
+        M_combined = np.dot(M_trans, np.vstack([M_rot, [0, 0, 1]]))
+        transformed_pts = cv2.transform(src_pts, M_combined).astype(np.int32)
+        cv2.polylines(diff_panel, [transformed_pts], True, (0, 255, 0), 1) # Green
 
-        # FIX 2: Create and apply a mask to calculate difference only on the overlapping area
-        # Create a white mask and apply the same transformations to it
-        mask = np.ones_like(region2_scaled, dtype=np.uint8) * 255
-        rotated_mask = cv2.warpAffine(mask, M_rot, (w_s, h_s), flags=cv2.INTER_NEAREST)
-        transformed_mask = cv2.warpAffine(rotated_mask, M_trans, (w_s, h_s), flags=cv2.INTER_NEAREST)
-        
-        # Calculate difference and then mask it
-        diff = cv2.absdiff(region1_scaled, transformed_region2)
-        diff[transformed_mask < 255] = 0 # Black out areas outside the transformed region
+        # --- 5. Add Borders & Finalize Images ---
+        source_bordered = cv2.copyMakeBorder(source_scaled, border_size, border_size, border_size, border_size, cv2.BORDER_CONSTANT, value=[100,100,100])
+        target_bordered = cv2.copyMakeBorder(target_scaled, border_size, border_size, border_size, border_size, cv2.BORDER_CONSTANT, value=[100,100,100])
+        diff_bordered = cv2.copyMakeBorder(diff_panel, border_size, border_size, border_size, border_size, cv2.BORDER_CONSTANT, value=[100,100,100])
 
-        overlay_content = np.clip(diff * 2, 0, 255).astype(np.uint8)
-
-        # --- 3c. Draw alignment frames ---
-        # Source frame (static white box)
-        cv2.rectangle(overlay_content, (0, 0), (w_s - 1, h_s - 1), (255, 255, 255), 1)
-        
-        # Target frame (transformed green box)
-        src_pts = np.float32([[0,0], [w_s,0], [w_s,h_s], [0,h_s]]).reshape(-1,1,2)
-        
-        # Create a combined 3x3 transformation matrix for transforming the points of the polygon
-        M_rot_3x3 = np.vstack([M_rot, [0, 0, 1]])
-        M_trans_3x3 = np.float32([[1, 0, shift_dx], [0, 1, shift_dy], [0, 0, 1]])
-        M_combined = np.dot(M_trans_3x3, M_rot_3x3)
-        
-        # Apply the combined transform to the corners of the frame
-        transformed_pts = cv2.transform(src_pts, M_combined[:2, :]).astype(np.int32)
-        cv2.polylines(overlay_content, [transformed_pts], True, (0, 255, 0), 1)
-        
-        # --- 4. Add Borders & Finalize Images ---
-        region1_bordered = cv2.copyMakeBorder(region1_scaled, border_size, border_size, border_size, border_size, cv2.BORDER_CONSTANT, value=[255,255,255])
-        region2_bordered = cv2.copyMakeBorder(region2_scaled, border_size, border_size, border_size, border_size, cv2.BORDER_CONSTANT, value=[255,255,255])
-        overlay_bordered = cv2.copyMakeBorder(overlay_content, border_size, border_size, border_size, border_size, cv2.BORDER_CONSTANT, value=[255,255,255])
-
-        # --- 5. Canvas Drawing ---
+        # --- 6. Canvas Drawing ---
         base_y = self.frame3_y + self.display_height + 40
         spacing = 20
-        region_h, region_w = region1_bordered.shape[:2]
+        region_h, region_w = source_bordered.shape[:2]
 
         x1 = spacing
         x2 = x1 + region_w + spacing
         x3 = x2 + region_w + spacing
 
         # Convert to PhotoImage and store references
-        self.analysis_photo1 = ImageTk.PhotoImage(Image.fromarray(region1_bordered))
-        self.analysis_photo2 = ImageTk.PhotoImage(Image.fromarray(region2_bordered))
-        self.analysis_photo_diff = ImageTk.PhotoImage(Image.fromarray(overlay_bordered))
+        self.analysis_photo1 = ImageTk.PhotoImage(Image.fromarray(source_bordered))
+        self.analysis_photo2 = ImageTk.PhotoImage(Image.fromarray(target_bordered))
+        self.analysis_photo3 = ImageTk.PhotoImage(Image.fromarray(diff_bordered))
 
         canvas.create_image(x1, base_y, anchor=tk.NW, image=self.analysis_photo1, tags="detail_analysis")
         canvas.create_image(x2, base_y, anchor=tk.NW, image=self.analysis_photo2, tags="detail_analysis")
-        canvas.create_image(x3, base_y, anchor=tk.NW, image=self.analysis_photo_diff, tags="detail_analysis")
+        canvas.create_image(x3, base_y, anchor=tk.NW, image=self.analysis_photo3, tags="detail_analysis")
         
-        # --- 6. Labels and Legends ---
+        # --- 7. Labels and Legends ---
         font_details = ("Arial", 8)
         legend_y_offset = base_y + region_h + 15
         
-        canvas.create_text(x1, base_y - 5, text="Source", anchor=tk.SW, fill="white", tags="detail_analysis")
-        canvas.create_text(x1, legend_y_offset, text="■ Yellow: Selected Pixel", anchor=tk.NW, fill="yellow", font=font_details, tags="detail_analysis")
+        canvas.create_text(x1, base_y - 5, text="Source Region", anchor=tk.SW, fill="white", tags="detail_analysis")
+        canvas.create_text(x1, legend_y_offset,      text="■ Yellow Marker: Selected Pixel", anchor=tk.NW, fill="yellow", font=font_details, tags="detail_analysis")
+        canvas.create_text(x1, legend_y_offset + 12, text="■ Yellow Frame: 11x11 Template", anchor=tk.NW, fill="yellow", font=font_details, tags="detail_analysis")
         
-        canvas.create_text(x2, base_y - 5, text="Target", anchor=tk.SW, fill="white", tags="detail_analysis")
-        canvas.create_text(x2, legend_y_offset, text="■ Orange: Original Target", anchor=tk.NW, fill="orange", font=font_details, tags="detail_analysis")
+        canvas.create_text(x2, base_y - 5, text="Target Region", anchor=tk.SW, fill="white", tags="detail_analysis")
+        canvas.create_text(x2, legend_y_offset,      text="■ Orange: Original Target", anchor=tk.NW, fill="orange", font=font_details, tags="detail_analysis")
         canvas.create_text(x2, legend_y_offset + 12, text="■ Red: LOD Target", anchor=tk.NW, fill="red", font=font_details, tags="detail_analysis")
-        canvas.create_text(x2, legend_y_offset + 24, text="■ Green: Corrected Target", anchor=tk.NW, fill="lime", font=font_details, tags="detail_analysis")
+        canvas.create_text(x2, legend_y_offset + 24, text="■ Green: Coarse Target", anchor=tk.NW, fill="lime", font=font_details, tags="detail_analysis")
+        canvas.create_text(x2, legend_y_offset + 36, text="■ Cyan: Fine Target (Best Match)", anchor=tk.NW, fill="cyan", font=font_details, tags="detail_analysis")
+        canvas.create_text(x2, legend_y_offset + 48, text="■ Cyan Frame: Matched Template", anchor=tk.NW, fill="cyan", font=font_details, tags="detail_analysis")
 
-        canvas.create_text(x3, base_y - 5, text="Difference & Alignment", anchor=tk.SW, fill="white", tags="detail_analysis")
-        canvas.create_text(x3, legend_y_offset, text="White: Source Frame", anchor=tk.NW, fill="white", font=font_details, tags="detail_analysis")
-        canvas.create_text(x3, legend_y_offset + 12, text="Green: Target Frame (Aligned)", anchor=tk.NW, fill="lime", font=font_details, tags="detail_analysis")
+        canvas.create_text(x3, base_y - 5, text="Coarse Alignment Difference", anchor=tk.SW, fill="white", tags="detail_analysis")
+        canvas.create_text(x3, legend_y_offset,      text="■ White Frame: Source Position", anchor=tk.NW, fill="white", font=font_details, tags="detail_analysis")
+        canvas.create_text(x3, legend_y_offset + 12, text="■ Green Frame: Target Aligned", anchor=tk.NW, fill="lime", font=font_details, tags="detail_analysis")
     
     def draw_detail_analysis_overlays(self, frame1_x, frame1_y, frame2_x, frame2_y):
         """Draw overlay vectors for detail analysis mode on the main frames."""
@@ -1716,7 +1834,17 @@ class FlowVisualizer:
         # Get LOD target
         lod_target_x, lod_target_y = data['lod_target']
         
+        # Get Coarse target
+        coarse_target_x, coarse_target_y = data['coarse_result']['target']
+        
+        # Get Fine target if available
+        fine_target_x, fine_target_y = (None, None)
+        if data['fine_result']:
+            fine_target_x, fine_target_y = data['fine_result']['target']
+
         def to_display_coords(orig_x, orig_y, frame_x_offset, frame_y_offset):
+            if orig_x is None or orig_y is None:
+                return None, None
             return (frame_x_offset + orig_x * self.display_scale,
                     frame_y_offset + orig_y * self.display_scale)
         
@@ -1724,7 +1852,9 @@ class FlowVisualizer:
         src_display_x, src_display_y = to_display_coords(source_x, source_y, frame1_x, frame1_y)
         orig_tgt_display_x, orig_tgt_display_y = to_display_coords(orig_target_x, orig_target_y, frame2_x, frame2_y)
         lod_tgt_display_x, lod_tgt_display_y = to_display_coords(lod_target_x, lod_target_y, frame2_x, frame2_y)
-        
+        coarse_tgt_display_x, coarse_tgt_display_y = to_display_coords(coarse_target_x, coarse_target_y, frame2_x, frame2_y)
+        fine_tgt_display_x, fine_tgt_display_y = to_display_coords(fine_target_x, fine_target_y, frame2_x, frame2_y)
+
         # Draw Original Flow Vector (Red)
         self.draw_arrow(src_display_x, src_display_y, orig_tgt_display_x, orig_tgt_display_y, 
                         color="red", tags="detail_analysis")
@@ -1732,6 +1862,15 @@ class FlowVisualizer:
         # Draw LOD Flow Vector (Orange)
         self.draw_arrow(src_display_x, src_display_y, lod_tgt_display_x, lod_tgt_display_y, 
                         color="orange", tags="detail_analysis")
+        
+        # Draw Coarse Corrected Flow Vector (Green)
+        self.draw_arrow(src_display_x, src_display_y, coarse_tgt_display_x, coarse_tgt_display_y, 
+                        color="lime", tags="detail_analysis")
+
+        # Draw Fine Corrected Flow Vector (Blue)
+        if fine_tgt_display_x:
+            self.draw_arrow(src_display_x, src_display_y, fine_tgt_display_x, fine_tgt_display_y, 
+                            color="cyan", tags="detail_analysis")
 
         # Draw source point circle
         self.canvas.create_oval(src_display_x-3, src_display_y-3, src_display_x+3, src_display_y+3, 
@@ -1837,46 +1976,32 @@ class FlowVisualizer:
                 target_color = frame2[int(original_target_y), int(original_target_x)]
                 original_similarity = self.calculate_pixel_quality(src_color, target_color)
 
-            # Get LOD flow vector
+            # --- Stage 1: Coarse Correction ---
             lod_x = max(0, min(int(orig_x * lod_scale_x), lod_w - 1))
             lod_y = max(0, min(int(orig_y * lod_scale_y), lod_h - 1))
             lod_flow_x = lod_flow[lod_y, lod_x, 0] / lod_scale_x
             lod_flow_y = lod_flow[lod_y, lod_x, 1] / lod_scale_y
+            coarse_result = self._perform_coarse_correction(frame1, frame2, (orig_x, orig_y), (lod_flow_x, lod_flow_y))
             
-            # Calculate LOD target
-            lod_target_x = orig_x - lod_flow_x
-            lod_target_y = orig_y - lod_flow_y
-            
-            # Extract regions
-            region1, _ = self.extract_region(frame1, orig_x, orig_y, self.detail_analysis_region_size)
-            region2, _ = self.extract_region(frame2, lod_target_x, lod_target_y, self.detail_analysis_region_size)
-            
-            # Phase correlation
-            dx, dy, _, _ = self.phase_correlation_with_rotation(region1, region2)
-            
-            # Corrected flow vector
-            corrected_flow_x = lod_flow_x - dx
-            corrected_flow_y = lod_flow_y - dy
-            
-            # Calculate corrected quality
-            corrected_target_x = orig_x - corrected_flow_x
-            corrected_target_y = orig_y - corrected_flow_y
+            # --- Stage 2: Fine Correction (optional) ---
+            final_flow = coarse_result['flow']
+            final_similarity = coarse_result['similarity']
 
-            corrected_similarity = 0.0
-            if (0 <= corrected_target_x < w and 0 <= corrected_target_y < h):
-                src_color = frame1[orig_y, orig_x]
-                target_color = frame2[int(corrected_target_y), int(corrected_target_x)]
-                corrected_similarity = self.calculate_pixel_quality(src_color, target_color)
+            if coarse_result['similarity'] > original_similarity and coarse_result['similarity'] < 0.9:
+                fine_result = self._perform_fine_correction(frame1, frame2, (orig_x, orig_y), coarse_result['target'])
+                if fine_result and fine_result['similarity'] > coarse_result['similarity']:
+                    final_flow = fine_result['flow']
+                    final_similarity = fine_result['similarity']
 
             # Compare and update if correction improved color similarity
-            if corrected_similarity > original_similarity:
+            if final_similarity > original_similarity:
                 # Update the copied flow array
                 flow_y_coord = int(orig_y / h * fh)
                 flow_x_coord = int(orig_x / w * fw)
                 flow_y_coord = max(0, min(flow_y_coord, fh - 1))
                 flow_x_coord = max(0, min(flow_x_coord, fw - 1))
                 
-                flow[flow_y_coord, flow_x_coord] = [corrected_flow_x, corrected_flow_y]
+                flow[flow_y_coord, flow_x_coord] = [final_flow[0], final_flow[1]]
             else:
                 skipped_count += 1
             
