@@ -654,6 +654,21 @@ class FlowVisualizer:
                                          command=self.exit_detail_analysis_mode)
         # Don't pack initially - will be shown only in detail mode
         
+        # Correction frame
+        correction_frame = ttk.Frame(control_frame)
+        correction_frame.pack(fill=tk.X, pady=(10, 0))
+
+        self.correct_errors_btn = ttk.Button(correction_frame, text="Correct All Errors",
+                                             command=self.correct_all_errors)
+        self.correct_errors_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.progress_label = ttk.Label(correction_frame, text="")
+        self.progress_label.pack(side=tk.LEFT, padx=(0, 5))
+
+        self.progressbar = ttk.Progressbar(correction_frame, orient=tk.HORIZONTAL,
+                                           length=300, mode='determinate')
+        self.progressbar.pack(side=tk.LEFT, fill=tk.X, expand=True)
+    
     def resize_frame_for_display(self, frame):
         """Resize frame to fit display with zoom while maintaining aspect ratio"""
         h, w = frame.shape[:2]
@@ -1721,6 +1736,191 @@ class FlowVisualizer:
         # Draw source point circle
         self.canvas.create_oval(src_display_x-3, src_display_y-3, src_display_x+3, src_display_y+3, 
                                fill="yellow", outline="white", tags="detail_analysis")
+
+    def correct_all_errors(self):
+        """
+        Starts the process of correcting all poor quality flow vectors
+        for the current frame pair in a background thread.
+        """
+        if self.current_flow is None:
+            messagebox.showwarning("Warning", "No flow data loaded to correct.")
+            return
+
+        # Disable button to prevent multiple runs
+        self.correct_errors_btn.config(state=tk.DISABLED)
+        
+        # Reset and show progress bar
+        self.progressbar['value'] = 0
+        self.progress_label.config(text="Finding bad pixels...")
+        self.root.update_idletasks()
+
+        # Run correction in a background thread to avoid freezing the UI
+        thread = threading.Thread(target=self._correct_all_errors_worker, daemon=True)
+        thread.start()
+
+    def _correct_all_errors_worker(self):
+        """
+        Worker thread that performs the flow correction.
+        Identifies bad pixels, calculates corrected vectors, and
+        schedules UI updates on the main thread.
+        """
+        # Get copies of data for thread safety
+        frame1 = self.frame1.copy()
+        frame2 = self.frame2.copy()
+        flow = self.current_flow.copy()
+        
+        h, w = frame1.shape[:2]
+        fh, fw = flow.shape[:2]
+
+        # Ensure flow is scaled to frame dimensions for our calculations
+        scale_x_to_frame = w / fw if fw > 0 else 1.0
+        scale_y_to_frame = h / fh if fh > 0 else 1.0
+        
+        if (fh != h or fw != w):
+            flow_for_calc = cv2.resize(flow, (w, h), interpolation=cv2.INTER_LINEAR)
+            flow_for_calc[:, :, 0] *= scale_x_to_frame
+            flow_for_calc[:, :, 1] *= scale_y_to_frame
+        else:
+            flow_for_calc = flow
+        
+        # 1. Identify all "bad" pixels
+        bad_pixels_coords = []
+        for y in range(h):
+            for x in range(w):
+                flow_x, flow_y = flow_for_calc[y, x]
+                target_x, target_y = x - flow_x, y - flow_y
+                
+                if (0 <= target_x < w and 0 <= target_y < h):
+                    src_color = frame1[y, x]
+                    target_color = frame2[int(target_y), int(target_x)]
+                    similarity = self.calculate_pixel_quality(src_color, target_color)
+                    if similarity <= 0.8:
+                        bad_pixels_coords.append((x, y))
+                else:
+                    # Out of bounds is also a bad pixel
+                    bad_pixels_coords.append((x, y))
+
+        if not bad_pixels_coords:
+            self.root.after(0, self._finish_correction, flow, True) # Pass original flow, is_done=True
+            return
+
+        # 2. Setup progress bar on main thread
+        total_bad = len(bad_pixels_coords)
+        def setup_progress():
+            self.progress_label.config(text=f"Correcting 0/{total_bad} pixels...")
+            self.progressbar.config(maximum=total_bad)
+        self.root.after(0, setup_progress)
+        
+        # 3. Get highest LOD data once
+        lod_level, lod_flow = self.get_highest_available_lod(self.current_pair)
+        if lod_flow is None:
+            print("No LOD data available for correction.")
+            self.root.after(0, self._finish_correction, flow, True) # Abort
+            return
+
+        lod_h, lod_w = lod_flow.shape[:2]
+        lod_scale_x = lod_w / w
+        lod_scale_y = lod_h / h
+
+        # 4. Loop through bad pixels and correct them
+        corrected_count = 0
+        skipped_count = 0
+        for orig_x, orig_y in bad_pixels_coords:
+            # Get original flow and calculate original quality
+            original_flow_x, original_flow_y = flow_for_calc[orig_y, orig_x]
+            original_target_x = orig_x - original_flow_x
+            original_target_y = orig_y - original_flow_y
+            
+            original_similarity = 0.0
+            if (0 <= original_target_x < w and 0 <= original_target_y < h):
+                src_color = frame1[orig_y, orig_x]
+                target_color = frame2[int(original_target_y), int(original_target_x)]
+                original_similarity = self.calculate_pixel_quality(src_color, target_color)
+
+            # Get LOD flow vector
+            lod_x = max(0, min(int(orig_x * lod_scale_x), lod_w - 1))
+            lod_y = max(0, min(int(orig_y * lod_scale_y), lod_h - 1))
+            lod_flow_x = lod_flow[lod_y, lod_x, 0] / lod_scale_x
+            lod_flow_y = lod_flow[lod_y, lod_x, 1] / lod_scale_y
+            
+            # Calculate LOD target
+            lod_target_x = orig_x - lod_flow_x
+            lod_target_y = orig_y - lod_flow_y
+            
+            # Extract regions
+            region1, _ = self.extract_region(frame1, orig_x, orig_y, self.detail_analysis_region_size)
+            region2, _ = self.extract_region(frame2, lod_target_x, lod_target_y, self.detail_analysis_region_size)
+            
+            # Phase correlation
+            dx, dy, _, _ = self.phase_correlation_with_rotation(region1, region2)
+            
+            # Corrected flow vector
+            corrected_flow_x = lod_flow_x - dx
+            corrected_flow_y = lod_flow_y - dy
+            
+            # Calculate corrected quality
+            corrected_target_x = orig_x - corrected_flow_x
+            corrected_target_y = orig_y - corrected_flow_y
+
+            corrected_similarity = 0.0
+            if (0 <= corrected_target_x < w and 0 <= corrected_target_y < h):
+                src_color = frame1[orig_y, orig_x]
+                target_color = frame2[int(corrected_target_y), int(corrected_target_x)]
+                corrected_similarity = self.calculate_pixel_quality(src_color, target_color)
+
+            # Compare and update if correction improved color similarity
+            if corrected_similarity > original_similarity:
+                # Update the copied flow array
+                flow_y_coord = int(orig_y / h * fh)
+                flow_x_coord = int(orig_x / w * fw)
+                flow_y_coord = max(0, min(flow_y_coord, fh - 1))
+                flow_x_coord = max(0, min(flow_x_coord, fw - 1))
+                
+                flow[flow_y_coord, flow_x_coord] = [corrected_flow_x, corrected_flow_y]
+            else:
+                skipped_count += 1
+            
+            # Update progress
+            corrected_count += 1
+            if corrected_count % 20 == 0: # Update UI every 20 pixels to reduce overhead
+                def update_progress(cc=corrected_count, sc=skipped_count):
+                    self.progressbar.config(value=cc)
+                    self.progress_label.config(text=f"Correcting {cc}/{total_bad} (skipped: {sc})...")
+                self.root.after(0, update_progress)
+        
+        # 5. Schedule finalization on main thread
+        self.root.after(0, self._finish_correction, flow, False, skipped_count)
+
+    def _finish_correction(self, corrected_flow, was_aborted, skipped_count=0):
+        """
+        Finalizes the correction process on the main thread.
+        Updates flow data, recalculates quality map, and refreshes UI.
+        """
+        if was_aborted:
+            self.progress_label.config(text="Correction aborted or not needed.")
+            messagebox.showinfo("Info", "No correctable pixels found or LOD data missing.")
+        else:
+            # Update the main flow data
+            self.current_flow = corrected_flow
+            
+            # Recalculate quality map
+            self.progress_label.config(text="Recalculating quality map...")
+            self.root.update_idletasks()
+            self.quality_maps[self.current_pair] = self.generate_quality_frame_fast(self.frame1, self.frame2, self.current_flow)
+            
+            # Update display
+            self.update_display()
+            
+            final_message = f"Correction complete. Skipped {skipped_count} vectors."
+            self.progress_label.config(text=final_message)
+            messagebox.showinfo("Success", f"Flow correction completed.\n{skipped_count} vectors were skipped as the correction did not improve quality.")
+
+        # Hide progress bar after a delay
+        self.root.after(3000, lambda: self.progress_label.config(text=""))
+        self.progressbar.config(value=0)
+        
+        # Re-enable button
+        self.correct_errors_btn.config(state=tk.NORMAL)
 
     def run(self):
         """Run the GUI"""
