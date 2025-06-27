@@ -1736,9 +1736,12 @@ class FlowVisualizer:
         if data['fine_result']:
             fine_pos_scaled = absolute_to_scaled_local(data['fine_result']['target'])
             if fine_pos_scaled:
-                tl = (fine_pos_scaled[0] - template_w_scaled // 2, fine_pos_scaled[1] - template_w_scaled // 2)
-                br = (fine_pos_scaled[0] + template_w_scaled // 2, fine_pos_scaled[1] + template_w_scaled // 2)
-                draw_thin_frame(target_scaled, tl, br, (0, 255, 255))
+                template_w_scaled = int(self.template_radius * 2 * (display_size / (self.detail_analysis_region_size * 2)))
+                half_w_scaled = template_w_scaled // 2
+                tl = (fine_pos_scaled[0] - half_w_scaled, fine_pos_scaled[1] - half_w_scaled)
+                br = (fine_pos_scaled[0] + half_w_scaled, fine_pos_scaled[1] + half_w_scaled)
+
+                draw_thin_frame(target_scaled, tl, br, (0, 255, 255)) # Cyan
 
         # --- 4. Prepare Difference Panel ---
         coarse_res = data['coarse_result']
@@ -1834,8 +1837,9 @@ class FlowVisualizer:
         swatch_y += swatch_size + swatch_y_spacing + 10
         draw_swatch(x4, swatch_y, "Coarse Target", coarse_color)
         
-        swatch_y += swatch_size + swatch_y_spacing + 10
-        draw_swatch(x4, swatch_y, "Fine Target", fine_color)
+        if data['fine_result']:
+            swatch_y += swatch_size + swatch_y_spacing + 10
+            draw_swatch(x4, swatch_y, "Fine Target", fine_color)
 
         # --- 8. Labels and Legends ---
 
@@ -1849,8 +1853,10 @@ class FlowVisualizer:
         canvas.create_text(x2, legend_y_offset,      text="■ Orange: Original Target", anchor=tk.NW, fill="orange", font=font_details, tags="detail_analysis")
         canvas.create_text(x2, legend_y_offset + 12, text="■ Red: LOD Target (Search Center)", anchor=tk.NW, fill="red", font=font_details, tags="detail_analysis")
         canvas.create_text(x2, legend_y_offset + 24, text="■ Green: Coarse Target (PhaseCorr)", anchor=tk.NW, fill="lime", font=font_details, tags="detail_analysis")
-        canvas.create_text(x2, legend_y_offset + 36, text="■ Cyan Marker: Fine Target (NCC)", anchor=tk.NW, fill="cyan", font=font_details, tags="detail_analysis")
-        canvas.create_text(x2, legend_y_offset + 48, text="■ Cyan Frame: Best Match Found", anchor=tk.NW, fill="cyan", font=font_details, tags="detail_analysis")
+        
+        if data['fine_result']:
+            canvas.create_text(x2, legend_y_offset + 36, text="■ Cyan Marker: Fine Target (NCC)", anchor=tk.NW, fill="cyan", font=font_details, tags="detail_analysis")
+            canvas.create_text(x2, legend_y_offset + 48, text="■ Cyan Frame: Best Match Found", anchor=tk.NW, fill="cyan", font=font_details, tags="detail_analysis")
 
         canvas.create_text(x3, base_y - 5, text="Coarse Alignment Difference", anchor=tk.SW, fill="white", tags="detail_analysis")
         canvas.create_text(x3, legend_y_offset,      text="■ White Frame: Source Position", anchor=tk.NW, fill="white", font=font_details, tags="detail_analysis")
