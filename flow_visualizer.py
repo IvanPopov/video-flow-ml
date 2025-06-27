@@ -25,6 +25,7 @@ import time
 from scipy import signal
 from scipy.ndimage import rotate
 import torch
+from VideoFlow.core.utils.frame_utils import writeFlow
 
 # Add flow_processor to path for loading flow data
 sys.path.insert(0, os.getcwd())
@@ -922,9 +923,21 @@ class FlowVisualizer:
         correction_frame = ttk.Frame(control_frame)
         correction_frame.pack(fill=tk.X, pady=(10, 0))
 
-        self.correct_errors_btn = ttk.Button(correction_frame, text="Correct All Errors",
+        self.correct_errors_btn = ttk.Button(correction_frame, text="Correct Current Frame",
                                              command=self.correct_all_errors)
         self.correct_errors_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.correct_all_frames_btn = ttk.Button(correction_frame, text="Correct All Frames",
+                                                 command=self.correct_all_frames_sequentially)
+        self.correct_all_frames_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.save_corrected_var = tk.BooleanVar(value=True)
+        save_check = ttk.Checkbutton(
+            correction_frame,
+            text="Save Corrected Flow",
+            variable=self.save_corrected_var,
+        )
+        save_check.pack(side=tk.LEFT, padx=(10, 5))
 
         self.highlight_errors_var = tk.BooleanVar(value=False)
         highlight_check = ttk.Checkbutton(
@@ -2115,109 +2128,65 @@ class FlowVisualizer:
         self.canvas.create_oval(src_display_x-3, src_display_y-3, src_display_x+3, src_display_y+3, 
                                fill="yellow", outline="white", tags="detail_analysis")
 
-    def correct_all_errors(self):
+    def _run_correction_for_frame_index(self, frame_idx, update_progress=False):
         """
-        Corrects all poor quality flow vectors for the current frame pair synchronously,
-        following a strict step-by-step process. The UI will be unresponsive during this time.
+        Runs the core correction logic for a single frame index.
+        This is the engine for both single-frame and batch corrections.
+        Returns a dictionary with results, or None if correction cannot proceed.
         """
-        if self.current_flow is None:
-            messagebox.showwarning("Warning", "No flow data loaded to correct.")
-            return
+        if self.load_flow_data(frame_idx) is None:
+            print(f"Skipping frame {frame_idx}: No flow data.")
+            return None
 
         # --- Initial Setup ---
-        self.correct_errors_btn.config(state=tk.DISABLED)
-        self.progress_label.config(text="Starting correction...")
-        self.root.update_idletasks()
-        
-        timings = {}
-        total_start_time = time.time()
-        
-        frame1 = self.frame1.copy()
-        frame2 = self.frame2.copy()
-        flow = self.current_flow.copy() # This will be modified
+        frame1 = self.frames[frame_idx]
+        frame2 = self.frames[frame_idx + 1]
+        flow = self.load_flow_data(frame_idx).copy()
         h, w = frame1.shape[:2]
         fh, fw = flow.shape[:2]
-        
+
         # --- Step 1: Get/Generate Existing Quality Map ---
-        start_time = time.time()
-        self.progress_label.config(text="Step 1/6: Getting quality map...")
-        self.root.update_idletasks()
-        
-        quality_map = self.quality_maps.get(self.current_pair)
+        quality_map = self.quality_maps.get(frame_idx)
         if quality_map is None:
-            print("Quality map not found. Generating it to find errors...")
-            # Use GPU if available, otherwise fallback to CPU
             if 'cuda' in str(self.processor.device):
                 quality_map = self.generate_quality_frame_gpu(frame1, frame2, flow)
             else:
                 quality_map = self.generate_quality_frame_fast(frame1, frame2, flow)
 
-        timings['1. Get Initial Quality Map'] = time.time() - start_time
-        
         # --- Step 2: Extract Pixels for Correction ---
-        start_time = time.time()
-        self.progress_label.config(text="Step 2/6: Extracting bad pixels...")
-        self.root.update_idletasks()
-        
         bad_pixels_y, bad_pixels_x = np.where(quality_map[:, :, 0] > 0)
         bad_pixels_coords = list(zip(bad_pixels_x, bad_pixels_y))
         initial_error_count = len(bad_pixels_coords)
-        initial_bad_pixels_set = set(bad_pixels_coords) # Store initial errors
-        
-        timings['2. Extract Bad Pixels'] = time.time() - start_time
 
         if not bad_pixels_coords:
-            messagebox.showinfo("Info", "No errors found to correct based on the current quality map.")
-            self.correct_errors_btn.config(state=tk.NORMAL)
-            self.progress_label.config(text="")
-            return
+            return {'flow': flow, 'initial': 0, 'final': 0, 'improved': 0, 'failed': 0}
 
-        self.progressbar.config(maximum=initial_error_count, value=0)
+        if update_progress:
+            self.progressbar.config(maximum=initial_error_count, value=0)
 
         # --- Step 3: Prepare LOD Data ---
-        start_time = time.time()
-        self.progress_label.config(text="Step 3/6: Preparing LOD data...")
-        self.root.update_idletasks()
-        
-        lod_level, lod_flow = self.get_highest_available_lod(self.current_pair)
-        
+        lod_level, lod_flow = self.get_highest_available_lod(frame_idx)
         if lod_flow is None:
-            messagebox.showerror("Error", "No LOD data available for correction.")
-            self.correct_errors_btn.config(state=tk.NORMAL)
-            self.progress_label.config(text="Aborted.")
-            return
-            
-        timings['3. Prepare LOD Data'] = time.time() - start_time
+            messagebox.showerror("Error", f"Frame {frame_idx}: No LOD data available for correction.")
+            return None
 
         # --- Step 4: Perform Correction ---
-        start_time = time.time()
-        self.progress_label.config(text=f"Step 4/6: Correcting {initial_error_count} pixels...")
-        self.root.update_idletasks()
-        
-        # --- This section is now aligned with on_mouse_move to ensure identical vector retrieval ---
-        flow_data = self.current_flow
-        fh, fw = flow_data.shape[:2]
+        flow_data = flow
         scale_x_frame_to_flow = fw / w if w > 0 else 1.0
         scale_y_frame_to_flow = fh / h if h > 0 else 1.0
-        
         lod_h, lod_w = lod_flow.shape[:2]
         lod_scale_x_frame_to_lod = lod_w / w
         lod_scale_y_frame_to_lod = lod_h / h
         
-        skipped_count = 0
-        improved_pixels_set = set() # Track pixels that are improved but not fully corrected
+        improved_pixels_set = set()
 
         for i, (orig_x, orig_y) in enumerate(bad_pixels_coords):
-            # Calculate original flow vector with precision, matching on_mouse_move
             flow_x_coord = int(orig_x * scale_x_frame_to_flow)
             flow_y_coord = int(orig_y * scale_y_frame_to_flow)
             flow_x_coord = max(0, min(flow_x_coord, fw - 1))
             flow_y_coord = max(0, min(flow_y_coord, fh - 1))
-            
-            # Scale vector back to frame resolution
             original_flow_x = flow_data[flow_y_coord, flow_x_coord, 0] / scale_x_frame_to_flow
             original_flow_y = flow_data[flow_y_coord, flow_x_coord, 1] / scale_y_frame_to_flow
-
             original_target_x, original_target_y = orig_x - original_flow_x, orig_y - original_flow_y
             
             original_similarity = 0.0
@@ -2230,108 +2199,193 @@ class FlowVisualizer:
             lod_flow_y = lod_flow[lod_y, lod_x, 1] / lod_scale_y_frame_to_lod
             
             coarse_result = self._perform_coarse_correction(frame1, frame2, (orig_x, orig_y), (lod_flow_x, lod_flow_y))
-            
-            # Start with the coarse result as the current best
             final_flow = coarse_result['flow']
             final_similarity = coarse_result['similarity']
 
-            # If the coarse result isn't great, try to refine it
             if coarse_result['similarity'] < self.FINE_CORRECTION_THRESHOLD:
                 fine_result = self._perform_fine_correction(frame1, frame2, (orig_x, orig_y), coarse_result['target'])
-                # Only use the fine result if it's an improvement over the coarse one
                 if fine_result and fine_result['similarity'] > coarse_result['similarity']:
                     final_flow = fine_result['flow']
                     final_similarity = fine_result['similarity']
 
-            # Now, compare the best result found (coarse or fine) against the original flow
-            # A correction is accepted if it's objectively "good", or if it's at least an improvement over the original "bad" flow.
             if self._is_good_quality(final_similarity) or (final_similarity > original_similarity):
-                # We need to scale the final corrected flow vector *back* to the resolution of the stored flow map
                 final_flow_x_scaled = final_flow[0] * scale_x_frame_to_flow
                 final_flow_y_scaled = final_flow[1] * scale_y_frame_to_flow
-
                 flow_y_coord, flow_x_coord = int(orig_y * scale_y_frame_to_flow), int(orig_x * scale_x_frame_to_flow)
                 flow_y_coord, flow_x_coord = max(0, min(flow_y_coord, fh - 1)), max(0, min(flow_x_coord, fw - 1))
-                
                 flow[flow_y_coord, flow_x_coord] = [final_flow_x_scaled, final_flow_y_scaled]
 
-                # If it's improved but still not "good", add to improved set
                 if not self._is_good_quality(final_similarity):
                     improved_pixels_set.add((orig_x, orig_y))
-            else:
-                skipped_count += 1
             
-            if (i + 1) % 50 == 0:
+            if update_progress and (i + 1) % 50 == 0:
                 self.progressbar.config(value=i + 1)
                 self.root.update_idletasks()
         
-        timings['4. Perform Correction Loop'] = time.time() - start_time
-        
         # --- Step 5: Create New Quality Map ---
-        start_time = time.time()
-        self.progress_label.config(text="Step 5/6: Creating new quality map...")
-        self.root.update_idletasks()
-        
         if 'cuda' in str(self.processor.device):
             new_quality_map = self.generate_quality_frame_gpu(frame1, frame2, flow)
         else:
             new_quality_map = self.generate_quality_frame_fast(frame1, frame2, flow)
             
-        timings['5. Create New Quality Map'] = time.time() - start_time
+        # --- Step 6: Get Final Error Count & Update Caches ---
+        final_error_y, final_error_x = np.where(new_quality_map[:, :, 0] > 0)
+        final_error_count = len(final_error_y)
+        final_bad_pixels_set = set(zip(final_error_x, final_error_y))
+        
+        self.improved_correction_pixels[frame_idx] = improved_pixels_set.intersection(final_bad_pixels_set)
+        self.failed_correction_pixels[frame_idx] = final_bad_pixels_set.difference(self.improved_correction_pixels[frame_idx])
+        
+        self.flow_data_cache[frame_idx] = flow
+        self.quality_maps[frame_idx] = new_quality_map
 
-        # --- Step 6: Get Final Error Count ---
-        start_time = time.time()
-        self.progress_label.config(text="Step 6/6: Counting final errors...")
+        return {
+            'flow': flow,
+            'initial': initial_error_count,
+            'final': final_error_count,
+            'improved': len(self.improved_correction_pixels[frame_idx]),
+            'failed': len(self.failed_correction_pixels[frame_idx])
+        }
+
+    def correct_all_errors(self):
+        """
+        Corrects all poor quality flow vectors for the current frame pair synchronously,
+        and updates the UI.
+        """
+        # --- UI Setup ---
+        self.correct_errors_btn.config(state=tk.DISABLED)
+        self.correct_all_frames_btn.config(state=tk.DISABLED)
+        self.progress_label.config(text="Starting correction...")
         self.root.update_idletasks()
         
-        final_error_count = np.count_nonzero(new_quality_map[:, :, 0] > 0)
+        # --- Run Correction ---
+        results = self._run_correction_for_frame_index(self.current_pair, update_progress=True)
+        
+        # --- UI Cleanup and Reporting ---
+        self.correct_errors_btn.config(state=tk.NORMAL)
+        self.correct_all_frames_btn.config(state=tk.NORMAL)
+        self.progressbar.config(value=0)
+        
+        if results is None:
+            self.progress_label.config(text="Correction aborted (no data).")
+            # The helper function already shows a messagebox for critical errors
+            return
+            
+        # --- Update Main Display and Cache ---
+        # The helper function already updated the caches. We just need to refresh the view.
+        self.current_flow = results['flow'] # Update the flow being used by the visualizer
+        self.update_display()
+        
+        # --- Save Corrected Flow ---
+        saved_path = None
+        if self.save_corrected_var.get():
+            try:
+                original_flow_path = Path(self.flow_files[self.current_pair])
+                corrected_flow_dir = Path(self.flow_dir).with_name(Path(self.flow_dir).name + "_corrected")
+                os.makedirs(corrected_flow_dir, exist_ok=True)
+                new_flow_path = corrected_flow_dir / original_flow_path.name
+                
+                if new_flow_path.suffix == '.flo':
+                    writeFlow(str(new_flow_path), results['flow'])
+                elif new_flow_path.suffix == '.npz':
+                    np.savez_compressed(str(new_flow_path), flow=results['flow'])
+                
+                saved_path = new_flow_path
+                print(f"Saved corrected flow to {saved_path}")
 
-        # Identify pixels that were not successfully corrected
-        final_bad_pixels_y, final_bad_pixels_x = np.where(new_quality_map[:, :, 0] > 0)
-        final_bad_pixels_set = set(zip(final_bad_pixels_x, final_bad_pixels_y))
-        
-        # Pixels that were improved but still bad are yellow
-        self.improved_correction_pixels[self.current_pair] = improved_pixels_set.intersection(final_bad_pixels_set)
-        
-        # Pixels that are still bad and were not improved are purple
-        failed_to_correct_pixels = final_bad_pixels_set.difference(self.improved_correction_pixels[self.current_pair])
-        self.failed_correction_pixels[self.current_pair] = failed_to_correct_pixels
-        
-        timings['6. Get Final Error Count'] = time.time() - start_time
+            except Exception as e:
+                print(f"Error saving corrected flow file: {e}")
+                messagebox.showerror("Save Error", f"Could not save the corrected flow file.\n{e}")
 
-        # --- Finalization ---
-        start_time_final = time.time()
-        self.current_flow = flow
-        self.flow_data_cache[self.current_pair] = flow
-        self.quality_maps[self.current_pair] = new_quality_map
+        # --- Final Message ---
+        final_message = (
+            f"Correction complete. "
+            f"Errors: {results['initial']} -> {results['final']}. "
+            f"Improved: {results['improved']}, Failed to fix: {results['failed']}."
+        )
+        if saved_path:
+            final_message += f"\n\nCorrected flow saved to:\n{saved_path}"
         
-        # CRITICAL FIX: Do not recalculate LODs here. The manual analysis (Shift+Click)
-        # must use the same original LODs to validate the results of the batch correction.
-        # Recalculating them mid-session was the root cause of the logic inconsistency.
-        
-        timings['7. Finalization (Cache & LODs)'] = time.time() - start_time_final
+        self.progress_label.config(text=final_message)
+        messagebox.showinfo("Success", final_message)
+        self.root.after(5000, lambda: self.progress_label.config(text=""))
 
+    def correct_all_frames_sequentially(self):
+        """
+        Corrects all poor quality flow vectors for ALL frame pairs sequentially.
+        """
+        if not messagebox.askokcancel("Confirm Batch Correction", 
+            f"This will start a batch correction for all {self.max_pairs} frame pairs. "
+            "The UI will be unresponsive until it completes. This may take a long time.\n\nContinue?"):
+            return
+            
+        # --- UI Setup ---
+        self.correct_errors_btn.config(state=tk.DISABLED)
+        self.correct_all_frames_btn.config(state=tk.DISABLED)
+        self.progressbar.config(maximum=self.max_pairs, value=0)
+        
+        total_initial_errors, total_final_errors, total_improved, total_failed = 0, 0, 0, 0
+        frames_processed, frames_skipped = 0, 0
+        batch_start_time = time.time()
+        
+        # --- Main Loop ---
+        for frame_idx in range(self.max_pairs):
+            self.progress_label.config(text=f"Processing frame {frame_idx + 1}/{self.max_pairs}...")
+            self.progressbar.config(value=frame_idx + 1)
+            self.root.update_idletasks()
+            
+            results = self._run_correction_for_frame_index(frame_idx)
+            
+            if results is None:
+                frames_skipped += 1
+                continue
+            
+            frames_processed += 1
+            total_initial_errors += results['initial']
+            total_final_errors += results['final']
+            total_improved += results['improved']
+            total_failed += results['failed']
+            
+            if self.save_corrected_var.get() and results['flow'] is not None:
+                try:
+                    original_flow_path = Path(self.flow_files[frame_idx])
+                    corrected_flow_dir = Path(self.flow_dir).with_name(Path(self.flow_dir).name + "_corrected")
+                    os.makedirs(corrected_flow_dir, exist_ok=True)
+                    new_flow_path = corrected_flow_dir / original_flow_path.name
+                    
+                    if new_flow_path.suffix == '.flo':
+                        writeFlow(str(new_flow_path), results['flow'])
+                    elif new_flow_path.suffix == '.npz':
+                        np.savez_compressed(str(new_flow_path), flow=results['flow'])
+                except Exception as e:
+                    print(f"Error saving corrected flow for frame {frame_idx}: {e}")
+        
+        batch_duration = time.time() - batch_start_time
+        
         # --- Reporting ---
         self.update_display()
         
-        improved_count = len(self.improved_correction_pixels.get(self.current_pair, set()))
-        failed_count = len(failed_to_correct_pixels)
-        final_message = f"Correction complete. Errors: {initial_error_count} -> {final_error_count}. Improved: {improved_count}, Failed to fix: {failed_count}."
+        summary_message = (
+            f"Batch correction complete in {batch_duration:.2f}s.\n\n"
+            f"Frames Processed: {frames_processed}\n"
+            f"Frames Skipped (no data): {frames_skipped}\n\n"
+            f"Total Initial Errors: {total_initial_errors}\n"
+            f"Total Final Errors: {total_final_errors}\n"
+            f"  - Improved (but still bad): {total_improved}\n"
+            f"  - Failed to fix: {total_failed}"
+        )
+        
+        if self.save_corrected_var.get() and frames_processed > 0:
+             corrected_flow_dir = Path(self.flow_dir).with_name(Path(self.flow_dir).name + "_corrected")
+             summary_message += f"\n\nCorrected flows saved to:\n{corrected_flow_dir.resolve()}"
 
-        self.progress_label.config(text=final_message)
-        messagebox.showinfo("Success", final_message)
-
-        self.root.after(5000, lambda: self.progress_label.config(text=""))
+        messagebox.showinfo("Batch Complete", summary_message)
+        
+        # --- UI Cleanup ---
+        self.progress_label.config(text="")
         self.progressbar.config(value=0)
         self.correct_errors_btn.config(state=tk.NORMAL)
-
-        if timings:
-            total_time = time.time() - total_start_time
-            print("\n--- Correction Performance Stats ---")
-            print(f"Total time: {total_time:.4f}s")
-            for stage, duration in sorted(timings.items()):
-                print(f"  - {stage:<30}: {duration:.4f}s ({duration/total_time*100:.1f}%)")
-            print("------------------------------------")
+        self.correct_all_frames_btn.config(state=tk.NORMAL)
 
     def generate_quality_frame_gpu(self, frame1, frame2, flow):
         """
@@ -2423,7 +2477,7 @@ class FlowVisualizer:
         quality_frame = (quality_frame_t * 255).byte().cpu().numpy()
         
         return quality_frame
-    
+        
     def run(self):
         """Run the GUI"""
         self.root.mainloop()
