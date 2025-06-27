@@ -1789,6 +1789,7 @@ class FlowVisualizer:
         x1 = spacing
         x2 = x1 + region_w + spacing
         x3 = x2 + region_w + spacing
+        x4 = x3 + region_w + spacing # New column for color swatches
 
         # Convert to PhotoImage and store references
         self.analysis_photo1 = ImageTk.PhotoImage(Image.fromarray(source_bordered))
@@ -1799,20 +1800,57 @@ class FlowVisualizer:
         canvas.create_image(x2, base_y, anchor=tk.NW, image=self.analysis_photo2, tags="detail_analysis")
         canvas.create_image(x3, base_y, anchor=tk.NW, image=self.analysis_photo3, tags="detail_analysis")
         
-        # --- 7. Labels and Legends ---
+        # --- 7. Draw Color Swatches Panel ---
+        swatch_size = 50
+        swatch_y_spacing = 15
         font_details = ("Arial", 8)
+        
+        def get_color_at(frame, coords):
+            if coords is None or coords[0] is None: return None
+            h, w = frame.shape[:2]
+            x, y = int(coords[0]), int(coords[1])
+            if 0 <= x < w and 0 <= y < h:
+                return frame[y, x]
+            return None
+
+        def draw_swatch(x, y, label, color):
+            hex_color = f"#{color[0]:02x}{color[1]:02x}{color[2]:02x}" if color is not None else "#333333"
+            outline_color = "white" if color is not None else "gray"
+            canvas.create_rectangle(x, y, x + swatch_size, y + swatch_size, 
+                                    fill=hex_color, outline=outline_color, tags="detail_analysis")
+            canvas.create_text(x + swatch_size / 2, y + swatch_size + 8, 
+                               text=label, anchor=tk.N, fill="white", 
+                               font=font_details, tags="detail_analysis")
+
+        # Get colors
+        source_color = get_color_at(self.frame1, data['source_pixel'])
+        coarse_color = get_color_at(self.frame2, data['coarse_result']['target'])
+        fine_color = get_color_at(self.frame2, data['fine_result']['target'] if data['fine_result'] else None)
+        
+        # Draw swatches
+        swatch_y = base_y
+        draw_swatch(x4, swatch_y, "Source Pixel", source_color)
+        
+        swatch_y += swatch_size + swatch_y_spacing + 10
+        draw_swatch(x4, swatch_y, "Coarse Target", coarse_color)
+        
+        swatch_y += swatch_size + swatch_y_spacing + 10
+        draw_swatch(x4, swatch_y, "Fine Target", fine_color)
+
+        # --- 8. Labels and Legends ---
+
         legend_y_offset = base_y + region_h + 15
         
-        canvas.create_text(x1, base_y - 5, text="Source Region", anchor=tk.SW, fill="white", tags="detail_analysis")
+        canvas.create_text(x1, base_y - 5, text="Source Region (Template)", anchor=tk.SW, fill="white", tags="detail_analysis")
         canvas.create_text(x1, legend_y_offset,      text="■ Yellow Marker: Selected Pixel", anchor=tk.NW, fill="yellow", font=font_details, tags="detail_analysis")
-        canvas.create_text(x1, legend_y_offset + 12, text="■ Yellow Frame: 11x11 Template", anchor=tk.NW, fill="yellow", font=font_details, tags="detail_analysis")
+        canvas.create_text(x1, legend_y_offset + 12, text="■ Yellow Frame: 11x11 Template Area", anchor=tk.NW, fill="yellow", font=font_details, tags="detail_analysis")
         
-        canvas.create_text(x2, base_y - 5, text="Target Region", anchor=tk.SW, fill="white", tags="detail_analysis")
+        canvas.create_text(x2, base_y - 5, text="Target Region (Search Area)", anchor=tk.SW, fill="white", tags="detail_analysis")
         canvas.create_text(x2, legend_y_offset,      text="■ Orange: Original Target", anchor=tk.NW, fill="orange", font=font_details, tags="detail_analysis")
-        canvas.create_text(x2, legend_y_offset + 12, text="■ Red: LOD Target", anchor=tk.NW, fill="red", font=font_details, tags="detail_analysis")
-        canvas.create_text(x2, legend_y_offset + 24, text="■ Green: Coarse Target", anchor=tk.NW, fill="lime", font=font_details, tags="detail_analysis")
-        canvas.create_text(x2, legend_y_offset + 36, text="■ Cyan: Fine Target (Best Match)", anchor=tk.NW, fill="cyan", font=font_details, tags="detail_analysis")
-        canvas.create_text(x2, legend_y_offset + 48, text="■ Cyan Frame: Matched Template", anchor=tk.NW, fill="cyan", font=font_details, tags="detail_analysis")
+        canvas.create_text(x2, legend_y_offset + 12, text="■ Red: LOD Target (Search Center)", anchor=tk.NW, fill="red", font=font_details, tags="detail_analysis")
+        canvas.create_text(x2, legend_y_offset + 24, text="■ Green: Coarse Target (PhaseCorr)", anchor=tk.NW, fill="lime", font=font_details, tags="detail_analysis")
+        canvas.create_text(x2, legend_y_offset + 36, text="■ Cyan Marker: Fine Target (NCC)", anchor=tk.NW, fill="cyan", font=font_details, tags="detail_analysis")
+        canvas.create_text(x2, legend_y_offset + 48, text="■ Cyan Frame: Best Match Found", anchor=tk.NW, fill="cyan", font=font_details, tags="detail_analysis")
 
         canvas.create_text(x3, base_y - 5, text="Coarse Alignment Difference", anchor=tk.SW, fill="white", tags="detail_analysis")
         canvas.create_text(x3, legend_y_offset,      text="■ White Frame: Source Position", anchor=tk.NW, fill="white", font=font_details, tags="detail_analysis")
