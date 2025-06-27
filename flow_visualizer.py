@@ -86,6 +86,9 @@ class FlowVisualizer:
         # Check for LOD data availability
         self.check_lod_availability()
         
+        # A tag for the circle marking the selected pixel on the quality map
+        self.quality_map_marker_tag = "quality_map_marker"
+        
         # Pre-compute only the first quality map
         print("Computing initial quality map...")
         if self.max_pairs > 0:
@@ -111,8 +114,15 @@ class FlowVisualizer:
         self.last_pan_x = 0
         self.last_pan_y = 0
         
+        # Track pixels that failed correction attempts
+        self.failed_correction_pixels = {}
+        self.improved_correction_pixels = {}
+        
         # UI setup
         self.setup_ui()
+        
+        # Track quality map marker coordinates
+        self.quality_map_marker_coords = None
         
         # Start background quality computation checker
         self.check_quality_queue()
@@ -534,14 +544,45 @@ class FlowVisualizer:
         return region, (x1, y1, x2, y2)
     
     def on_left_click(self, event):
-        """Handle left mouse click for detail analysis"""
+        """Handle left mouse click for detail analysis or marking the quality map."""
+        # First, clear any existing marker on the quality map
+        self.canvas.delete(self.quality_map_marker_tag)
+        self.quality_map_marker_coords = None
+        
         if self.current_flow is None:
             return
             
-        # Check if click is on first frame
+        # Check if click is on the quality map (frame 3)
+        if (self.frame3_x <= event.x <= self.frame3_x + self.display_width and
+            self.frame3_y <= event.y <= self.frame3_y + self.display_height):
+            
+            # Draw a circle on the quality map where the user clicked
+            radius = 5
+            self.canvas.create_oval(
+                event.x - radius, event.y - radius,
+                event.x + radius, event.y + radius,
+                outline="yellow", width=2, tags=self.quality_map_marker_tag
+            )
+            self.quality_map_marker_coords = (event.x, event.y)
+            return # Stop further processing if click was on quality map
+
+        # Check if click is on first frame for detail analysis
         if (self.frame1_x <= event.x <= self.frame1_x + self.display_width and
             self.frame1_y <= event.y <= self.frame1_y + self.display_height):
             
+            # Draw a corresponding marker on the quality map (frame 3)
+            marker_x = event.x
+            # Y position on frame3 is frame3's y-start + offset of click from frame1's y-start
+            marker_y = self.frame3_y + (event.y - self.frame1_y)
+
+            radius = 5
+            self.canvas.create_oval(
+                marker_x - radius, marker_y - radius,
+                marker_x + radius, marker_y + radius,
+                outline="yellow", width=2, tags=self.quality_map_marker_tag
+            )
+            self.quality_map_marker_coords = (marker_x, marker_y)
+
             # Convert display coordinates to original frame coordinates
             display_x = event.x - self.frame1_x
             display_y = event.y - self.frame1_y
@@ -694,6 +735,7 @@ class FlowVisualizer:
         self.exit_detail_btn.pack_forget()
         # Clear detail analysis graphics
         self.canvas.delete("detail_analysis")
+        # Do not clear the quality map marker when exiting detail mode
         # Update display
         self.update_display()
     
@@ -852,6 +894,15 @@ class FlowVisualizer:
                                              command=self.correct_all_errors)
         self.correct_errors_btn.pack(side=tk.LEFT, padx=(0, 10))
 
+        self.highlight_errors_var = tk.BooleanVar(value=False)
+        highlight_check = ttk.Checkbutton(
+            correction_frame,
+            text="Highlight Correctable Errors",
+            variable=self.highlight_errors_var,
+            command=self.toggle_error_highlighting
+        )
+        highlight_check.pack(side=tk.LEFT, padx=(10, 0))
+
         self.progress_label = ttk.Label(correction_frame, text="")
         self.progress_label.pack(side=tk.LEFT, padx=(0, 5))
 
@@ -920,6 +971,29 @@ class FlowVisualizer:
             # If not cached, show a black frame. User must generate it manually.
             quality_frame = np.zeros_like(frame1)
         
+        # Highlight errors if the toggle is active
+        if hasattr(self, 'highlight_errors_var') and self.highlight_errors_var.get() and self.current_pair in self.quality_maps:
+            quality_frame = quality_frame.copy()  # Work on a copy
+            # Highlight all correctable errors (red component > 0) as white
+            error_pixels_y, error_pixels_x = np.where(quality_frame[:, :, 0] > 0)
+            quality_frame[error_pixels_y, error_pixels_x] = [255, 255, 255]
+
+            # Then, highlight improved pixels as yellow
+            improved_pixels = self.improved_correction_pixels.get(self.current_pair)
+            if improved_pixels:
+                if improved_pixels: # Ensure not empty
+                    improved_y = [coord[1] for coord in improved_pixels]
+                    improved_x = [coord[0] for coord in improved_pixels]
+                    quality_frame[np.array(improved_y), np.array(improved_x)] = [255, 255, 0] # Yellow
+
+            # Finally, re-color pixels that failed previous correction as purple
+            failed_pixels = self.failed_correction_pixels.get(self.current_pair)
+            if failed_pixels:
+                if failed_pixels: # Ensure not empty
+                    failed_y = [coord[1] for coord in failed_pixels]
+                    failed_x = [coord[0] for coord in failed_pixels]
+                    quality_frame[np.array(failed_y), np.array(failed_x)] = [255, 0, 128] # Purple
+
         # Resize frames for display
         frame1_display, self.display_scale = self.resize_frame_for_display(frame1)
         frame2_display, _ = self.resize_frame_for_display(frame2)
@@ -1007,6 +1081,16 @@ class FlowVisualizer:
         self.canvas.create_text(x_offset + self.display_width - 5, y3_offset + 5, anchor=tk.NE, 
                                text=quality_text, fill="cyan", font=("Arial", 10, "bold"))
         
+        # Redraw the quality map marker if it exists, regardless of mode
+        if self.quality_map_marker_coords:
+            radius = 5
+            x, y = self.quality_map_marker_coords
+            self.canvas.create_oval(
+                x - radius, y - radius,
+                x + radius, y + radius,
+                outline="yellow", width=2, tags=self.quality_map_marker_tag
+            )
+
         # Draw detail analysis overlays if in detail mode
         if self.detail_analysis_mode:
             self.draw_detail_analysis_overlays(x_offset, y1_offset, x_offset, y2_offset)
@@ -1164,28 +1248,17 @@ class FlowVisualizer:
         # Trigger update after drag ends
         self.update_display()
     
-    def on_slider_change(self, value):
-        """Handle slider change"""
-        new_pair = int(float(value))
-        
-        # Check if we need to exit detail mode
-        if new_pair != self.current_pair:
-            if not self.check_exit_detail_mode("Changing frame"):
-                # Revert slider to current position
-                self.frame_var.set(self.current_pair)
-                return
-        
+    def on_slider_change(self, val):
+        """Called when the frame slider is moved."""
+        new_pair = int(float(val))
+
+        if new_pair == self.current_pair:
+            return # Avoid unnecessary updates
+
         self.current_pair = new_pair
-        
+
         # Only update display during dragging, no computations
-        if self.slider_dragging:
-            # Quick update without quality map computation
-            self.update_display_quick()
-        else:
-            # Full update with quality map computation
-            self.update_display()
-            # Preload adjacent frames for smoother navigation
-            self.preload_adjacent_frames()
+        self.update_display_quick()
     
     def on_mouse_move(self, event):
         """Handle mouse movement over canvas"""
@@ -1369,6 +1442,10 @@ class FlowVisualizer:
             self.pan_offset_y = 0
             self.update_display()
     
+    def toggle_error_highlighting(self):
+        """Toggles the highlighting of correctable errors on the quality map."""
+        self.update_display()
+
     def on_vector_mode_change(self):
         """Handle vector mode radio button change"""
         mode = self.vector_mode_var.get()
@@ -2049,6 +2126,7 @@ class FlowVisualizer:
         bad_pixels_y, bad_pixels_x = np.where(quality_map[:, :, 0] > 0)
         bad_pixels_coords = list(zip(bad_pixels_x, bad_pixels_y))
         initial_error_count = len(bad_pixels_coords)
+        initial_bad_pixels_set = set(bad_pixels_coords) # Store initial errors
         
         timings['2. Extract Bad Pixels'] = time.time() - start_time
 
@@ -2093,6 +2171,7 @@ class FlowVisualizer:
         lod_scale_x = lod_w / w
         lod_scale_y = lod_h / h
         skipped_count = 0
+        improved_pixels_set = set() # Track pixels that are improved but not fully corrected
 
         for i, (orig_x, orig_y) in enumerate(bad_pixels_coords):
             original_flow_x, original_flow_y = flow_for_calc[orig_y, orig_x]
@@ -2124,6 +2203,10 @@ class FlowVisualizer:
                 final_flow_x_scaled = final_flow[0] * (fw / w if w > 0 else 1.0)
                 final_flow_y_scaled = final_flow[1] * (fh / h if h > 0 else 1.0)
                 flow[flow_y_coord, flow_x_coord] = [final_flow_x_scaled, final_flow_y_scaled]
+
+                # If it's improved but still not "good", add to improved set
+                if not self._is_good_quality(final_similarity):
+                    improved_pixels_set.add((orig_x, orig_y))
             else:
                 skipped_count += 1
             
@@ -2151,6 +2234,18 @@ class FlowVisualizer:
         self.root.update_idletasks()
         
         final_error_count = np.count_nonzero(new_quality_map[:, :, 0] > 0)
+
+        # Identify pixels that were not successfully corrected
+        final_bad_pixels_y, final_bad_pixels_x = np.where(new_quality_map[:, :, 0] > 0)
+        final_bad_pixels_set = set(zip(final_bad_pixels_x, final_bad_pixels_y))
+        
+        # Pixels that were improved but still bad are yellow
+        self.improved_correction_pixels[self.current_pair] = improved_pixels_set.intersection(final_bad_pixels_set)
+        
+        # Pixels that are still bad and were not improved are purple
+        failed_to_correct_pixels = final_bad_pixels_set.difference(self.improved_correction_pixels[self.current_pair])
+        self.failed_correction_pixels[self.current_pair] = failed_to_correct_pixels
+        
         timings['6. Get Final Error Count'] = time.time() - start_time
 
         # --- Finalization ---
@@ -2170,7 +2265,11 @@ class FlowVisualizer:
 
         # --- Reporting ---
         self.update_display()
-        final_message = f"Correction complete. Errors: {initial_error_count} -> {final_error_count}. Skipped: {skipped_count}."
+        
+        improved_count = len(self.improved_correction_pixels.get(self.current_pair, set()))
+        failed_count = len(failed_to_correct_pixels)
+        final_message = f"Correction complete. Errors: {initial_error_count} -> {final_error_count}. Improved: {improved_count}, Failed to fix: {failed_count}."
+
         self.progress_label.config(text=final_message)
         messagebox.showinfo("Success", final_message)
 
