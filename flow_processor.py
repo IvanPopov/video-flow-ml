@@ -713,6 +713,187 @@ class VideoFlowProcessor:
         """Generate LOD pyramids for all frames in cache"""
         return self.cache_manager.generate_lods_for_cache(cache_dir, max_frames, num_lods)
 
+    def analyze_lod_cache_statistics(self, cache_dir, max_frames, num_lods=5):
+        """
+        Analyze and report detailed LOD cache statistics
+        
+        Args:
+            cache_dir: Cache directory path
+            max_frames: Number of frames to analyze
+            num_lods: Expected number of LOD levels
+        """
+        print("\n--- LOD Cache Statistics ---")
+        
+        lod_dir = os.path.join(cache_dir, 'lods')
+        if not os.path.exists(lod_dir):
+            print("LOD directory not found - no LOD data available.")
+            print("---------------------------\n")
+            return
+            
+        # Statistics tracking
+        total_lod_files = 0
+        total_lod_size_bytes = 0
+        frames_with_complete_lods = 0
+        frames_with_partial_lods = 0
+        frames_missing_lods = 0
+        
+        # Per-level statistics
+        lod_level_stats = {}
+        for level in range(num_lods):
+            lod_level_stats[level] = {
+                'count': 0,
+                'total_size': 0,
+                'missing_frames': [],
+                'dimensions': set()  # Store unique dimensions for this LOD level
+            }
+        
+        # Per-frame analysis
+        frame_lod_details = {}
+        
+        print(f"Analyzing LOD data for {max_frames} frames with {num_lods} expected levels...")
+        
+        for frame_idx in range(max_frames):
+            frame_lods = {}
+            frame_total_size = 0
+            frame_lod_count = 0
+            
+            for lod_level in range(num_lods):
+                lod_file = os.path.join(lod_dir, f"flow_frame_{frame_idx:06d}_lod{lod_level}.npz")
+                
+                if os.path.exists(lod_file):
+                    try:
+                        # Get file size
+                        file_size = os.path.getsize(lod_file)
+                        
+                        # Load LOD data to get dimensions
+                        lod_data = self.load_flow_lod(cache_dir, frame_idx, lod_level)
+                        if lod_data is not None:
+                            height, width = lod_data.shape[:2]
+                            dimensions = (width, height)
+                            lod_level_stats[lod_level]['dimensions'].add(dimensions)
+                        else:
+                            dimensions = None
+                        
+                        frame_lods[lod_level] = {
+                            'size': file_size,
+                            'dimensions': dimensions
+                        }
+                        frame_total_size += file_size
+                        frame_lod_count += 1
+                        
+                        # Update level statistics
+                        lod_level_stats[lod_level]['count'] += 1
+                        lod_level_stats[lod_level]['total_size'] += file_size
+                        
+                        total_lod_files += 1
+                        total_lod_size_bytes += file_size
+                        
+                    except Exception as e:
+                        print(f"Warning: Could not read LOD file {lod_file}: {e}")
+                        lod_level_stats[lod_level]['missing_frames'].append(frame_idx)
+                else:
+                    lod_level_stats[lod_level]['missing_frames'].append(frame_idx)
+            
+            # Categorize frame
+            if frame_lod_count == num_lods:
+                frames_with_complete_lods += 1
+            elif frame_lod_count > 0:
+                frames_with_partial_lods += 1
+            else:
+                frames_missing_lods += 1
+            
+            frame_lod_details[frame_idx] = {
+                'count': frame_lod_count,
+                'total_size': frame_total_size,
+                'lods': frame_lods
+            }
+        
+        # Print summary statistics
+        print(f"\nOverall Summary:")
+        print(f"  Total LOD files found: {total_lod_files}")
+        print(f"  Total LOD data size: {total_lod_size_bytes / (1024*1024):.2f} MB")
+        print(f"  Average LOD file size: {(total_lod_size_bytes / total_lod_files / 1024):.1f} KB" if total_lod_files > 0 else "  Average LOD file size: N/A")
+        
+        print(f"\nFrame Coverage:")
+        print(f"  Frames with complete LODs ({num_lods}/{num_lods}): {frames_with_complete_lods}")
+        print(f"  Frames with partial LODs: {frames_with_partial_lods}")
+        print(f"  Frames missing all LODs: {frames_missing_lods}")
+        
+        completion_rate = (frames_with_complete_lods / max_frames) * 100 if max_frames > 0 else 0
+        print(f"  Completion rate: {completion_rate:.1f}%")
+        
+        # Per-level statistics
+        print(f"\nPer-Level Statistics:")
+        for level in range(num_lods):
+            stats = lod_level_stats[level]
+            coverage = (stats['count'] / max_frames) * 100 if max_frames > 0 else 0
+            avg_size = (stats['total_size'] / stats['count'] / 1024) if stats['count'] > 0 else 0
+            
+            print(f"  LOD Level {level}:")
+            print(f"    Files found: {stats['count']}/{max_frames} ({coverage:.1f}%)")
+            print(f"    Total size: {stats['total_size'] / (1024*1024):.2f} MB")
+            print(f"    Average size: {avg_size:.1f} KB")
+            
+            # Show dimensions information
+            if stats['dimensions']:
+                if len(stats['dimensions']) == 1:
+                    width, height = list(stats['dimensions'])[0]
+                    print(f"    Dimensions: {width}x{height} pixels")
+                else:
+                    print(f"    Dimensions: {len(stats['dimensions'])} different sizes found:")
+                    for width, height in sorted(stats['dimensions']):
+                        print(f"      {width}x{height} pixels")
+            else:
+                print(f"    Dimensions: No valid data")
+            
+            if len(stats['missing_frames']) > 0:
+                if len(stats['missing_frames']) <= 10:
+                    missing_str = ', '.join(map(str, stats['missing_frames']))
+                    print(f"    Missing frames: {missing_str}")
+                else:
+                    print(f"    Missing frames: {len(stats['missing_frames'])} frames (showing first 10)")
+                    missing_str = ', '.join(map(str, stats['missing_frames'][:10]))
+                    print(f"      {missing_str}...")
+        
+        # Identify problematic frames
+        problematic_frames = []
+        for frame_idx in range(max_frames):
+            details = frame_lod_details[frame_idx]
+            if details['count'] < num_lods:
+                problematic_frames.append(frame_idx)
+        
+        if problematic_frames:
+            print(f"\nProblematic Frames (missing some/all LODs):")
+            if len(problematic_frames) <= 20:
+                for frame_idx in problematic_frames:
+                    details = frame_lod_details[frame_idx]
+                    print(f"  Frame {frame_idx}: {details['count']}/{num_lods} LODs, {details['total_size']/1024:.1f} KB")
+            else:
+                print(f"  {len(problematic_frames)} frames have missing LODs")
+                print(f"  First 10: {', '.join(map(str, problematic_frames[:10]))}")
+                print(f"  Last 10: {', '.join(map(str, problematic_frames[-10:]))}")
+        
+        # Size distribution analysis
+        if total_lod_files > 0:
+            all_sizes = []
+            for frame_idx in range(max_frames):
+                for lod_level, lod_info in frame_lod_details[frame_idx]['lods'].items():
+                    if isinstance(lod_info, dict) and 'size' in lod_info:
+                        all_sizes.append(lod_info['size'])
+            
+            if all_sizes:
+                all_sizes.sort()
+                min_size = min(all_sizes) / 1024
+                max_size = max(all_sizes) / 1024
+                median_size = all_sizes[len(all_sizes)//2] / 1024
+                
+                print(f"\nSize Distribution:")
+                print(f"  Minimum LOD file: {min_size:.1f} KB")
+                print(f"  Maximum LOD file: {max_size:.1f} KB")
+                print(f"  Median LOD file: {median_size:.1f} KB")
+        
+        print("---------------------------\n")
+
     def encode_hsv_format(self, flow, width, height):
         """Encode optical flow in HSV format using encoding module"""
         return encode_flow(flow, width, height, 'hsv')
@@ -904,6 +1085,9 @@ class VideoFlowProcessor:
                 print("LOD pyramids generated successfully!")
             else:
                 print("LOD pyramids found in cache")
+            
+            # Show detailed LOD statistics
+            self.analyze_lod_cache_statistics(flow_cache_dir, len(frames))
         elif skip_lods:
             print("Skipping LOD pyramid check/generation (--skip-lods enabled)")
         
@@ -1144,6 +1328,9 @@ class VideoFlowProcessor:
             print("Generating LOD pyramids for computed flow...")
             self.generate_lods_for_cache(flow_cache_dir, len(frames))
             print("LOD pyramids generated!")
+            
+            # Show detailed LOD statistics for newly generated pyramids
+            self.analyze_lod_cache_statistics(flow_cache_dir, len(frames))
         elif not use_cached_flow and skip_lods:
             print("Skipping LOD pyramid generation for computed flow (--skip-lods enabled)")
         
@@ -1367,6 +1554,9 @@ def main():
                     print("LOD pyramids generated successfully!")
                 else:
                     print("LOD pyramids found in cache")
+                
+                # Show detailed LOD statistics
+                processor.analyze_lod_cache_statistics(flow_cache_dir, len(frames))
             else:
                 print("Skipping LOD pyramid check/generation (--skip-lods enabled)")
         

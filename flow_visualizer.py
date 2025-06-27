@@ -161,16 +161,14 @@ class FlowVisualizer:
                 self.flow_data_cache[i] = None
 
             # Load all available LODs for this flow
-            lod_dir = os.path.join(self.flow_dir, 'lods')
-            if os.path.exists(lod_dir):
-                for lod_level in range(self.max_lod_levels):
-                    lod_file = os.path.join(lod_dir, f"flow_frame_{i:06d}_lod{lod_level}.npz")
-                    if os.path.exists(lod_file):
-                        try:
-                            npz_data = self.processor.load_flow_npz(lod_file)
-                            self.lod_data_cache[(i, lod_level)] = npz_data['flow']
-                        except Exception as e:
-                            print(f"\nWarning: Could not load LOD file {lod_file}: {e}")
+            for lod_level in range(self.max_lod_levels):
+                lod_file = os.path.join(self.flow_dir, f"flow_frame_{i:06d}_lod{lod_level}.npz")
+                if os.path.exists(lod_file):
+                    try:
+                        npz_data = self.processor.load_flow_npz(lod_file)
+                        self.lod_data_cache[(i, lod_level)] = npz_data['flow']
+                    except Exception as e:
+                        print(f"\nWarning: Could not load LOD file {lod_file}: {e}")
         
         # Add flow for the last duplicated frame
         if num_flows > 0:
@@ -194,9 +192,8 @@ class FlowVisualizer:
         """Generate, save, and cache LODs for the given frame indices."""
         if not frame_indices:
             return
-
-        lod_dir = os.path.join(self.flow_dir, 'lods')
-        os.makedirs(lod_dir, exist_ok=True)
+        
+        os.makedirs(self.flow_dir, exist_ok=True)
         
         print(f"Generating LODs for {len(frame_indices)} frames...")
         
@@ -205,13 +202,13 @@ class FlowVisualizer:
             if flow_data is None:
                 print(f"\nWarning: Cannot generate LODs for frame {i}, base flow data not found.")
                 continue
-                
+            
             try:
                 # Generate LOD pyramid
-                lods = self.processor.generate_flow_lods(flow_data, num_lods=self.max_lod_levels)
+                lods = self.generate_flow_lods(flow_data, num_lods=self.max_lod_levels)
                 
                 # Save LODs to disk using the processor's method to ensure consistency
-                self.processor.save_flow_lods(lods, self.flow_dir, i)
+                self.save_flow_lods(lods, self.flow_dir, i)
                 
                 # Update in-memory cache
                 for lod_level, lod_data in enumerate(lods):
@@ -280,6 +277,9 @@ class FlowVisualizer:
                 # Re-run statistics to print updated info
                 print("\n--- Regenerated Cache Statistics ---")
                 self._log_cache_statistics(is_recursive_call=True)
+                
+                # Show detailed LOD statistics after generation
+                self.analyze_lod_cache_statistics(self.flow_dir, num_expected_frames)
                 return # Exit after recursive call
 
         # --- Logging logic (only runs on first pass or if no generation needed) ---
@@ -320,6 +320,10 @@ class FlowVisualizer:
             print("\nAll frames have complete LODs.")
             
         print("------------------------\n")
+        
+        # Show detailed LOD statistics if this is not a recursive call and LODs exist
+        if not is_recursive_call and (frames_with_lods or total_lods > 0):
+            self.analyze_lod_cache_statistics(self.flow_dir, num_expected_frames)
     
     def load_video_frames(self):
         """Load frames from video starting at start_frame"""
@@ -386,6 +390,206 @@ class FlowVisualizer:
     def load_flow_data(self, frame_idx):
         """Load flow data for specific frame from the in-memory cache."""
         return self.flow_data_cache.get(frame_idx)
+    
+    def generate_flow_lods(self, flow_data, num_lods=5):
+        """Generate Level-of-Detail (LOD) pyramid for flow data"""
+        return self.processor.generate_flow_lods(flow_data, num_lods)
+    
+    def save_flow_lods(self, lods, cache_dir, frame_idx):
+        """Save LOD pyramid for a frame"""
+        return self.processor.save_flow_lods(lods, cache_dir, frame_idx)
+    
+    def load_flow_lod(self, cache_dir, frame_idx, lod_level=0):
+        """Load specific LOD level for a frame"""
+        return self.processor.load_flow_lod(cache_dir, frame_idx, lod_level)
+    
+    def check_flow_lods_exist(self, cache_dir, max_frames, num_lods=5):
+        """Check if LOD pyramid exists for all frames"""
+        return self.processor.check_flow_lods_exist(cache_dir, max_frames, num_lods)
+    
+    def generate_lods_for_cache(self, cache_dir, max_frames, num_lods=5):
+        """Generate LOD pyramids for all frames in cache"""
+        return self.processor.generate_lods_for_cache(cache_dir, max_frames, num_lods)
+    
+    def analyze_lod_cache_statistics(self, cache_dir, max_frames, num_lods=5):
+        """
+        Analyze and report detailed LOD cache statistics
+        
+        Args:
+            cache_dir: Cache directory path
+            max_frames: Number of frames to analyze
+            num_lods: Expected number of LOD levels
+        """
+        print("\n--- LOD Cache Statistics (FlowVisualizer) ---")
+        
+        if not os.path.exists(cache_dir):
+            print("Cache directory not found - no LOD data available.")
+            print("--------------------------------------------\n")
+            return
+            
+        # Statistics tracking
+        total_lod_files = 0
+        total_lod_size_bytes = 0
+        frames_with_complete_lods = 0
+        frames_with_partial_lods = 0
+        frames_missing_lods = 0
+        
+        # Per-level statistics
+        lod_level_stats = {}
+        for level in range(num_lods):
+            lod_level_stats[level] = {
+                'count': 0,
+                'total_size': 0,
+                'missing_frames': [],
+                'dimensions': set()  # Store unique dimensions for this LOD level
+            }
+        
+        # Per-frame analysis
+        frame_lod_details = {}
+        
+        print(f"Analyzing LOD data for {max_frames} frames with {num_lods} expected levels...")
+        
+        for frame_idx in range(max_frames):
+            frame_lods = {}
+            frame_total_size = 0
+            frame_lod_count = 0
+            
+            for lod_level in range(num_lods):
+                lod_file = os.path.join(cache_dir, f"flow_frame_{frame_idx:06d}_lod{lod_level}.npz")
+                
+                if os.path.exists(lod_file):
+                    try:
+                        # Get file size
+                        file_size = os.path.getsize(lod_file)
+                        
+                        # Load LOD data to get dimensions
+                        lod_data = self.load_flow_lod(cache_dir, frame_idx, lod_level)
+                        if lod_data is not None:
+                            height, width = lod_data.shape[:2]
+                            dimensions = (width, height)
+                            lod_level_stats[lod_level]['dimensions'].add(dimensions)
+                        else:
+                            dimensions = None
+                        
+                        frame_lods[lod_level] = {
+                            'size': file_size,
+                            'dimensions': dimensions
+                        }
+                        frame_total_size += file_size
+                        frame_lod_count += 1
+                        
+                        # Update level statistics
+                        lod_level_stats[lod_level]['count'] += 1
+                        lod_level_stats[lod_level]['total_size'] += file_size
+                        
+                        total_lod_files += 1
+                        total_lod_size_bytes += file_size
+                        
+                    except Exception as e:
+                        print(f"Warning: Could not read LOD file {lod_file}: {e}")
+                        lod_level_stats[lod_level]['missing_frames'].append(frame_idx)
+                else:
+                    lod_level_stats[lod_level]['missing_frames'].append(frame_idx)
+            
+            # Categorize frame
+            if frame_lod_count == num_lods:
+                frames_with_complete_lods += 1
+            elif frame_lod_count > 0:
+                frames_with_partial_lods += 1
+            else:
+                frames_missing_lods += 1
+            
+            frame_lod_details[frame_idx] = {
+                'count': frame_lod_count,
+                'total_size': frame_total_size,
+                'lods': frame_lods
+            }
+        
+        # Print summary statistics
+        print(f"\nOverall Summary:")
+        print(f"  Total LOD files found: {total_lod_files}")
+        print(f"  Total LOD data size: {total_lod_size_bytes / (1024*1024):.2f} MB")
+        print(f"  Average LOD file size: {(total_lod_size_bytes / total_lod_files / 1024):.1f} KB" if total_lod_files > 0 else "  Average LOD file size: N/A")
+        
+        print(f"\nFrame Coverage:")
+        print(f"  Frames with complete LODs ({num_lods}/{num_lods}): {frames_with_complete_lods}")
+        print(f"  Frames with partial LODs: {frames_with_partial_lods}")
+        print(f"  Frames missing all LODs: {frames_missing_lods}")
+        
+        completion_rate = (frames_with_complete_lods / max_frames) * 100 if max_frames > 0 else 0
+        print(f"  Completion rate: {completion_rate:.1f}%")
+        
+        # Per-level statistics
+        print(f"\nPer-Level Statistics:")
+        for level in range(num_lods):
+            stats = lod_level_stats[level]
+            coverage = (stats['count'] / max_frames) * 100 if max_frames > 0 else 0
+            avg_size = (stats['total_size'] / stats['count'] / 1024) if stats['count'] > 0 else 0
+            
+            print(f"  LOD Level {level}:")
+            print(f"    Files found: {stats['count']}/{max_frames} ({coverage:.1f}%)")
+            print(f"    Total size: {stats['total_size'] / (1024*1024):.2f} MB")
+            print(f"    Average size: {avg_size:.1f} KB")
+            
+            # Show dimensions information
+            if stats['dimensions']:
+                if len(stats['dimensions']) == 1:
+                    width, height = list(stats['dimensions'])[0]
+                    print(f"    Dimensions: {width}x{height} pixels")
+                else:
+                    print(f"    Dimensions: {len(stats['dimensions'])} different sizes found:")
+                    for width, height in sorted(stats['dimensions']):
+                        print(f"      {width}x{height} pixels")
+            else:
+                print(f"    Dimensions: No valid data")
+            
+            if len(stats['missing_frames']) > 0:
+                if len(stats['missing_frames']) <= 10:
+                    missing_str = ', '.join(map(str, stats['missing_frames']))
+                    print(f"    Missing frames: {missing_str}")
+                else:
+                    print(f"    Missing frames: {len(stats['missing_frames'])} frames (showing first 10)")
+                    missing_str = ', '.join(map(str, stats['missing_frames'][:10]))
+                    print(f"      {missing_str}...")
+        
+        # Identify problematic frames
+        problematic_frames = []
+        for frame_idx in range(max_frames):
+            details = frame_lod_details[frame_idx]
+            if details['count'] < num_lods:
+                problematic_frames.append(frame_idx)
+        
+        if problematic_frames:
+            print(f"\nProblematic Frames (missing some/all LODs):")
+            if len(problematic_frames) <= 20:
+                for frame_idx in problematic_frames:
+                    details = frame_lod_details[frame_idx]
+                    print(f"  Frame {frame_idx}: {details['count']}/{num_lods} LODs, {details['total_size']/1024:.1f} KB")
+            else:
+                print(f"  {len(problematic_frames)} frames have missing LODs")
+                print(f"  First 10: {', '.join(map(str, problematic_frames[:10]))}")
+                print(f"  Last 10: {', '.join(map(str, problematic_frames[-10:]))}")
+        
+        # Size distribution analysis
+        if total_lod_files > 0:
+            all_sizes = []
+            for frame_idx in range(max_frames):
+                for lod_level, lod_info in frame_lod_details[frame_idx]['lods'].items():
+                    if isinstance(lod_info, dict) and 'size' in lod_info:
+                        all_sizes.append(lod_info['size'])
+            
+            if all_sizes:
+                all_sizes.sort()
+                min_size = min(all_sizes) / 1024
+                max_size = max(all_sizes) / 1024
+                median_size = all_sizes[len(all_sizes)//2] / 1024
+                
+                print(f"\nSize Distribution:")
+                print(f"  Minimum LOD file: {min_size:.1f} KB")
+                print(f"  Maximum LOD file: {max_size:.1f} KB")
+                print(f"  Median LOD file: {median_size:.1f} KB")
+        
+        print("--------------------------------------------\n")
     
     def compute_quality_map_background(self, frame_idx):
         """Compute quality map for a specific frame in background thread"""
@@ -526,6 +730,22 @@ class FlowVisualizer:
             img2 = cv2.cvtColor(img2, cv2.COLOR_RGB2GRAY)
         img1 = img1.astype(np.float32)
         img2 = img2.astype(np.float32)
+
+        # Ensure both images have the same size
+        if img1.shape != img2.shape:
+            # Get the minimum dimensions
+            h1, w1 = img1.shape[:2]
+            h2, w2 = img2.shape[:2]
+            min_h = min(h1, h2)
+            min_w = min(w1, w2)
+            
+            # Crop both images to the same size
+            img1 = img1[:min_h, :min_w]
+            img2 = img2[:min_h, :min_w]
+            
+            # If the resulting images are too small, return default values
+            if min_h < 2 or min_w < 2:
+                return 0.0, 0.0, 0.0, 0.0
 
         # Use phase correlation to find the translation
         (dx, dy), confidence = cv2.phaseCorrelate(img1, img2)
@@ -1097,23 +1317,66 @@ class FlowVisualizer:
         correction_frame = ttk.Frame(control_frame)
         correction_frame.pack(fill=tk.X, pady=(10, 0))
 
-        self.correct_errors_btn = ttk.Button(correction_frame, text="Correct Current Frame",
+        # First row - basic correction buttons
+        correction_buttons_frame = ttk.Frame(correction_frame)
+        correction_buttons_frame.pack(fill=tk.X, pady=(0, 5))
+
+        self.correct_errors_btn = ttk.Button(correction_buttons_frame, text="Correct Current Frame",
                                              command=self.correct_all_errors)
         self.correct_errors_btn.pack(side=tk.LEFT, padx=(0, 10))
 
-        self.correct_all_frames_btn = ttk.Button(correction_frame, text="Correct All Frames",
+        self.correct_all_frames_btn = ttk.Button(correction_buttons_frame, text="Correct All Frames",
                                                  command=self.correct_all_frames_sequentially)
         self.correct_all_frames_btn.pack(side=tk.LEFT, padx=(0, 10))
 
         # Add a separator
-        ttk.Separator(correction_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=(10,10), fill='y')
+        ttk.Separator(correction_buttons_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=(10,10), fill='y')
 
-        self.run_taa_btn = ttk.Button(correction_frame, text="Run TAA with Corrected Flow", command=self.run_taa_processor)
+        # Second row - range correction
+        correction_range_frame = ttk.Frame(correction_frame)
+        correction_range_frame.pack(fill=tk.X, pady=(0, 5))
+
+        ttk.Label(correction_range_frame, text="Correct frames from:").pack(side=tk.LEFT, padx=(0, 5))
+        
+        self.start_frame_var = tk.IntVar(value=0)
+        self.start_frame_entry = ttk.Entry(correction_range_frame, textvariable=self.start_frame_var, width=8)
+        self.start_frame_entry.pack(side=tk.LEFT, padx=(0, 2))
+
+        # Quick fill button for start frame
+        ttk.Button(correction_range_frame, text="Current", width=8, 
+                  command=self.set_start_to_current).pack(side=tk.LEFT, padx=(2, 5))
+
+        ttk.Label(correction_range_frame, text="to:").pack(side=tk.LEFT, padx=(0, 5))
+        
+        self.end_frame_var = tk.IntVar(value=min(99, self.max_pairs - 1))
+        self.end_frame_entry = ttk.Entry(correction_range_frame, textvariable=self.end_frame_var, width=8)
+        self.end_frame_entry.pack(side=tk.LEFT, padx=(0, 2))
+
+        # Quick fill button for end frame
+        ttk.Button(correction_range_frame, text="Current", width=8, 
+                  command=self.set_end_to_current).pack(side=tk.LEFT, padx=(2, 10))
+
+        self.correct_range_btn = ttk.Button(correction_range_frame, text="Correct Range",
+                                           command=self.correct_frames_range)
+        self.correct_range_btn.pack(side=tk.LEFT, padx=(0, 5))
+
+        # Quick range button
+        ttk.Button(correction_range_frame, text="Current→End", width=12, 
+                  command=self.set_current_to_end_range).pack(side=tk.LEFT, padx=(5, 10))
+
+        # Add help text
+        ttk.Label(correction_range_frame, text=f"(0-{self.max_pairs - 1})", foreground="gray").pack(side=tk.LEFT)
+
+        # Third row - other controls
+        correction_other_frame = ttk.Frame(correction_frame)
+        correction_other_frame.pack(fill=tk.X)
+
+        self.run_taa_btn = ttk.Button(correction_other_frame, text="Run TAA with Corrected Flow", command=self.run_taa_processor)
         self.run_taa_btn.pack(side=tk.LEFT, padx=(0, 10))
 
         self.save_corrected_var = tk.BooleanVar(value=True)
         save_check = ttk.Checkbutton(
-            correction_frame,
+            correction_other_frame,
             text="Save Corrected Flow",
             variable=self.save_corrected_var,
         )
@@ -1121,17 +1384,21 @@ class FlowVisualizer:
 
         self.highlight_errors_var = tk.BooleanVar(value=False)
         highlight_check = ttk.Checkbutton(
-            correction_frame,
+            correction_other_frame,
             text="Highlight Correctable Errors",
             variable=self.highlight_errors_var,
             command=self.toggle_error_highlighting
         )
         highlight_check.pack(side=tk.LEFT, padx=(10, 0))
 
-        self.progress_label = ttk.Label(correction_frame, text="")
+        # Fourth row - progress
+        correction_progress_frame = ttk.Frame(correction_frame)
+        correction_progress_frame.pack(fill=tk.X, pady=(5, 0))
+
+        self.progress_label = ttk.Label(correction_progress_frame, text="")
         self.progress_label.pack(side=tk.LEFT, padx=(0, 5))
 
-        self.progressbar = ttk.Progressbar(correction_frame, orient=tk.HORIZONTAL,
+        self.progressbar = ttk.Progressbar(correction_progress_frame, orient=tk.HORIZONTAL,
                                            length=300, mode='determinate')
         self.progressbar.pack(side=tk.LEFT, fill=tk.X, expand=True)
     
@@ -2514,25 +2781,94 @@ class FlowVisualizer:
             "The UI will be unresponsive until it completes. This may take a long time.\n\nContinue?"):
             return
             
+        self._correct_frames_in_range(0, self.max_pairs - 1, "all frames")
+
+    def set_start_to_current(self):
+        """Set start frame to current frame"""
+        self.start_frame_var.set(self.current_pair)
+    
+    def set_end_to_current(self):
+        """Set end frame to current frame"""
+        self.end_frame_var.set(self.current_pair)
+    
+    def set_current_to_end_range(self):
+        """Set range from current frame to the last frame"""
+        self.start_frame_var.set(self.current_pair)
+        self.end_frame_var.set(self.max_pairs - 1)
+
+    def correct_frames_range(self):
+        """
+        Corrects poor quality flow vectors for a specified range of frame pairs.
+        """
+        try:
+            start_frame = self.start_frame_var.get()
+            end_frame = self.end_frame_var.get()
+        except tk.TclError:
+            messagebox.showerror("Invalid Input", "Please enter valid frame numbers.")
+            return
+        
+        # Validate range
+        if start_frame < 0 or end_frame >= self.max_pairs:
+            messagebox.showerror("Invalid Range", 
+                f"Frame range must be between 0 and {self.max_pairs - 1}.")
+            return
+        
+        if start_frame > end_frame:
+            messagebox.showerror("Invalid Range", 
+                "Start frame must be less than or equal to end frame.")
+            return
+        
+        frame_count = end_frame - start_frame + 1
+        if not messagebox.askokcancel("Confirm Range Correction", 
+            f"This will start a batch correction for frames {start_frame} to {end_frame} "
+            f"({frame_count} frame pairs). "
+            "The UI will be unresponsive until it completes. This may take a long time.\n\nContinue?"):
+            return
+            
+        self._correct_frames_in_range(start_frame, end_frame, f"frames {start_frame}-{end_frame}")
+
+    def _correct_frames_in_range(self, start_frame, end_frame, description):
+        """
+        Internal method to correct frames in a specified range.
+        
+        Args:
+            start_frame: Starting frame index (inclusive)
+            end_frame: Ending frame index (inclusive)
+            description: Description for UI messages
+        """
+        frame_count = end_frame - start_frame + 1
+        
         # --- UI Setup ---
         self.correct_errors_btn.config(state=tk.DISABLED)
         self.correct_all_frames_btn.config(state=tk.DISABLED)
-        self.progressbar.config(maximum=self.max_pairs, value=0)
+        self.correct_range_btn.config(state=tk.DISABLED)
+        self.progressbar.config(maximum=frame_count, value=0)
         
         total_initial_errors, total_final_errors, total_improved, total_failed = 0, 0, 0, 0
         frames_processed, frames_skipped = 0, 0
         batch_start_time = time.time()
         
+        # --- Log Header ---
+        print(f"\n=== Batch Correction Started for {description} ===")
+        print(f"Processing {frame_count} frame(s): {start_frame} to {end_frame}")
+        print("Frame    : Initial Corrected Failed Improved Success%   Time")
+        print("-" * 65)
+        
         # --- Main Loop ---
-        for frame_idx in range(self.max_pairs):
-            self.progress_label.config(text=f"Processing frame {frame_idx + 1}/{self.max_pairs}...")
-            self.progressbar.config(value=frame_idx + 1)
+        for i, frame_idx in enumerate(range(start_frame, end_frame + 1)):
+            frame_start_time = time.time()
+            
+            self.progress_label.config(text=f"Processing frame {frame_idx} ({i + 1}/{frame_count})...")
+            self.progressbar.config(value=i + 1)
             self.root.update_idletasks()
             
             results = self._run_correction_for_frame_index(frame_idx)
             
+            frame_duration = time.time() - frame_start_time
+            
             if results is None:
                 frames_skipped += 1
+                print(f"Frame {frame_idx:4d}: SKIPPED (no flow data available) - {frame_duration:.2f}s")
                 continue
             
             frames_processed += 1
@@ -2540,6 +2876,20 @@ class FlowVisualizer:
             total_final_errors += results['final']
             total_improved += results['improved']
             total_failed += results['failed']
+            
+            # Calculate correction statistics for this frame
+            corrected_vectors = results['initial'] - results['final']
+            failed_to_correct = results['failed']
+            improvement_rate = (corrected_vectors / results['initial'] * 100) if results['initial'] > 0 else 0
+            
+            # Log detailed frame statistics
+            print(f"Frame {frame_idx:4d}: "
+                  f"Initial errors: {results['initial']:4d}, "
+                  f"Corrected: {corrected_vectors:4d}, "
+                  f"Failed: {failed_to_correct:4d}, "
+                  f"Improved: {results['improved']:4d}, "
+                  f"Success rate: {improvement_rate:5.1f}% - "
+                  f"{frame_duration:.2f}s")
             
             if self.save_corrected_var.get() and results['flow'] is not None:
                 try:
@@ -2557,17 +2907,38 @@ class FlowVisualizer:
         
         batch_duration = time.time() - batch_start_time
         
+        # --- Log Footer ---
+        print("-" * 65)
+        total_corrected = total_initial_errors - total_final_errors
+        overall_success_rate = (total_corrected / total_initial_errors * 100) if total_initial_errors > 0 else 0
+        avg_time_per_frame = batch_duration / frame_count if frame_count > 0 else 0
+        
+        print(f"=== Batch Correction Complete ===")
+        print(f"Total time: {batch_duration:.2f}s ({avg_time_per_frame:.2f}s/frame)")
+        print(f"Frames processed: {frames_processed}/{frame_count}")
+        print(f"Frames skipped: {frames_skipped}")
+        print(f"Initial errors: {total_initial_errors}")
+        print(f"Final errors: {total_final_errors}")
+        print(f"Successfully corrected: {total_corrected}")
+        print(f"Partially improved: {total_improved}")
+        print(f"Failed to correct: {total_failed}")
+        print(f"Overall success rate: {overall_success_rate:.1f}%")
+        print("=" * 40)
+        
         # --- Reporting ---
         self.update_display()
         
         summary_message = (
-            f"Batch correction complete in {batch_duration:.2f}s.\n\n"
-            f"Frames Processed: {frames_processed}\n"
-            f"Frames Skipped (no data): {frames_skipped}\n\n"
-            f"Total Initial Errors: {total_initial_errors}\n"
-            f"Total Final Errors: {total_final_errors}\n"
-            f"  - Improved (but still bad): {total_improved}\n"
-            f"  - Failed to fix: {total_failed}"
+            f"Batch correction complete for {description} in {batch_duration:.2f}s.\n\n"
+            f"Frames Processed: {frames_processed}/{frame_count}\n"
+            f"Frames Skipped (no data): {frames_skipped}\n"
+            f"Average time per frame: {avg_time_per_frame:.2f}s\n\n"
+            f"Total Initial Errors: {total_initial_errors:,}\n"
+            f"Total Final Errors: {total_final_errors:,}\n"
+            f"Successfully Corrected: {total_corrected:,}\n"
+            f"  - Partially improved: {total_improved:,}\n"
+            f"  - Failed to fix: {total_failed:,}\n"
+            f"Overall Success Rate: {overall_success_rate:.1f}%"
         )
         
         if self.save_corrected_var.get() and frames_processed > 0:
@@ -2581,6 +2952,7 @@ class FlowVisualizer:
         self.progressbar.config(value=0)
         self.correct_errors_btn.config(state=tk.NORMAL)
         self.correct_all_frames_btn.config(state=tk.NORMAL)
+        self.correct_range_btn.config(state=tk.NORMAL)
 
     def generate_quality_frame_gpu(self, frame1, frame2, flow):
         """
