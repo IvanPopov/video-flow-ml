@@ -25,6 +25,7 @@ import time
 from scipy import signal
 from scipy.ndimage import rotate
 import torch
+from tqdm import tqdm
 from VideoFlow.core.utils.frame_utils import writeFlow
 import subprocess
 
@@ -65,6 +66,7 @@ class FlowVisualizer:
         self.flow_data_cache = {}
         self.lod_data_cache = {}
         self._preload_all_data()
+        self._log_cache_statistics()
         
         # Initialize quality maps storage
         self.quality_maps = {}
@@ -73,6 +75,9 @@ class FlowVisualizer:
         self.computation_threads = {}  # Track active threads
         self.stop_computation = threading.Event()  # Signal to stop computations
         self.slider_dragging = False  # Track if slider is being dragged
+        
+        # Initialize turbulence maps storage
+        self.turbulence_maps = {}
         
         # UI state
         self.detail_analysis_mode = False
@@ -185,6 +190,137 @@ class FlowVisualizer:
         
         print("\nAll data preloaded successfully.")
     
+    def _generate_and_save_lods(self, frame_indices):
+        """Generate, save, and cache LODs for the given frame indices."""
+        if not frame_indices:
+            return
+
+        lod_dir = os.path.join(self.flow_dir, 'lods')
+        os.makedirs(lod_dir, exist_ok=True)
+        
+        print(f"Generating LODs for {len(frame_indices)} frames...")
+        
+        for i in tqdm(frame_indices, desc="Generating LODs"):
+            flow_data = self.flow_data_cache.get(i)
+            if flow_data is None:
+                print(f"\nWarning: Cannot generate LODs for frame {i}, base flow data not found.")
+                continue
+                
+            try:
+                # Generate LOD pyramid
+                lods = self.processor.generate_flow_lods(flow_data, num_lods=self.max_lod_levels)
+                
+                # Save LODs to disk using the processor's method to ensure consistency
+                self.processor.save_flow_lods(lods, self.flow_dir, i)
+                
+                # Update in-memory cache
+                for lod_level, lod_data in enumerate(lods):
+                    # LOD0 is the same as the main flow, so we don't cache it separately
+                    if lod_level > 0:
+                        self.lod_data_cache[(i, lod_level)] = lod_data
+            except Exception as e:
+                print(f"\nError generating/saving LODs for frame {i}: {e}")
+    
+    def _log_cache_statistics(self, is_recursive_call=False):
+        if not is_recursive_call:
+            print("\n--- Cache Statistics ---")
+
+        if not self.flow_data_cache:
+            if not is_recursive_call:
+                print("Cache is empty.")
+                print("------------------------\n")
+            return
+
+        num_flow_frames = len(self.flow_data_cache)
+        num_expected_frames = self.max_pairs
+
+        if not is_recursive_call:
+            print(f"Flow data loaded for {num_flow_frames} frames in memory.")
+        
+        total_lods = 0
+        frames_with_lods = set()
+        total_lod_size_bytes = 0
+        lod_details = {}
+
+        # Check LODs by iterating through cached flow data
+        for i in self.flow_data_cache.keys():
+            if i >= num_expected_frames: continue 
+
+            lod_details[i] = {'count': 0, 'size': 0}
+            has_lods_for_frame = False
+            for lod_level in range(self.max_lod_levels):
+                cache_key = (i, lod_level)
+                if cache_key in self.lod_data_cache:
+                    lod_data = self.lod_data_cache.get(cache_key)
+                    if lod_data is not None:
+                        lod_size = lod_data.nbytes
+                        total_lods += 1
+                        lod_details[i]['count'] += 1
+                        lod_details[i]['size'] += lod_size
+                        total_lod_size_bytes += lod_size
+                        has_lods_for_frame = True
+            
+            if has_lods_for_frame:
+                frames_with_lods.add(i)
+
+        # On first pass, check for and generate missing LODs
+        if not is_recursive_call:
+            frames_to_generate_lods = []
+            for i in range(num_expected_frames):
+                # Generate if no LODs exist, or if they are only partial.
+                count = lod_details.get(i, {}).get('count', 0)
+                if count < self.max_lod_levels:
+                    frames_to_generate_lods.append(i)
+            
+            if frames_to_generate_lods:
+                print(f"\nFound {len(frames_to_generate_lods)} frames with missing or partial LODs.")
+                print("Generating on-the-fly...")
+                self._generate_and_save_lods(frames_to_generate_lods)
+                
+                # Re-run statistics to print updated info
+                print("\n--- Regenerated Cache Statistics ---")
+                self._log_cache_statistics(is_recursive_call=True)
+                return # Exit after recursive call
+
+        # --- Logging logic (only runs on first pass or if no generation needed) ---
+        print(f"Found LODs for {len(frames_with_lods)} / {num_expected_frames} frames.")
+
+        if total_lods > 0:
+            avg_lod_size_kb = (total_lod_size_bytes / total_lods) / 1024 if total_lods > 0 else 0
+            print(f"Total LOD files in memory: {total_lods}")
+            print(f"Total size of LODs: {total_lod_size_bytes / (1024*1024):.2f} MB")
+            print(f"Average LOD file size: {avg_lod_size_kb:.2f} KB")
+
+        frames_missing_lods = []
+        for i in range(num_expected_frames):
+            if i not in frames_with_lods:
+                frames_missing_lods.append(i)
+        
+        if frames_missing_lods:
+            print("\nFrames missing all LODs:")
+            if len(frames_missing_lods) > 15:
+                print(f"  {len(frames_missing_lods)} frames are missing LODs.")
+            else:
+                print(f"  Frame numbers: {', '.join(map(str, frames_missing_lods))}")
+
+        frames_partial_lods = []
+        for i in range(num_expected_frames):
+            count = lod_details.get(i, {}).get('count', 0)
+            if i in frames_with_lods and count < self.max_lod_levels:
+                 frames_partial_lods.append(f"{i} ({count}/{self.max_lod_levels})")
+
+        if frames_partial_lods:
+            print("\nFrames with partial LODs (found/expected):")
+            if len(frames_partial_lods) > 15:
+                 print(f"  {len(frames_partial_lods)} frames have partial LODs.")
+            else:
+                print(f"  Frame (LODs): {', '.join(frames_partial_lods)}")
+
+        if not frames_missing_lods and not frames_partial_lods:
+            print("\nAll frames have complete LODs.")
+            
+        print("------------------------\n")
+    
     def load_video_frames(self):
         """Load frames from video starting at start_frame"""
         cap = cv2.VideoCapture(self.video_path)
@@ -235,10 +371,15 @@ class FlowVisualizer:
     def check_lod_availability(self):
         """Check if LOD data is available in the flow directory"""
         # With pre-caching, we can just check if the cache has any LOD data
-        return any('_lod' in key for key in self.lod_data_cache.keys()) if hasattr(self, 'lod_data_cache') else False
+        return any(key[1] > 0 for key in self.lod_data_cache.keys()) if hasattr(self, 'lod_data_cache') else False
     
     def load_lod_data(self, frame_idx, lod_level):
-        """Load LOD data for specific frame and level from the in-memory cache."""
+        """Load LOD data for a specific frame and level."""
+        # LOD0 is always the original full-resolution flow data.
+        if lod_level == 0:
+            return self.load_flow_data(frame_idx)
+            
+        # For other levels, retrieve from the dedicated LOD cache.
         cache_key = (frame_idx, lod_level)
         return self.lod_data_cache.get(cache_key)
     
@@ -893,6 +1034,20 @@ class FlowVisualizer:
                                           command=self.compute_current_quality_map)
         self.gen_quality_btn.pack(side=tk.LEFT, padx=(0, 10))
         
+        self.gen_turbulence_btn = ttk.Button(vector_frame, text="Generate Turbulence Map",
+                                             command=self.compute_current_turbulence_map)
+        self.gen_turbulence_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        # Third panel display mode
+        ttk.Label(vector_frame, text="Third Panel:").pack(side=tk.LEFT, padx=(20, 5))
+        self.third_panel_mode = tk.StringVar(value="quality")
+        quality_radio = ttk.Radiobutton(vector_frame, text="Quality", variable=self.third_panel_mode, 
+                                        value="quality", command=self.update_display)
+        quality_radio.pack(side=tk.LEFT)
+        turbulence_radio = ttk.Radiobutton(vector_frame, text="Turbulence", variable=self.third_panel_mode, 
+                                           value="turbulence", command=self.update_display)
+        turbulence_radio.pack(side=tk.LEFT)
+        
         # Vector mode controls
         ttk.Label(vector_frame, text="Flow Vectors:").pack(side=tk.LEFT, padx=(20, 5))
         
@@ -1041,6 +1196,15 @@ class FlowVisualizer:
             # If not cached, show a black frame. User must generate it manually.
             quality_frame = np.zeros_like(frame1)
         
+        # Determine what to display in the third panel
+        third_panel_mode = self.third_panel_mode.get()
+        if third_panel_mode == "turbulence":
+            third_panel_image = self.turbulence_maps.get(self.current_pair, np.zeros_like(frame1))
+            third_panel_title = "Flow Turbulence Map"
+        else: # Default to quality map
+            third_panel_image = quality_frame
+            third_panel_title = "Flow Quality Map"
+        
         # Highlight errors if the toggle is active
         if hasattr(self, 'highlight_errors_var') and self.highlight_errors_var.get() and self.current_pair in self.quality_maps:
             quality_frame = quality_frame.copy()  # Work on a copy
@@ -1064,10 +1228,14 @@ class FlowVisualizer:
                     failed_x = [coord[0] for coord in failed_pixels]
                     quality_frame[np.array(failed_y), np.array(failed_x)] = [255, 0, 128] # Purple
 
+            # If we are in quality mode, use the highlighted frame
+            if third_panel_mode == "quality":
+                third_panel_image = quality_frame
+
         # Resize frames for display
         frame1_display, self.display_scale = self.resize_frame_for_display(frame1)
         frame2_display, _ = self.resize_frame_for_display(frame2)
-        quality_display, _ = self.resize_frame_for_display(quality_frame)
+        third_panel_display, _ = self.resize_frame_for_display(third_panel_image)
         
         # Store original frame dimensions for coordinate mapping
         self.orig_height, self.orig_width = frame1.shape[:2]
@@ -1076,12 +1244,12 @@ class FlowVisualizer:
         # Convert to PIL Images
         pil_frame1 = Image.fromarray(frame1_display)
         pil_frame2 = Image.fromarray(frame2_display)
-        pil_quality = Image.fromarray(quality_display)
+        pil_third_panel = Image.fromarray(third_panel_display)
         
         # Convert to PhotoImage
         self.photo1 = ImageTk.PhotoImage(pil_frame1)
         self.photo2 = ImageTk.PhotoImage(pil_frame2)
-        self.photo_quality = ImageTk.PhotoImage(pil_quality)
+        self.photo_third_panel = ImageTk.PhotoImage(pil_third_panel)
         
         # Clear canvas
         self.canvas.delete("all")
@@ -1112,7 +1280,7 @@ class FlowVisualizer:
         # Draw frames
         self.canvas.create_image(x_offset, y1_offset, anchor=tk.NW, image=self.photo1, tags="frame1")
         self.canvas.create_image(x_offset, y2_offset, anchor=tk.NW, image=self.photo2, tags="frame2")
-        self.canvas.create_image(x_offset, y3_offset, anchor=tk.NW, image=self.photo_quality, tags="frame3")
+        self.canvas.create_image(x_offset, y3_offset, anchor=tk.NW, image=self.photo_third_panel, tags="frame3")
         
         # Draw flow vectors as white lines over first frame
         self.draw_flow_vectors(x_offset, y1_offset)
@@ -1126,7 +1294,7 @@ class FlowVisualizer:
         self.canvas.create_text(x_offset, y2_offset - 5, anchor=tk.SW, 
                                text=f"Frame {self.current_pair + 1} (#{frame2_num})", fill="white", font=("Arial", 10))
         self.canvas.create_text(x_offset, y3_offset - 5, anchor=tk.SW, 
-                               text=f"Flow Quality Map", fill="white", font=("Arial", 10))
+                               text=third_panel_title, fill="white", font=("Arial", 10))
         
         # Add frame numbers in corners
         # Top-left corners
@@ -1135,7 +1303,7 @@ class FlowVisualizer:
         self.canvas.create_text(x_offset + 5, y2_offset + 5, anchor=tk.NW, 
                                text=str(frame2_num), fill="yellow", font=("Arial", 12, "bold"))
         self.canvas.create_text(x_offset + 5, y3_offset + 5, anchor=tk.NW, 
-                               text="Quality", fill="yellow", font=("Arial", 12, "bold"))
+                               text="Info", fill="yellow", font=("Arial", 12, "bold"))
         
         # Top-right corners  
         self.canvas.create_text(x_offset + self.display_width - 5, y1_offset + 5, anchor=tk.NE, 
@@ -1146,7 +1314,10 @@ class FlowVisualizer:
         if self.detail_analysis_mode:
             quality_text = "Detail Analysis Mode"
         else:
-            quality_text = f"Red=Bad, Green=Good"
+            if third_panel_mode == "turbulence":
+                quality_text = "Hot=Turbulent, Cold=Laminar"
+            else:
+                quality_text = f"Red=Bad, Green=Good"
         
         self.canvas.create_text(x_offset + self.display_width - 5, y3_offset + 5, anchor=tk.NE, 
                                text=quality_text, fill="cyan", font=("Arial", 10, "bold"))
@@ -2580,6 +2751,179 @@ class FlowVisualizer:
         """Run the GUI"""
         self.root.mainloop()
 
+    def compute_current_turbulence_map(self):
+        """
+        Computes the turbulence map for the currently selected frame pair.
+        """
+        frame_idx = self.current_pair
+        
+        try:
+            flow = self.load_flow_data(frame_idx)
+            
+            if flow is None:
+                messagebox.showerror("Error", f"No flow data available for frame {frame_idx}.")
+                return
+
+            print(f"Generating turbulence map for frame {frame_idx}...")
+            start_time = time.time()
+            
+            # Generate the map
+            turbulence_map = self.generate_turbulence_map(flow)
+
+            self.turbulence_maps[frame_idx] = turbulence_map
+            duration = time.time() - start_time
+            print(f"Turbulence map generation finished in {duration:.4f}s")
+
+            self.update_display() # Refresh UI with the new map
+
+        except Exception as e:
+            print(f"Error during turbulence map generation: {e}")
+            messagebox.showerror("Error", f"An error occurred during turbulence map generation:\n{e}")
+
+    def generate_turbulence_map(self, flow, kernel_size=25):
+        """
+        Generate a map visualizing flow turbulence (local vector variance).
+        A high value indicates high variance in flow vectors in the neighborhood.
+        """
+        if flow is None:
+            return np.zeros_like(self.frame1)
+
+        # We need to resize the flow to match the frame dimensions for visualization
+        h, w = self.orig_height, self.orig_width
+        fh, fw = flow.shape[:2]
+        # Ensure fh and fw are not zero to avoid division by zero
+        if fh == 0 or fw == 0:
+            return np.zeros_like(self.frame1)
+            
+        if (fh != h or fw != w):
+            flow = cv2.resize(flow, (w, h), interpolation=cv2.INTER_LINEAR)
+            # Scale flow vectors
+            flow[:, :, 0] *= w / fw
+            flow[:, :, 1] *= h / fh
+        
+        flow_x = flow[..., 0]
+        flow_y = flow[..., 1]
+
+        # Use OpenCV's boxFilter for fast local mean calculation.
+        # This is equivalent to convolving with a normalized kernel.
+        mean_x = cv2.boxFilter(flow_x, -1, (kernel_size, kernel_size), normalize=True, borderType=cv2.BORDER_REFLECT)
+        mean_y = cv2.boxFilter(flow_y, -1, (kernel_size, kernel_size), normalize=True, borderType=cv2.BORDER_REFLECT)
+        
+        mean_x2 = cv2.boxFilter(flow_x**2, -1, (kernel_size, kernel_size), normalize=True, borderType=cv2.BORDER_REFLECT)
+        mean_y2 = cv2.boxFilter(flow_y**2, -1, (kernel_size, kernel_size), normalize=True, borderType=cv2.BORDER_REFLECT)
+
+        # Variance = E[X^2] - E[X]^2
+        var_x = mean_x2 - mean_x**2
+        var_y = mean_y2 - mean_y**2
+        
+        # Total variance (magnitude of variance vector)
+        # Add a small epsilon to avoid issues with sqrt of negative numbers due to precision
+        total_variance = np.sqrt(np.maximum(0, var_x) + np.maximum(0, var_y))
+        
+        # Normalize the map for visualization
+        # Using percentile to be robust against outliers
+        min_val = np.percentile(total_variance, 5)
+        max_val = np.percentile(total_variance, 95)
+        
+        if max_val - min_val > 1e-6:
+            normalized_variance = (total_variance - min_val) / (max_val - min_val)
+            normalized_variance = np.clip(normalized_variance, 0, 1)
+        else:
+            normalized_variance = np.zeros_like(total_variance)
+
+        # Apply a colormap
+        heatmap = (normalized_variance * 255).astype(np.uint8)
+        heatmap_colored = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+        
+        return heatmap_colored
+    
+    def generate_quality_frame(self, frame1, frame2, flow):
+        """Generate a quality visualization frame"""
+        if flow is None:
+            # Return black frame if no flow data
+            return np.zeros_like(frame1)
+        
+        h, w = frame1.shape[:2]
+        fh, fw = flow.shape[:2]
+        quality_frame = np.zeros((h, w, 3), dtype=np.uint8)
+        
+        # Calculate scale factors if flow and frame dimensions don't match
+        scale_x = w / fw if fw > 0 else 1.0
+        scale_y = h / fh if fh > 0 else 1.0
+        
+        # Resize flow to match frame dimensions if needed
+        if (fh != h or fw != w):
+            flow = cv2.resize(flow, (w, h), interpolation=cv2.INTER_LINEAR)
+            # Scale flow vectors by the resize ratio
+            flow[:, :, 0] *= scale_x
+            flow[:, :, 1] *= scale_y
+        
+        # Vectorized approach for better performance
+        y_coords, x_coords = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')
+        
+        # Get flow vectors
+        flow_x = flow[:, :, 0]
+        flow_y = flow[:, :, 1]
+        
+        # Calculate target positions
+        target_x = x_coords - flow_x
+        target_y = y_coords - flow_y
+        
+        # Create masks for valid targets
+        valid_mask = ((target_x >= 0) & (target_x < w) & 
+                     (target_y >= 0) & (target_y < h))
+        
+        # Process valid pixels
+        valid_y, valid_x = np.where(valid_mask)
+        
+        if len(valid_y) > 0:
+            # Get source colors
+            src_colors = frame1[valid_y, valid_x]
+            
+            # Get target coordinates (rounded to integers)
+            tgt_x = np.round(target_x[valid_y, valid_x]).astype(int)
+            tgt_y = np.round(target_y[valid_y, valid_x]).astype(int)
+            
+            # Ensure target coordinates are within bounds
+            tgt_x = np.clip(tgt_x, 0, w-1)
+            tgt_y = np.clip(tgt_y, 0, h-1)
+            
+            # Get target colors
+            tgt_colors = frame2[tgt_y, tgt_x]
+            
+            # Calculate similarities for all valid pixels at once
+            similarities = []
+            for i in range(len(valid_y)):
+                sim = self.calculate_pixel_quality(src_colors[i], tgt_colors[i])
+                similarities.append(sim)
+            similarities = np.array(similarities)
+            
+            # Color coding
+            good_mask = similarities > 0.8
+            
+            # Good quality pixels - green
+            good_indices = np.where(good_mask)[0]
+            if len(good_indices) > 0:
+                intensities = (255 * (similarities[good_indices] - 0.5) * 2).astype(int) # Scale green intensity
+                quality_frame[valid_y[good_indices], valid_x[good_indices]] = np.column_stack([
+                    np.zeros_like(intensities), np.clip(intensities, 0, 255), np.zeros_like(intensities)
+                ])
+            
+            # Bad quality pixels - red
+            bad_indices = np.where(~good_mask)[0]
+            if len(bad_indices) > 0:
+                intensities = (255 * (1.0 - similarities[bad_indices])).astype(int)
+                quality_frame[valid_y[bad_indices], valid_x[bad_indices]] = np.column_stack([
+                    intensities, np.zeros_like(intensities), np.zeros_like(intensities)
+                ])
+        
+        # Out of bounds pixels - red
+        invalid_y, invalid_x = np.where(~valid_mask)
+        if len(invalid_y) > 0:
+            quality_frame[invalid_y, invalid_x] = [255, 0, 0]
+        
+        return quality_frame
+    
 def main():
     parser = argparse.ArgumentParser(description='Interactive Optical Flow Visualizer')
     parser.add_argument('--video', required=True, help='Input video file')
