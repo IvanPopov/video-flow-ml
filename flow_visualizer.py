@@ -51,6 +51,17 @@ class FlowVisualizer:
         self.current_pair = 0
         self.max_pairs = min(len(self.frames) - 1, len(self.flow_files))
         
+        # LOD support - moved up to be available for preloading
+        self.current_lod_level = 0  # Current LOD level
+        self.use_lod_for_vectors = False  # Whether to use LOD for flow vectors
+        self.max_lod_levels = 5  # Maximum number of LOD levels
+        
+        # --- Data Caching ---
+        # Cache all flow and LOD data in memory for the session
+        self.flow_data_cache = {}
+        self.lod_data_cache = {}
+        self._preload_all_data()
+        
         # Initialize quality maps storage
         self.quality_maps = {}
         self.quality_map_queue = queue.Queue()
@@ -59,16 +70,7 @@ class FlowVisualizer:
         self.stop_computation = threading.Event()  # Signal to stop computations
         self.slider_dragging = False  # Track if slider is being dragged
         
-        # LOD support
-        self.lod_data = {}  # Cache for LOD data
-        self.current_lod_level = 0  # Current LOD level
-        self.use_lod_for_vectors = False  # Whether to use LOD for flow vectors
-        self.max_lod_levels = 5  # Maximum number of LOD levels
-        
         # UI state
-        self.show_quality_map = True  # Whether to show quality map
-        
-        # Detail analysis state
         self.detail_analysis_mode = False
         self.detail_analysis_data = None
         self.detail_analysis_region_size = 25
@@ -112,6 +114,44 @@ class FlowVisualizer:
         
         self.update_display()
         
+    def _preload_all_data(self):
+        """Load all flow and LOD data into memory at startup."""
+        print("Preloading all flow and LOD data into memory. This may take a moment...")
+        num_flows = len(self.flow_files)
+        
+        for i in range(num_flows):
+            # Print progress
+            progress_percent = (i + 1) / num_flows * 100
+            sys.stdout.write(f"\rLoading data: {i+1}/{num_flows} ({progress_percent:.1f}%)")
+            sys.stdout.flush()
+
+            # Load main flow
+            try:
+                flow_file = self.flow_files[i]
+                if flow_file.endswith('.flo'):
+                    flow = self.processor.load_flow_flo(flow_file)
+                elif flow_file.endswith('.npz'):
+                    npz_data = self.processor.load_flow_npz(flow_file)
+                    flow = npz_data['flow']
+                self.flow_data_cache[i] = flow
+            except Exception as e:
+                print(f"\nWarning: Could not load flow file {self.flow_files[i]}: {e}")
+                self.flow_data_cache[i] = None
+
+            # Load all available LODs for this flow
+            lod_dir = os.path.join(self.flow_dir, 'lods')
+            if os.path.exists(lod_dir):
+                for lod_level in range(self.max_lod_levels):
+                    lod_file = os.path.join(lod_dir, f"flow_frame_{i:06d}_lod{lod_level}.npz")
+                    if os.path.exists(lod_file):
+                        try:
+                            npz_data = self.processor.load_flow_npz(lod_file)
+                            self.lod_data_cache[(i, lod_level)] = npz_data['flow']
+                        except Exception as e:
+                            print(f"\nWarning: Could not load LOD file {lod_file}: {e}")
+        
+        print("\nAll data preloaded successfully.")
+    
     def load_video_frames(self):
         """Load frames from video starting at start_frame"""
         cap = cv2.VideoCapture(self.video_path)
@@ -139,7 +179,7 @@ class FlowVisualizer:
         return frames
     
     def find_flow_files(self):
-        """Find all flow files in directory"""
+        """Find all flow files in directory, excluding LOD files."""
         flow_files = []
         
         # Look for .flo files
@@ -150,7 +190,8 @@ class FlowVisualizer:
         if not flo_files:
             npz_pattern = os.path.join(self.flow_dir, "*.npz")
             npz_files = sorted(glob.glob(npz_pattern))
-            flow_files = npz_files
+            # Filter out LOD files, which have '_lod' in their names
+            flow_files = [f for f in npz_files if '_lod' not in os.path.basename(f)]
         else:
             flow_files = flo_files
             
@@ -158,52 +199,17 @@ class FlowVisualizer:
     
     def check_lod_availability(self):
         """Check if LOD data is available in the flow directory"""
-        lod_dir = os.path.join(self.flow_dir, 'lods')
-        if os.path.exists(lod_dir):
-            # Check if we have LOD 0 for the first frame to validate availability
-            lod0_file = os.path.join(lod_dir, f"flow_frame_{0:06d}_lod0.npz")
-            if os.path.exists(lod0_file):
-                print("LOD data found! LOD-based vector rendering available.")
-                return True
-        print("LOD data not available. Using original flow data only.")
-        return False
+        # With pre-caching, we can just check if the cache has any LOD data
+        return any('_lod' in key for key in self.lod_data_cache.keys()) if hasattr(self, 'lod_data_cache') else False
     
     def load_lod_data(self, frame_idx, lod_level):
-        """Load LOD data for specific frame and level"""
+        """Load LOD data for specific frame and level from the in-memory cache."""
         cache_key = (frame_idx, lod_level)
-        if cache_key in self.lod_data:
-            return self.lod_data[cache_key]
-        
-        lod_dir = os.path.join(self.flow_dir, 'lods')
-        lod_file = os.path.join(lod_dir, f"flow_frame_{frame_idx:06d}_lod{lod_level}.npz")
-        
-        if os.path.exists(lod_file):
-            try:
-                npz_data = self.processor.load_flow_npz(lod_file)
-                lod_flow = npz_data['flow']
-                self.lod_data[cache_key] = lod_flow
-                return lod_flow
-            except Exception as e:
-                print(f"Error loading LOD {lod_level} for frame {frame_idx}: {e}")
-                return None
-        return None
+        return self.lod_data_cache.get(cache_key)
     
     def load_flow_data(self, frame_idx):
-        """Load flow data for specific frame"""
-        if frame_idx >= len(self.flow_files):
-            return None
-            
-        flow_file = self.flow_files[frame_idx]
-        
-        try:
-            if flow_file.endswith('.flo'):
-                return self.processor.load_flow_flo(flow_file)
-            elif flow_file.endswith('.npz'):
-                npz_data = self.processor.load_flow_npz(flow_file)
-                return npz_data['flow']
-        except Exception as e:
-            print(f"Error loading flow file {flow_file}: {e}")
-            return None
+        """Load flow data for specific frame from the in-memory cache."""
+        return self.flow_data_cache.get(frame_idx)
     
     def compute_quality_map_background(self, frame_idx):
         """Compute quality map for a specific frame in background thread"""
@@ -278,6 +284,30 @@ class FlowVisualizer:
     def resume_computations(self):
         """Resume background computations"""
         self.stop_computation.clear()
+    
+    def compute_current_quality_map(self):
+        """
+        Computes the quality map for the currently selected frame pair
+        in a background thread to avoid UI freeze.
+        """
+        frame_idx = self.current_pair
+        
+        # Prevent multiple computations for the same frame
+        if frame_idx in self.computing_quality:
+            print(f"Already computing quality map for frame {frame_idx}.")
+            messagebox.showinfo("In Progress", f"Already computing quality map for frame {frame_idx}.")
+            return
+        
+        if self.stop_computation.is_set():
+            print("Computations are currently stopped (e.g. slider drag).")
+            return
+
+        print(f"Requesting quality map computation for frame {frame_idx}...")
+        self.computing_quality.add(frame_idx)
+        # Re-use the existing background worker mechanism
+        self.compute_quality_map_background(frame_idx)
+        # Update display immediately to show "computing" status
+        self.update_display()
     
     def request_quality_map(self, frame_idx):
         """Request quality map for a frame (compute if not available)"""
@@ -476,7 +506,7 @@ class FlowVisualizer:
         region = image[y1:y2, x1:x2]
         
         # Pad if necessary to make square
-        target_size = 2 * radius
+        target_size = int(2 * radius) # Ensure target_size is an integer
         if region.shape[0] < target_size or region.shape[1] < target_size:
             pad_h = max(0, target_size - region.shape[0])
             pad_w = max(0, target_size - region.shape[1])
@@ -749,11 +779,9 @@ class FlowVisualizer:
         vector_frame = ttk.Frame(control_frame)
         vector_frame.pack(fill=tk.X, pady=(0, 10))
         
-        # Quality map checkbox
-        self.quality_map_var = tk.BooleanVar(value=True)
-        quality_check = ttk.Checkbutton(vector_frame, text="Show Quality Map", 
-                                       variable=self.quality_map_var, command=self.on_quality_toggle)
-        quality_check.pack(side=tk.LEFT)
+        self.gen_quality_btn = ttk.Button(vector_frame, text="Generate Quality Map",
+                                          command=self.compute_current_quality_map)
+        self.gen_quality_btn.pack(side=tk.LEFT, padx=(0, 10))
         
         # Vector mode controls
         ttk.Label(vector_frame, text="Flow Vectors:").pack(side=tk.LEFT, padx=(20, 5))
@@ -869,14 +897,11 @@ class FlowVisualizer:
         # Load flow data
         self.current_flow = self.load_flow_data(self.current_pair)
         
-        # Get quality frame (compute if not available and enabled)
-        if self.show_quality_map:
-            if self.current_pair in self.quality_maps:
-                quality_frame = self.quality_maps[self.current_pair]
-            else:
-                self.request_quality_map(self.current_pair)
-                quality_frame = np.zeros_like(frame1)
+        # Get quality frame
+        if self.current_pair in self.quality_maps:
+            quality_frame = self.quality_maps[self.current_pair]
         else:
+            # If not cached, show a black frame. User must generate it manually.
             quality_frame = np.zeros_like(frame1)
         
         # Resize frames for display
@@ -961,7 +986,7 @@ class FlowVisualizer:
         if self.detail_analysis_mode:
             quality_text = "Detail Analysis Mode"
         else:
-            quality_text = f"Red=Bad, Green=Good" if self.show_quality_map else "Quality Map Disabled"
+            quality_text = f"Red=Bad, Green=Good"
         
         self.canvas.create_text(x_offset + self.display_width - 5, y3_offset + 5, anchor=tk.NE, 
                                text=quality_text, fill="cyan", font=("Arial", 10, "bold"))
@@ -987,15 +1012,12 @@ class FlowVisualizer:
                 return
             
             # Quality map status
-            if self.show_quality_map:
-                if self.current_pair in self.quality_maps:
-                    quality_status = "Quality map: On"
-                elif self.current_pair in self.computing_quality:
-                    quality_status = "Quality map: Computing..."
-                else:
-                    quality_status = "Quality map: Computing..."
+            if self.current_pair in self.quality_maps:
+                quality_status = "Quality map: Generated"
+            elif self.current_pair in self.computing_quality:
+                quality_status = "Quality map: Computing..."
             else:
-                quality_status = "Quality map: Off"
+                quality_status = "Quality map: Not Generated"
             
             # Vector mode status
             if self.use_lod_for_vectors:
@@ -1104,7 +1126,7 @@ class FlowVisualizer:
                                text=f"Pair {self.current_pair}", fill="cyan", font=("Arial", 10, "bold"))
         self.canvas.create_text(x_offset + self.display_width - 5, y2_offset + 5, anchor=tk.NE, 
                                text=f"Next", fill="cyan", font=("Arial", 10, "bold"))
-        drag_text = f"Dragging... (Quality Map {'On' if self.show_quality_map else 'Off'})"
+        drag_text = f"Dragging... (Quality Map Paused)"
         self.canvas.create_text(x_offset + self.display_width - 5, y3_offset + 5, anchor=tk.NE, 
                                text=drag_text, fill="orange", font=("Arial", 10, "bold"))
         
@@ -1127,9 +1149,8 @@ class FlowVisualizer:
         """Handle slider release (end of drag)"""
         self.slider_dragging = False
         self.resume_computations()
-        # Trigger update and preloading after drag ends
+        # Trigger update after drag ends
         self.update_display()
-        self.preload_adjacent_frames()
     
     def on_slider_change(self, value):
         """Handle slider change"""
@@ -1335,11 +1356,6 @@ class FlowVisualizer:
             self.pan_offset_x = 0
             self.pan_offset_y = 0
             self.update_display()
-    
-    def on_quality_toggle(self):
-        """Handle quality map checkbox toggle"""
-        self.show_quality_map = self.quality_map_var.get()
-        self.update_display()
     
     def on_vector_mode_change(self):
         """Handle vector mode radio button change"""
@@ -2013,12 +2029,11 @@ class FlowVisualizer:
         scale_x_to_frame = w / fw if fw > 0 else 1.0
         scale_y_to_frame = h / fh if fh > 0 else 1.0
         
+        flow_for_calc = flow.copy()
         if (fh != h or fw != w):
             flow_for_calc = cv2.resize(flow, (w, h), interpolation=cv2.INTER_LINEAR)
             flow_for_calc[:, :, 0] *= scale_x_to_frame
             flow_for_calc[:, :, 1] *= scale_y_to_frame
-        else:
-            flow_for_calc = flow
         
         # 1. Identify all "bad" pixels
         bad_pixels_coords = []
@@ -2037,8 +2052,9 @@ class FlowVisualizer:
                     # Out of bounds is also a bad pixel
                     bad_pixels_coords.append((x, y))
 
+        initial_error_count = len(bad_pixels_coords)
         if not bad_pixels_coords:
-            self.root.after(0, self._finish_correction, flow, True) # Pass original flow, is_done=True
+            self.root.after(0, self._finish_correction, flow, True, initial_error_count, 0, 0)
             return
 
         # 2. Setup progress bar on main thread
@@ -2052,7 +2068,7 @@ class FlowVisualizer:
         lod_level, lod_flow = self.get_highest_available_lod(self.current_pair)
         if lod_flow is None:
             print("No LOD data available for correction.")
-            self.root.after(0, self._finish_correction, flow, True) # Abort
+            self.root.after(0, self._finish_correction, flow, True, initial_error_count, initial_error_count, 0) # Abort
             return
 
         lod_h, lod_w = lod_flow.shape[:2]
@@ -2093,13 +2109,17 @@ class FlowVisualizer:
 
             # Compare and update if correction improved color similarity
             if final_similarity > original_similarity:
-                # Update the copied flow array
+                # Update the original flow array (unscaled)
                 flow_y_coord = int(orig_y / h * fh)
                 flow_x_coord = int(orig_x / w * fw)
                 flow_y_coord = max(0, min(flow_y_coord, fh - 1))
                 flow_x_coord = max(0, min(flow_x_coord, fw - 1))
                 
-                flow[flow_y_coord, flow_x_coord] = [final_flow[0], final_flow[1]]
+                # The flow vector needs to be scaled back if the original flow has different dimensions
+                final_flow_x_scaled = final_flow[0] * (fw / w if w > 0 else 1.0)
+                final_flow_y_scaled = final_flow[1] * (fh / h if h > 0 else 1.0)
+                
+                flow[flow_y_coord, flow_x_coord] = [final_flow_x_scaled, final_flow_y_scaled]
             else:
                 skipped_count += 1
             
@@ -2111,21 +2131,58 @@ class FlowVisualizer:
                     self.progress_label.config(text=f"Correcting {cc}/{total_bad} (skipped: {sc})...")
                 self.root.after(0, update_progress)
         
-        # 5. Schedule finalization on main thread
-        self.root.after(0, self._finish_correction, flow, False, skipped_count)
+        # 5. Count final errors
+        final_flow_for_calc = flow
+        if (fh != h or fw != w):
+            final_flow_for_calc = cv2.resize(flow, (w, h), interpolation=cv2.INTER_LINEAR)
+            final_flow_for_calc[:, :, 0] *= scale_x_to_frame
+            final_flow_for_calc[:, :, 1] *= scale_y_to_frame
+            
+        final_error_count = 0
+        for y in range(h):
+            for x in range(w):
+                flow_x, flow_y = final_flow_for_calc[y, x]
+                target_x, target_y = x - flow_x, y - flow_y
+                if (0 <= target_x < w and 0 <= target_y < h):
+                    src_color = frame1[y, x]
+                    target_color = frame2[int(target_y), int(target_x)]
+                    similarity = self.calculate_pixel_quality(src_color, target_color)
+                    if not self._is_good_quality(similarity):
+                        final_error_count += 1
+                else:
+                    final_error_count += 1
+        
+        # 6. Schedule finalization on main thread
+        self.root.after(0, self._finish_correction, flow, False, initial_error_count, final_error_count, skipped_count)
 
-    def _finish_correction(self, corrected_flow, was_aborted, skipped_count=0):
+    def _finish_correction(self, corrected_flow, was_aborted, initial_error_count=0, final_error_count=0, skipped_count=0):
         """
         Finalizes the correction process on the main thread.
         Updates flow data, recalculates quality map, and refreshes UI.
         """
         if was_aborted:
             self.progress_label.config(text="Correction aborted or not needed.")
-            messagebox.showinfo("Info", "No correctable pixels found or LOD data missing.")
+            if initial_error_count == 0:
+                 messagebox.showinfo("Info", "No errors found to correct.")
+            else:
+                 messagebox.showinfo("Info", f"Correction aborted. Initial errors: {initial_error_count}.")
         else:
-            # Update the main flow data
+            # Update the main flow data in memory AND in the session cache
             self.current_flow = corrected_flow
-            
+            self.flow_data_cache[self.current_pair] = corrected_flow
+
+            # Recalculate LODs for the corrected flow and update them in the session cache
+            self.progress_label.config(text="Recalculating and caching LODs...")
+            self.root.update_idletasks()
+            try:
+                lods = self.processor.generate_flow_lods(self.current_flow, num_lods=self.max_lod_levels)
+                for i, lod_data in enumerate(lods):
+                    self.lod_data_cache[(self.current_pair, i)] = lod_data
+                print(f"Successfully recalculated and cached LODs for frame pair {self.current_pair}.")
+            except Exception as e:
+                print(f"Error recalculating LODs: {e}")
+                messagebox.showerror("LOD Error", "Could not recalculate LODs for this session.")
+
             # Recalculate quality map
             self.progress_label.config(text="Recalculating quality map...")
             self.root.update_idletasks()
@@ -2134,12 +2191,15 @@ class FlowVisualizer:
             # Update display
             self.update_display()
             
-            final_message = f"Correction complete. Skipped {skipped_count} vectors."
+            final_message = f"Correction complete. Errors: {initial_error_count} -> {final_error_count}. Skipped: {skipped_count}."
             self.progress_label.config(text=final_message)
-            messagebox.showinfo("Success", f"Flow correction completed.\n{skipped_count} vectors were skipped as the correction did not improve quality.")
+            messagebox.showinfo("Success", f"Flow correction completed.\n\n"
+                                          f"Initial errors: {initial_error_count}\n"
+                                          f"Remaining errors: {final_error_count}\n"
+                                          f"Skipped vectors: {skipped_count}")
 
         # Hide progress bar after a delay
-        self.root.after(3000, lambda: self.progress_label.config(text=""))
+        self.root.after(5000, lambda: self.progress_label.config(text=""))
         self.progressbar.config(value=0)
         
         # Re-enable button
