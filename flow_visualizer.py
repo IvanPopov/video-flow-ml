@@ -26,6 +26,7 @@ from scipy import signal
 from scipy.ndimage import rotate
 import torch
 from VideoFlow.core.utils.frame_utils import writeFlow
+import subprocess
 
 # Add flow_processor to path for loading flow data
 sys.path.insert(0, os.getcwd())
@@ -931,6 +932,12 @@ class FlowVisualizer:
                                                  command=self.correct_all_frames_sequentially)
         self.correct_all_frames_btn.pack(side=tk.LEFT, padx=(0, 10))
 
+        # Add a separator
+        ttk.Separator(correction_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=(10,10), fill='y')
+
+        self.run_taa_btn = ttk.Button(correction_frame, text="Run TAA with Corrected Flow", command=self.run_taa_processor)
+        self.run_taa_btn.pack(side=tk.LEFT, padx=(0, 10))
+
         self.save_corrected_var = tk.BooleanVar(value=True)
         save_check = ttk.Checkbutton(
             correction_frame,
@@ -1180,7 +1187,6 @@ class FlowVisualizer:
         # Load frames
         frame1 = self.frames[self.current_pair]
         frame2 = self.frames[self.current_pair + 1]
-        
         # Store original frames for color comparison
         self.frame1 = frame1
         self.frame2 = frame2
@@ -2391,6 +2397,7 @@ class FlowVisualizer:
         """
         Generate a quality visualization frame using GPU (PyTorch) for acceleration.
         """
+
         device = self.processor.device
         h, w = frame1.shape[:2]
 
@@ -2478,6 +2485,78 @@ class FlowVisualizer:
         
         return quality_frame
         
+    def run_taa_processor(self):
+        """
+        Constructs and runs the flow_processor.py command with TAA options,
+        using the corrected flow cache.
+        """
+        # 1. Check for corrected cache
+        corrected_flow_dir = Path(self.flow_dir).with_name(Path(self.flow_dir).name + "_corrected")
+        if not corrected_flow_dir.exists():
+            messagebox.showwarning("Cache Not Found",
+                "The corrected flow cache directory does not exist.\n\n"
+                f"Please run 'Correct All Frames' first to generate it at:\n{corrected_flow_dir.resolve()}"
+            )
+            return
+
+        # 2. Get video parameters
+        try:
+            cap = cv2.VideoCapture(self.video_path)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            cap.release()
+            
+            if fps == 0:
+                raise ValueError("Could not determine video FPS.")
+
+            start_time = self.start_frame / fps
+            # Using len(self.frames) is correct because it's the number of frames loaded into the visualizer
+            duration = len(self.frames) / fps 
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not get video parameters: {e}")
+            return
+            
+        # 3. Construct command
+        command = [
+            sys.executable,  # Use the same python interpreter
+            "flow_processor.py",
+            "--input", str(self.video_path),
+            "--start-time", f"{start_time:.2f}",
+            "--duration", f"{duration:.2f}",
+            "--taa",
+            "--tile",
+            "--flow-format", "hsv",
+            "--use-flow-cache", str(corrected_flow_dir.resolve())
+        ]
+        
+        # 4. Execute command
+        try:
+            print("--- Running TAA Processor ---")
+            print(f"Command: {' '.join(command)}")
+            
+            # Show an info box to the user
+            messagebox.showinfo("Starting TAA Processor",
+                "A new terminal window will open to run the TAA process.\n\n"
+                "This application will remain open. You can monitor the progress in the new window."
+            )
+
+            # Platform-specific execution
+            if sys.platform == "win32":
+                subprocess.Popen(command, creationflags=subprocess.CREATE_NEW_CONSOLE)
+            else:
+                # For macOS/Linux, might need to use xterm or another terminal emulator
+                command_str = ' '.join(f'"{c}"' for c in command)
+                term_command = ['xterm', '-e', command_str]
+                try:
+                    subprocess.Popen(term_command)
+                except FileNotFoundError:
+                    # If xterm is not available
+                    messagebox.showwarning("Terminal not found", "Could not find 'xterm' to open a new terminal. Please run the following command manually in your terminal:\n\n" + ' '.join(command))
+
+        except Exception as e:
+            error_msg = f"Failed to start TAA processor: {e}\n\nCommand was:\n{' '.join(command)}"
+            print(error_msg)
+            messagebox.showerror("Execution Error", error_msg)
+            
     def run(self):
         """Run the GUI"""
         self.root.mainloop()
