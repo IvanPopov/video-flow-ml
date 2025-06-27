@@ -1993,257 +1993,179 @@ class FlowVisualizer:
 
     def correct_all_errors(self):
         """
-        Starts the process of correcting all poor quality flow vectors
-        for the current frame pair in a background thread.
+        Corrects all poor quality flow vectors for the current frame pair synchronously,
+        following a strict step-by-step process. The UI will be unresponsive during this time.
         """
         if self.current_flow is None:
             messagebox.showwarning("Warning", "No flow data loaded to correct.")
             return
 
-        # Disable button to prevent multiple runs
+        # --- Initial Setup ---
         self.correct_errors_btn.config(state=tk.DISABLED)
-        
-        # Reset and show progress bar
-        self.progressbar['value'] = 0
-        self.progress_label.config(text="Finding bad pixels...")
+        self.progress_label.config(text="Starting correction...")
         self.root.update_idletasks()
-
-        # Run correction in a background thread to avoid freezing the UI
-        thread = threading.Thread(target=self._correct_all_errors_worker, daemon=True)
-        thread.start()
-
-    def _correct_all_errors_worker(self):
-        """
-        Worker thread that performs the flow correction.
-        Identifies bad pixels, calculates corrected vectors, and
-        schedules UI updates on the main thread.
-        """
+        
         timings = {}
         total_start_time = time.time()
         
-        # --- Block 1: Setup ---
-        start_time = time.time()
-        # Get copies of data for thread safety
         frame1 = self.frame1.copy()
         frame2 = self.frame2.copy()
-        flow = self.current_flow.copy()
-        
+        flow = self.current_flow.copy() # This will be modified
         h, w = frame1.shape[:2]
         fh, fw = flow.shape[:2]
-
-        # Ensure flow is scaled to frame dimensions for our calculations
-        scale_x_to_frame = w / fw if fw > 0 else 1.0
-        scale_y_to_frame = h / fh if fh > 0 else 1.0
         
+        # --- Step 1: Get/Generate Existing Quality Map ---
+        start_time = time.time()
+        self.progress_label.config(text="Step 1/6: Getting quality map...")
+        self.root.update_idletasks()
+        
+        quality_map = self.quality_maps.get(self.current_pair)
+        if quality_map is None:
+            print("Quality map not found. Generating it to find errors...")
+            quality_map = self.generate_quality_frame_fast(frame1, frame2, flow)
+
+        timings['1. Get Initial Quality Map'] = time.time() - start_time
+        
+        # --- Step 2: Extract Pixels for Correction ---
+        start_time = time.time()
+        self.progress_label.config(text="Step 2/6: Extracting bad pixels...")
+        self.root.update_idletasks()
+        
+        bad_pixels_y, bad_pixels_x = np.where(quality_map[:, :, 0] > 0)
+        bad_pixels_coords = list(zip(bad_pixels_x, bad_pixels_y))
+        initial_error_count = len(bad_pixels_coords)
+        
+        timings['2. Extract Bad Pixels'] = time.time() - start_time
+
+        if not bad_pixels_coords:
+            messagebox.showinfo("Info", "No errors found to correct based on the current quality map.")
+            self.correct_errors_btn.config(state=tk.NORMAL)
+            self.progress_label.config(text="")
+            return
+
+        self.progressbar.config(maximum=initial_error_count, value=0)
+
+        # --- Step 3: Prepare LOD Data ---
+        start_time = time.time()
+        self.progress_label.config(text="Step 3/6: Preparing LOD data...")
+        self.root.update_idletasks()
+        
+        lod_level, lod_flow = self.get_highest_available_lod(self.current_pair)
+        
+        if lod_flow is None:
+            messagebox.showerror("Error", "No LOD data available for correction.")
+            self.correct_errors_btn.config(state=tk.NORMAL)
+            self.progress_label.config(text="Aborted.")
+            return
+            
+        timings['3. Prepare LOD Data'] = time.time() - start_time
+
+        # --- Step 4: Perform Correction ---
+        start_time = time.time()
+        self.progress_label.config(text=f"Step 4/6: Correcting {initial_error_count} pixels...")
+        self.root.update_idletasks()
+        
+        # This scaled-up flow is used for reading original vectors during the loop
         flow_for_calc = flow.copy()
         if (fh != h or fw != w):
+            scale_x_to_frame = w / fw
+            scale_y_to_frame = h / fh
             flow_for_calc = cv2.resize(flow, (w, h), interpolation=cv2.INTER_LINEAR)
             flow_for_calc[:, :, 0] *= scale_x_to_frame
             flow_for_calc[:, :, 1] *= scale_y_to_frame
-        timings['1. Setup'] = time.time() - start_time
         
-        # --- Block 2: Initial Error Scan ---
-        start_time = time.time()
-        bad_pixels_coords = []
-        for y in range(h):
-            for x in range(w):
-                flow_x, flow_y = flow_for_calc[y, x]
-                target_x, target_y = x - flow_x, y - flow_y
-                
-                if (0 <= target_x < w and 0 <= target_y < h):
-                    src_color = frame1[y, x]
-                    target_color = frame2[int(target_y), int(target_x)]
-                    similarity = self.calculate_pixel_quality(src_color, target_color)
-                    if not self._is_good_quality(similarity):
-                        bad_pixels_coords.append((x, y))
-                else:
-                    # Out of bounds is also a bad pixel
-                    bad_pixels_coords.append((x, y))
-        timings['2. Initial Error Scan'] = time.time() - start_time
-
-        initial_error_count = len(bad_pixels_coords)
-        if not bad_pixels_coords:
-            self.root.after(0, self._finish_correction, flow, True, initial_error_count, 0, 0, timings)
-            return
-
-        # Setup progress bar on main thread
-        total_bad = len(bad_pixels_coords)
-        def setup_progress():
-            self.progress_label.config(text=f"Correcting 0/{total_bad} pixels...")
-            self.progressbar.config(maximum=total_bad)
-        self.root.after(0, setup_progress)
-        
-        # --- Block 3: LOD Preparation ---
-        start_time = time.time()
-        lod_level, lod_flow = self.get_highest_available_lod(self.current_pair)
-        if lod_flow is None:
-            print("No LOD data available for correction.")
-            self.root.after(0, self._finish_correction, flow, True, initial_error_count, initial_error_count, 0, timings) # Abort
-            return
-
         lod_h, lod_w = lod_flow.shape[:2]
         lod_scale_x = lod_w / w
         lod_scale_y = lod_h / h
-        timings['3. LOD Preparation'] = time.time() - start_time
-
-        # --- Block 4: Correction Loop ---
-        start_time = time.time()
-        corrected_count = 0
         skipped_count = 0
-        for orig_x, orig_y in bad_pixels_coords:
-            # Get original flow and calculate original quality
+
+        for i, (orig_x, orig_y) in enumerate(bad_pixels_coords):
             original_flow_x, original_flow_y = flow_for_calc[orig_y, orig_x]
-            original_target_x = orig_x - original_flow_x
-            original_target_y = orig_y - original_flow_y
+            original_target_x, original_target_y = orig_x - original_flow_x, orig_y - original_flow_y
             
             original_similarity = 0.0
             if (0 <= original_target_x < w and 0 <= original_target_y < h):
-                src_color = frame1[orig_y, orig_x]
-                target_color = frame2[int(original_target_y), int(original_target_x)]
-                original_similarity = self.calculate_pixel_quality(src_color, target_color)
+                original_similarity = self.calculate_pixel_quality(frame1[orig_y, orig_x], frame2[int(original_target_y), int(original_target_x)])
 
-            # --- Stage 1: Coarse Correction ---
             lod_x = max(0, min(int(orig_x * lod_scale_x), lod_w - 1))
             lod_y = max(0, min(int(orig_y * lod_scale_y), lod_h - 1))
             lod_flow_x = lod_flow[lod_y, lod_x, 0] / lod_scale_x
             lod_flow_y = lod_flow[lod_y, lod_x, 1] / lod_scale_y
+            
             coarse_result = self._perform_coarse_correction(frame1, frame2, (orig_x, orig_y), (lod_flow_x, lod_flow_y))
             
-            # --- Stage 2: Fine Correction (optional) ---
             final_flow = coarse_result['flow']
             final_similarity = coarse_result['similarity']
 
             if coarse_result['similarity'] > original_similarity and coarse_result['similarity'] < self.FINE_CORRECTION_THRESHOLD:
                 fine_result = self._perform_fine_correction(frame1, frame2, (orig_x, orig_y), coarse_result['target'])
                 if fine_result and fine_result['similarity'] > coarse_result['similarity']:
-                    final_flow = fine_result['flow']
-                    final_similarity = fine_result['similarity']
+                    final_flow, final_similarity = fine_result['flow'], fine_result['similarity']
 
-            # Compare and update if correction improved color similarity
             if final_similarity > original_similarity:
-                # Update the original flow array (unscaled)
-                flow_y_coord = int(orig_y / h * fh)
-                flow_x_coord = int(orig_x / w * fw)
-                flow_y_coord = max(0, min(flow_y_coord, fh - 1))
-                flow_x_coord = max(0, min(flow_x_coord, fw - 1))
+                flow_y_coord, flow_x_coord = int(orig_y / h * fh), int(orig_x / w * fw)
+                flow_y_coord, flow_x_coord = max(0, min(flow_y_coord, fh - 1)), max(0, min(flow_x_coord, fw - 1))
                 
-                # The flow vector needs to be scaled back if the original flow has different dimensions
                 final_flow_x_scaled = final_flow[0] * (fw / w if w > 0 else 1.0)
                 final_flow_y_scaled = final_flow[1] * (fh / h if h > 0 else 1.0)
-                
                 flow[flow_y_coord, flow_x_coord] = [final_flow_x_scaled, final_flow_y_scaled]
             else:
                 skipped_count += 1
             
-            # Update progress
-            corrected_count += 1
-            if corrected_count % 20 == 0: # Update UI every 20 pixels to reduce overhead
-                def update_progress(cc=corrected_count, sc=skipped_count):
-                    self.progressbar.config(value=cc)
-                    self.progress_label.config(text=f"Correcting {cc}/{total_bad} (skipped: {sc})...")
-                self.root.after(0, update_progress)
-        timings['4. Correction Loop'] = time.time() - start_time
+            if (i + 1) % 50 == 0:
+                self.progressbar.config(value=i + 1)
+                self.root.update_idletasks()
         
-        # --- Block 5: Final Error Scan ---
+        timings['4. Perform Correction Loop'] = time.time() - start_time
+        
+        # --- Step 5: Create New Quality Map ---
         start_time = time.time()
-        final_flow_for_calc = flow
-        if (fh != h or fw != w):
-            final_flow_for_calc = cv2.resize(flow, (w, h), interpolation=cv2.INTER_LINEAR)
-            final_flow_for_calc[:, :, 0] *= scale_x_to_frame
-            final_flow_for_calc[:, :, 1] *= scale_y_to_frame
-            
-        final_error_count = 0
-        for y in range(h):
-            for x in range(w):
-                flow_x, flow_y = final_flow_for_calc[y, x]
-                target_x, target_y = x - flow_x, y - flow_y
-                if (0 <= target_x < w and 0 <= target_y < h):
-                    src_color = frame1[y, x]
-                    target_color = frame2[int(target_y), int(target_x)]
-                    similarity = self.calculate_pixel_quality(src_color, target_color)
-                    if not self._is_good_quality(similarity):
-                        final_error_count += 1
-                else:
-                    final_error_count += 1
-        timings['5. Final Error Scan'] = time.time() - start_time
+        self.progress_label.config(text="Step 5/6: Creating new quality map...")
+        self.root.update_idletasks()
         
-        # --- Block 6: Schedule finalization ---
-        timings['Total Worker Time'] = time.time() - total_start_time
-        self.root.after(0, self._finish_correction, flow, False, initial_error_count, final_error_count, skipped_count, timings)
+        new_quality_map = self.generate_quality_frame_fast(frame1, frame2, flow)
+        timings['5. Create New Quality Map'] = time.time() - start_time
 
-    def _finish_correction(self, corrected_flow, was_aborted, initial_error_count=0, final_error_count=0, skipped_count=0, timings=None):
-        """
-        Finalizes the correction process on the main thread.
-        Updates flow data, recalculates quality map, and refreshes UI.
-        """
-        if timings is None:
-            timings = {}
+        # --- Step 6: Get Final Error Count ---
+        start_time = time.time()
+        self.progress_label.config(text="Step 6/6: Counting final errors...")
+        self.root.update_idletasks()
+        
+        final_error_count = np.count_nonzero(new_quality_map[:, :, 0] > 0)
+        timings['6. Get Final Error Count'] = time.time() - start_time
 
-        if was_aborted:
-            self.progress_label.config(text="Correction aborted or not needed.")
-            if initial_error_count == 0:
-                 messagebox.showinfo("Info", "No errors found to correct.")
-            else:
-                 messagebox.showinfo("Info", f"Correction aborted. Initial errors: {initial_error_count}.")
-        else:
-            # Update the main flow data in memory AND in the session cache
-            self.current_flow = corrected_flow
-            self.flow_data_cache[self.current_pair] = corrected_flow
+        # --- Finalization ---
+        start_time_final = time.time()
+        self.current_flow = flow
+        self.flow_data_cache[self.current_pair] = flow
+        self.quality_maps[self.current_pair] = new_quality_map
+        
+        try:
+            lods = self.processor.generate_flow_lods(self.current_flow, num_lods=self.max_lod_levels)
+            for i, lod_data in enumerate(lods):
+                self.lod_data_cache[(self.current_pair, i)] = lod_data
+        except Exception as e:
+            messagebox.showerror("LOD Error", f"Could not recalculate LODs for this session: {e}")
+        
+        timings['7. Finalization (Cache & LODs)'] = time.time() - start_time_final
 
-            # --- Block 6: Finalization (Main Thread) ---
-            start_time = time.time()
-            
-            # Recalculate LODs for the corrected flow and update them in the session cache
-            self.progress_label.config(text="Recalculating and caching LODs...")
-            self.root.update_idletasks()
-            try:
-                lods = self.processor.generate_flow_lods(self.current_flow, num_lods=self.max_lod_levels)
-                for i, lod_data in enumerate(lods):
-                    self.lod_data_cache[(self.current_pair, i)] = lod_data
-                print(f"Successfully recalculated and cached LODs for frame pair {self.current_pair}.")
-            except Exception as e:
-                print(f"Error recalculating LODs: {e}")
-                messagebox.showerror("LOD Error", "Could not recalculate LODs for this session.")
-            
-            timings['6a. LOD Recalculation'] = time.time() - start_time
+        # --- Reporting ---
+        self.update_display()
+        final_message = f"Correction complete. Errors: {initial_error_count} -> {final_error_count}. Skipped: {skipped_count}."
+        self.progress_label.config(text=final_message)
+        messagebox.showinfo("Success", final_message)
 
-            # Recalculate quality map
-            start_time_quality = time.time()
-            self.progress_label.config(text="Recalculating quality map...")
-            self.root.update_idletasks()
-            self.quality_maps[self.current_pair] = self.generate_quality_frame_fast(self.frame1, self.frame2, self.current_flow)
-            timings['6b. Quality Map Recalculation'] = time.time() - start_time_quality
-            
-            # Update display
-            self.update_display()
-            
-            final_message = f"Correction complete. Errors: {initial_error_count} -> {final_error_count}. Skipped: {skipped_count}."
-            self.progress_label.config(text=final_message)
-            messagebox.showinfo("Success", f"Flow correction completed.\n\n"
-                                          f"Initial errors: {initial_error_count}\n"
-                                          f"Remaining errors: {final_error_count}\n"
-                                          f"Skipped vectors: {skipped_count}")
-
-        # Hide progress bar after a delay
         self.root.after(5000, lambda: self.progress_label.config(text=""))
         self.progressbar.config(value=0)
-        
-        # Re-enable button
         self.correct_errors_btn.config(state=tk.NORMAL)
 
-        # --- Log timing statistics ---
         if timings:
-            total_time = sum(timings.values())
-            # Ensure total time is not zero to avoid division by zero error
-            if total_time > 0:
-                print("\n--- Correction Performance Stats ---")
-                # Use Total Worker Time if available, otherwise sum all parts
-                overall_time = timings.get('Total Worker Time', total_time)
-                print(f"Total time: {overall_time:.4f}s")
-                for stage, duration in sorted(timings.items()):
-                    if stage != 'Total Worker Time':
-                        print(f"  - {stage:<30}: {duration:.4f}s ({duration/overall_time*100:.1f}%)")
-                print("------------------------------------")
+            total_time = time.time() - total_start_time
+            print("\n--- Correction Performance Stats ---")
+            print(f"Total time: {total_time:.4f}s")
+            for stage, duration in sorted(timings.items()):
+                print(f"  - {stage:<30}: {duration:.4f}s ({duration/total_time*100:.1f}%)")
+            print("------------------------------------")
 
     def run(self):
         """Run the GUI"""
