@@ -2541,6 +2541,7 @@ class FlowVisualizer:
             "--start-time", f"{start_time:.2f}",
             "--duration", f"{duration:.2f}",
             "--taa",
+            "--skip-lods",
             "--tile",
             "--flow-format", "hsv",
             "--use-flow-cache", str(corrected_flow_dir.resolve())

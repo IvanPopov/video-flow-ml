@@ -1066,7 +1066,7 @@ class VideoFlowProcessor:
                             taa_compare_frames[name] = taa_result.copy()
                     
                     # Normal TAA processing (for backward compatibility)
-                    taa_result = self.apply_taa_effect(frames[i], flow, None, alpha=0.1, use_flow=True)
+                    taa_result = self.apply_taa_effect(frames[i], previous_flow, None, alpha=0.1, use_flow=True)
                     taa_frame = taa_result
                 else:
                     # First frame or no previous flow - apply TAA without flow

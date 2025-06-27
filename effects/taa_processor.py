@@ -15,14 +15,17 @@ class TAAProcessor:
     using optical flow for accurate pixel reprojection.
     """
     
-    def __init__(self, alpha: float = 0.1):
+    def __init__(self, alpha: float = 0.1, bilateral_sigma_color: float = 25.0):
         """
         Initialize TAA processor
         
         Args:
             alpha: Blending weight (0.0 = full history, 1.0 = no history)
+            bilateral_sigma_color: Color similarity sigma for bilateral filtering.
+                                   Lower values are more selective.
         """
         self.alpha = alpha
+        self.bilateral_sigma_color = bilateral_sigma_color
         self.history = {}  # Store history for multiple sequences
     
     def apply_taa(self, 
@@ -31,6 +34,7 @@ class TAAProcessor:
                   previous_taa_frame: Optional[np.ndarray] = None,
                   alpha: Optional[float] = None,
                   use_flow: bool = True,
+                  use_bilateral: bool = True,
                   sequence_id: str = 'default') -> np.ndarray:
         """
         Apply TAA effect with or without optical flow
@@ -41,6 +45,7 @@ class TAAProcessor:
             previous_taa_frame: Previous TAA result frame (if None, uses internal history)
             alpha: Blending weight (if None, uses instance default)
             use_flow: Whether to use optical flow for reprojection
+            use_bilateral: Whether to use bilateral filtering for reprojection
             sequence_id: Identifier for sequence (for multi-sequence processing)
         
         Returns:
@@ -66,7 +71,7 @@ class TAAProcessor:
         else:
             # Flow-based TAA (motion-compensated)
             result = self._apply_flow_based_taa(
-                current_float, flow_pixels, previous_taa_frame, alpha
+                current_float, flow_pixels, previous_taa_frame, alpha, use_bilateral
             )
         
         # Update history
@@ -77,7 +82,8 @@ class TAAProcessor:
                              current_frame: np.ndarray,
                              flow_pixels: np.ndarray,
                              previous_taa_frame: np.ndarray,
-                             alpha: float) -> np.ndarray:
+                             alpha: float,
+                             use_bilateral: bool) -> np.ndarray:
         """
         Apply flow-based TAA with motion compensation
         
@@ -86,10 +92,12 @@ class TAAProcessor:
             flow_pixels: Optical flow pixels (HWC)
             previous_taa_frame: Previous TAA frame (float32)
             alpha: Blending weight
+            use_bilateral: Whether to use bilateral filtering
             
         Returns:
             TAA processed frame
         """
+
         h, w = current_frame.shape[:2]
         
         # Create coordinate grids
@@ -99,6 +107,9 @@ class TAAProcessor:
         prev_x = x_coords + flow_pixels[:, :, 0]
         prev_y = y_coords + flow_pixels[:, :, 1]
         
+        # Identify pixels where the flow vector points out of bounds
+        out_of_bounds_mask = (prev_x < 0) | (prev_x >= w) | (prev_y < 0) | (prev_y >= h)
+        
         # Handle NaN and inf values
         prev_x = np.nan_to_num(prev_x, nan=0.0, posinf=w-1, neginf=0.0)
         prev_y = np.nan_to_num(prev_y, nan=0.0, posinf=h-1, neginf=0.0)
@@ -107,13 +118,91 @@ class TAAProcessor:
         prev_x = np.clip(prev_x, 0, w - 1)
         prev_y = np.clip(prev_y, 0, h - 1)
         
-        # Bilinear interpolation from previous frame
-        reprojected = self._bilinear_sample(previous_taa_frame, prev_x, prev_y)
+        if use_bilateral:
+            reprojected = self._bilateral_reprojection_sample(
+                previous_taa_frame, prev_x, prev_y, current_frame
+            )
+        else:
+            reprojected = self._bilinear_sample(previous_taa_frame, prev_x, prev_y)
         
         # Exponential moving average (TAA blending)
         taa_result = alpha * current_frame + (1 - alpha) * reprojected
         
+        # For out-of-bounds pixels, set to green and disable smoothing
+        # green_color = np.array([0.0, 255.0, 0.0], dtype=np.float32)
+        #if np.any(out_of_bounds_mask):
+        #    taa_result[out_of_bounds_mask] = green_color
+        
         return taa_result
+    
+    def _bilateral_reprojection_sample(self,
+                                      image: np.ndarray,
+                                      x_coords: np.ndarray,
+                                      y_coords: np.ndarray,
+                                      current_frame: np.ndarray) -> np.ndarray:
+        """
+        Perform bilateral reprojection from image at given coordinates,
+        weighted by color similarity to the current frame.
+        
+        Args:
+            image: Source image (H, W, C), i.e., previous TAA frame
+            x_coords: X coordinates for sampling
+            y_coords: Y coordinates for sampling
+            current_frame: Current frame for color similarity check
+            
+        Returns:
+            Sampled image
+        """
+        h, w = image.shape[:2]
+        
+        # Get integer coordinates for the 4 neighbors
+        x0 = np.floor(x_coords).astype(int)
+        y0 = np.floor(y_coords).astype(int)
+        
+        # Clamp to ensure x1, y1 are within bounds
+        x0 = np.clip(x0, 0, w - 2)
+        y0 = np.clip(y0, 0, h - 2)
+        x1 = x0 + 1
+        y1 = y0 + 1
+
+        # Interpolation weights (spatial)
+        wx = (x_coords - x0)[..., np.newaxis]
+        wy = (y_coords - y0)[..., np.newaxis]
+        
+        # Get the four neighbors from the previous frame
+        p00 = image[y0, x0]
+        p01 = image[y0, x1]
+        p10 = image[y1, x0]
+        p11 = image[y1, x1]
+        
+        # --- Color similarity weighting ---
+        current_lum = np.mean(current_frame, axis=2)
+        
+        def get_color_weight(neighbor_pixel):
+            lum_diff = current_lum - np.mean(neighbor_pixel, axis=2)
+            # Use a small epsilon to avoid division by zero if sigma is 0
+            sigma_sq = self.bilateral_sigma_color**2 * 0.1
+            return np.exp(-lum_diff**2 / (2 * sigma_sq + 1e-6))[..., np.newaxis]
+
+        w00_color = get_color_weight(p00)
+        w01_color = get_color_weight(p01)
+        w10_color = get_color_weight(p10)
+        w11_color = get_color_weight(p11)
+
+        # Combine spatial and color weights
+        w00 = (1 - wx) * (1 - wy) * w00_color
+        w01 = wx * (1 - wy) * w01_color
+        w10 = (1 - wx) * wy * w10_color
+        w11 = wx * wy * w11_color
+        
+        total_weight = w00 + w01 + w10 + w11
+        # Avoid division by zero
+        total_weight = np.where(total_weight == 0, 1e-6, total_weight)
+        
+        # Weighted average of neighbors
+        reprojected = (p00 * w00 + p01 * w01 + p10 * w10 + p11 * w11) / total_weight
+        
+        return reprojected
     
     def _bilinear_sample(self,
                         image: np.ndarray,
@@ -184,6 +273,7 @@ class TAAProcessor:
             previous_taa_frame=previous_taa_frame,
             alpha=alpha,
             use_flow=False,
+            use_bilateral=False,
             sequence_id=sequence_id
         )
     
@@ -259,6 +349,7 @@ class TAAComparisonProcessor:
             flow_pixels=flow_pixels,
             alpha=alpha,
             use_flow=True,
+            use_bilateral=True,
             sequence_id='flow'
         )
         
