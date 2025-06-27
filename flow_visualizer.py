@@ -24,6 +24,7 @@ import queue
 import time
 from scipy import signal
 from scipy.ndimage import rotate
+import torch
 
 # Add flow_processor to path for loading flow data
 sys.path.insert(0, os.getcwd())
@@ -91,7 +92,10 @@ class FlowVisualizer:
             frame1 = self.frames[0]
             frame2 = self.frames[1]
             flow = self.load_flow_data(0)
-            self.quality_maps[0] = self.generate_quality_frame_fast(frame1, frame2, flow)
+            if 'cuda' in str(self.processor.device):
+                self.quality_maps[0] = self.generate_quality_frame_gpu(frame1, frame2, flow)
+            else:
+                self.quality_maps[0] = self.generate_quality_frame_fast(frame1, frame2, flow)
             print("Initial quality map ready!")
         
         # Zoom state
@@ -288,27 +292,38 @@ class FlowVisualizer:
     
     def compute_current_quality_map(self):
         """
-        Computes the quality map for the currently selected frame pair
-        in a background thread to avoid UI freeze.
+        Computes the quality map for the currently selected frame pair synchronously.
+        The UI may be unresponsive during this time.
         """
         frame_idx = self.current_pair
         
-        # Prevent multiple computations for the same frame
-        if frame_idx in self.computing_quality:
-            print(f"Already computing quality map for frame {frame_idx}.")
-            messagebox.showinfo("In Progress", f"Already computing quality map for frame {frame_idx}.")
-            return
-        
-        if self.stop_computation.is_set():
-            print("Computations are currently stopped (e.g. slider drag).")
-            return
+        try:
+            frame1 = self.frames[frame_idx]
+            frame2 = self.frames[frame_idx + 1]
+            flow = self.load_flow_data(frame_idx)
+            
+            if flow is None:
+                messagebox.showerror("Error", f"No flow data available for frame {frame_idx}.")
+                return
 
-        print(f"Requesting quality map computation for frame {frame_idx}...")
-        self.computing_quality.add(frame_idx)
-        # Re-use the existing background worker mechanism
-        self.compute_quality_map_background(frame_idx)
-        # Update display immediately to show "computing" status
-        self.update_display()
+            print(f"Generating quality map for frame {frame_idx}...")
+            start_time = time.time()
+            
+            # Choose computation method based on device availability
+            if 'cuda' in str(self.processor.device):
+                quality_map = self.generate_quality_frame_gpu(frame1, frame2, flow)
+            else:
+                quality_map = self.generate_quality_frame_fast(frame1, frame2, flow)
+
+            self.quality_maps[frame_idx] = quality_map
+            duration = time.time() - start_time
+            print(f"Quality map generation finished in {duration:.4f}s")
+
+            self.update_display() # Refresh UI with the new map
+
+        except Exception as e:
+            print(f"Error during quality map generation: {e}")
+            messagebox.showerror("Error", f"An error occurred during quality map generation:\n{e}")
     
     def request_quality_map(self, frame_idx):
         """Request quality map for a frame (compute if not available)"""
@@ -1015,8 +1030,6 @@ class FlowVisualizer:
             # Quality map status
             if self.current_pair in self.quality_maps:
                 quality_status = "Quality map: Generated"
-            elif self.current_pair in self.computing_quality:
-                quality_status = "Quality map: Computing..."
             else:
                 quality_status = "Quality map: Not Generated"
             
@@ -1144,12 +1157,10 @@ class FlowVisualizer:
     def on_slider_press(self, event):
         """Handle slider press (start of drag)"""
         self.slider_dragging = True
-        self.stop_all_computations()
     
     def on_slider_release(self, event):
         """Handle slider release (end of drag)"""
         self.slider_dragging = False
-        self.resume_computations()
         # Trigger update after drag ends
         self.update_display()
     
@@ -2022,7 +2033,11 @@ class FlowVisualizer:
         quality_map = self.quality_maps.get(self.current_pair)
         if quality_map is None:
             print("Quality map not found. Generating it to find errors...")
-            quality_map = self.generate_quality_frame_fast(frame1, frame2, flow)
+            # Use GPU if available, otherwise fallback to CPU
+            if 'cuda' in str(self.processor.device):
+                quality_map = self.generate_quality_frame_gpu(frame1, frame2, flow)
+            else:
+                quality_map = self.generate_quality_frame_fast(frame1, frame2, flow)
 
         timings['1. Get Initial Quality Map'] = time.time() - start_time
         
@@ -2123,7 +2138,11 @@ class FlowVisualizer:
         self.progress_label.config(text="Step 5/6: Creating new quality map...")
         self.root.update_idletasks()
         
-        new_quality_map = self.generate_quality_frame_fast(frame1, frame2, flow)
+        if 'cuda' in str(self.processor.device):
+            new_quality_map = self.generate_quality_frame_gpu(frame1, frame2, flow)
+        else:
+            new_quality_map = self.generate_quality_frame_fast(frame1, frame2, flow)
+            
         timings['5. Create New Quality Map'] = time.time() - start_time
 
         # --- Step 6: Get Final Error Count ---
@@ -2167,6 +2186,94 @@ class FlowVisualizer:
                 print(f"  - {stage:<30}: {duration:.4f}s ({duration/total_time*100:.1f}%)")
             print("------------------------------------")
 
+    def generate_quality_frame_gpu(self, frame1, frame2, flow):
+        """
+        Generate a quality visualization frame using GPU (PyTorch) for acceleration.
+        """
+        device = self.processor.device
+        h, w = frame1.shape[:2]
+
+        # --- 1. Prepare Tensors ---
+        # Convert inputs to PyTorch tensors and move to the selected device
+        frame1_t = torch.from_numpy(frame1).to(device).float() / 255.0
+        frame2_t = torch.from_numpy(frame2).to(device).float() / 255.0
+        flow_t = torch.from_numpy(flow).to(device).float()
+
+        # Ensure flow matches frame dimensions, scaling if necessary
+        fh, fw = flow_t.shape[:2]
+        if fh != h or fw != w:
+            flow_t = torch.nn.functional.interpolate(flow_t.permute(2, 0, 1).unsqueeze(0), size=(h, w), mode='bilinear', align_corners=False).squeeze(0).permute(1, 2, 0)
+            flow_t[..., 0] *= w / fw
+            flow_t[..., 1] *= h / fh
+
+        # --- 2. Calculate Target Coordinates ---
+        # Create coordinate grids
+        y_coords, x_coords = torch.meshgrid(torch.arange(h, device=device), torch.arange(w, device=device), indexing='ij')
+        
+        # Calculate target positions based on flow vectors
+        target_x = x_coords - flow_t[..., 0]
+        target_y = y_coords - flow_t[..., 1]
+        
+        # --- 3. Sample Target Colors using grid_sample (GPU-accelerated) ---
+        # Normalize coordinates to [-1, 1] range for grid_sample
+        normalized_target_x = 2 * (target_x / (w - 1)) - 1
+        normalized_target_y = 2 * (target_y / (h - 1)) - 1
+        
+        # Create sampling grid and unsqueeze for batch dimension
+        grid = torch.stack((normalized_target_x, normalized_target_y), dim=-1).unsqueeze(0)
+        
+        # Reshape frame2 for grid_sample (N, C, H, W)
+        frame2_t_reshaped = frame2_t.permute(2, 0, 1).unsqueeze(0)
+        
+        # Sample colors from frame2 using the calculated grid
+        sampled_colors = torch.nn.functional.grid_sample(frame2_t_reshaped, grid, mode='bilinear', padding_mode='zeros', align_corners=False).squeeze(0).permute(1, 2, 0)
+
+        # --- 4. Calculate Pixel Quality on GPU ---
+        src_colors = frame1_t
+        
+        # Euclidean distance
+        rgb_distance = torch.sqrt(torch.sum((src_colors - sampled_colors) ** 2, dim=-1))
+        rgb_max_dist = 1.732  # sqrt(3)
+        rgb_similarity = 1.0 - (rgb_distance / rgb_max_dist)
+        
+        # Normalized absolute difference
+        abs_diff = torch.mean(torch.abs(src_colors - sampled_colors), dim=-1)
+        abs_similarity = 1.0 - abs_diff
+        
+        # Cosine similarity
+        cosine_sim = torch.nn.functional.cosine_similarity(src_colors, sampled_colors, dim=-1)
+        cosine_similarity = (cosine_sim + 1.0) / 2.0  # Normalize to [0, 1]
+        
+        # Combine similarities
+        overall_similarity = (rgb_similarity + abs_similarity + cosine_similarity) / 3.0
+
+        # --- 5. Create Quality Map Image with Scaled Intensity ---
+        # Calculate potential intensity values for both channels across all pixels
+        # This mirrors the logic from the original CPU-based 'generate_quality_frame_fast'
+        green_intensity = torch.clamp((overall_similarity - 0.5) * 2.0, 0, 1)
+        red_intensity = torch.clamp(1.0 - overall_similarity, 0, 1)
+
+        # Create a mask for good vs. bad pixels
+        is_good_mask = overall_similarity > self.GOOD_QUALITY_THRESHOLD
+
+        # Create an empty frame tensor
+        quality_frame_t = torch.zeros_like(src_colors) # src_colors is (h, w, 3)
+
+        # Apply scaled green for good pixels
+        quality_frame_t[..., 1] = torch.where(is_good_mask, green_intensity, 0)
+        # Apply scaled red for bad pixels
+        quality_frame_t[..., 0] = torch.where(is_good_mask, 0, red_intensity)
+        
+        # Correctly handle out-of-bounds pixels by checking coordinates, not sampled color
+        out_of_bounds_mask = (target_x < 0) | (target_x >= w) | (target_y < 0) | (target_y >= h)
+        red_color = torch.tensor([1.0, 0.0, 0.0], device=device)
+        quality_frame_t = torch.where(out_of_bounds_mask.unsqueeze(-1), red_color, quality_frame_t)
+
+        # Convert back to NumPy array for display
+        quality_frame = (quality_frame_t * 255).byte().cpu().numpy()
+        
+        return quality_frame
+    
     def run(self):
         """Run the GUI"""
         self.root.mainloop()
