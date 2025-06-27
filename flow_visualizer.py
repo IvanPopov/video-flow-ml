@@ -75,6 +75,10 @@ class FlowVisualizer:
         self.template_radius = 5.5  # For 11x11 template
         self.search_radius = self.detail_analysis_region_size # Search in the whole 50x50 region
         
+        # --- Quality Thresholds ---
+        self.GOOD_QUALITY_THRESHOLD = 0.8  # Defines a "good" vs "bad" pixel similarity.
+        self.FINE_CORRECTION_THRESHOLD = 0.9 # If coarse similarity is below this, attempt fine correction.
+        
         # Check for LOD data availability
         self.check_lod_availability()
         
@@ -314,6 +318,18 @@ class FlowVisualizer:
 
         return dx, dy, angle, confidence
     
+    def _generate_spiral_path(self, width, height):
+        """Generates coordinates in a spiral path outwards from the center."""
+        x, y = 0, 0
+        dx, dy = 0, -1
+        # Iterate enough times to cover the whole area
+        for i in range(max(width, height)**2):
+            if (-width/2 < x <= width/2) and (-height/2 < y <= height/2):
+                yield (x, y)
+            if x == y or (x < 0 and x == -y) or (x > 0 and x == 1-y):
+                dx, dy = -dy, dx
+            x, y = x + dx, y + dy
+
     def _perform_coarse_correction(self, frame1, frame2, source_pixel, lod_flow_vector):
         """Performs coarse correction using phase correlation."""
         orig_x, orig_y = source_pixel
@@ -355,42 +371,73 @@ class FlowVisualizer:
         }
 
     def _perform_fine_correction(self, frame1, frame2, source_pixel, coarse_target_pixel):
-        """Performs fine-tuning correction using template matching (NCC)."""
+        """
+        Performs fine-tuning in two stages:
+        1. Template Matching (NCC) to find the best structural patch.
+        2. Conditional Spiral Search if the patch center's color is a poor match.
+        """
         src_x, src_y = source_pixel
-        
-        # 1. Extract template from frame1
-        template, _ = self.extract_region(frame1, src_x, src_y, self.template_radius)
+        source_color = frame1[src_y, src_x]
 
-        # 2. Extract search area from frame2
+        # 1. Extract template and search area
+        template, _ = self.extract_region(frame1, src_x, src_y, self.template_radius)
         search_area, search_bounds = self.extract_region(frame2, coarse_target_pixel[0], coarse_target_pixel[1], self.search_radius)
 
-        # Ensure regions are valid
         if template.shape[0] != int(2 * self.template_radius) or search_area.shape[0] != int(2 * self.search_radius):
             return None
 
-        # 3. Perform template matching
+        # 2. Perform template matching
         res = cv2.matchTemplate(search_area, template, cv2.TM_CCOEFF_NORMED)
         min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
         
-        # 4. Calculate final position
+        # 3. Find center of the best matched patch
         top_left_in_search = max_loc
-        center_in_search_x = top_left_in_search[0] + self.template_radius
-        center_in_search_y = top_left_in_search[1] + self.template_radius
+        patch_center_x = search_bounds[0] + top_left_in_search[0] + self.template_radius
+        patch_center_y = search_bounds[1] + top_left_in_search[1] + self.template_radius
+        patch_target = (patch_center_x, patch_center_y)
 
-        final_target_x = search_bounds[0] + center_in_search_x
-        final_target_y = search_bounds[1] + center_in_search_y
-        
-        # 5. Calculate new flow and quality
+        # 4. Check color of the patch center
+        h, w = frame2.shape[:2]
+        if not (0 <= patch_target[0] < w and 0 <= patch_target[1] < h):
+            return None # Patch center is out of bounds
+
+        patch_center_color = frame2[int(patch_center_y), int(patch_center_x)]
+        patch_center_similarity = self.calculate_pixel_quality(source_color, patch_center_color)
+
+        final_target_coords = patch_target
+        final_similarity = patch_center_similarity
+
+        # 5. Conditional Spiral Search
+        # If the structural match is good but color is bad, search for a better color nearby.
+        if not self._is_good_quality(patch_center_similarity):
+            # print(f"Patch center color is poor ({patch_center_similarity:.2f}). Starting spiral search for better color...")
+            
+            found_better_pixel = False
+            # Search outwards from the center of the found patch
+            search_dim = int(self.template_radius * 2) # Search within the 11x11 patch area
+            for dx, dy in self._generate_spiral_path(search_dim, search_dim):
+                check_x = patch_target[0] + dx
+                check_y = patch_target[1] + dy
+
+                if 0 <= check_x < w and 0 <= check_y < h:
+                    target_color = frame2[int(check_y), int(check_x)]
+                    similarity = self.calculate_pixel_quality(source_color, target_color)
+                    
+                    # Stop at the first pixel that meets the color criteria
+                    if self._is_good_quality(similarity):
+                        final_target_coords = (check_x, check_y)
+                        final_similarity = similarity
+                        found_better_pixel = True
+                        # print(f"Found suitable pixel at {final_target_coords} with similarity {final_similarity:.2f}.")
+                        break # Exit spiral search
+            
+            # if not found_better_pixel:
+                #print("Spiral search did not find a better pixel. Using original patch center.")
+
+        # 6. Calculate final flow and prepare return data
+        final_target_x, final_target_y = final_target_coords
         final_flow_x = src_x - final_target_x
         final_flow_y = src_y - final_target_y
-        
-        h, w = frame1.shape[:2]
-        final_similarity = 0.0
-        if (0 <= final_target_x < w and 0 <= final_target_y < h):
-            final_similarity = self.calculate_pixel_quality(
-                frame1[src_y, int(src_y)],
-                frame2[int(final_target_y), int(final_target_x)]
-            )
         
         res_vis = cv2.normalize(res, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
         res_vis = cv2.cvtColor(res_vis, cv2.COLOR_GRAY2BGR)
@@ -400,7 +447,7 @@ class FlowVisualizer:
             'flow': (final_flow_x, final_flow_y),
             'target': (final_target_x, final_target_y),
             'similarity': final_similarity,
-            'confidence': max_val,
+            'confidence': max_val, # NCC confidence for the patch
             'template': template,
             'search_area': search_area,
             'response_map': res_vis,
@@ -497,6 +544,10 @@ class FlowVisualizer:
                         f"Pixel ({orig_x}, {orig_y}) has good flow quality. "
                         f"Detail analysis is only performed for pixels with poor quality (red arrows).")
     
+    def _is_good_quality(self, similarity):
+        """Check if a similarity score is above the defined quality threshold."""
+        return similarity > self.GOOD_QUALITY_THRESHOLD
+    
     def perform_detail_analysis(self, orig_x, orig_y, original_flow):
         """Perform detailed analysis on a pixel with poor flow quality"""
         print(f"Starting detail analysis at pixel ({orig_x}, {orig_y})")
@@ -532,7 +583,7 @@ class FlowVisualizer:
         # --- Stage 2: Fine Correction (if needed) ---
         fine_result = None
         # If coarse correction is not good enough, try to refine it.
-        if coarse_result['similarity'] < 0.9: 
+        if coarse_result['similarity'] < self.FINE_CORRECTION_THRESHOLD: 
             print("Coarse result is not good enough, performing fine correction...")
             fine_result = self._perform_fine_correction(self.frame1, self.frame2, (orig_x, orig_y), coarse_result['target'])
             if fine_result:
@@ -544,10 +595,12 @@ class FlowVisualizer:
         if fine_result and fine_result['similarity'] > coarse_result['similarity']:
             final_flow = fine_result['flow']
             final_target = fine_result['target']
+            confidence = fine_result['confidence']
             print("Using fine correction result.")
         else:
             final_flow = coarse_result['flow']
             final_target = coarse_result['target']
+            confidence = coarse_result['confidence']
             print("Using coarse correction result.")
             
         # Store analysis data
@@ -560,6 +613,7 @@ class FlowVisualizer:
             'fine_result': fine_result,
             'final_flow': final_flow,
             'final_target': final_target,
+            'confidence': confidence,
             'lod_level': lod_level
         }
         
@@ -1509,7 +1563,7 @@ class FlowVisualizer:
                     similarity = self.calculate_pixel_quality(src_color, target_color)
                     
                     # Color coding
-                    if similarity > 0.8:
+                    if self._is_good_quality(similarity):
                         # Good quality - green, scaled for better visibility
                         intensity = int(255 * (similarity - 0.5) * 2)
                         color = [0, np.clip(intensity, 0, 255), 0]
@@ -1553,8 +1607,8 @@ class FlowVisualizer:
         # Calculate quality using shared method
         overall_similarity = self.calculate_pixel_quality(src_color, target_color)
         
-        # Threshold: green if similarity > 80%, red otherwise
-        arrow_color = "green" if overall_similarity > 0.8 else "red"
+        # Threshold using the centralized function
+        arrow_color = "green" if self._is_good_quality(overall_similarity) else "red"
         
         return arrow_color, tuple(src_color), tuple(target_color), overall_similarity
 
@@ -1977,7 +2031,7 @@ class FlowVisualizer:
                     src_color = frame1[y, x]
                     target_color = frame2[int(target_y), int(target_x)]
                     similarity = self.calculate_pixel_quality(src_color, target_color)
-                    if similarity <= 0.8:
+                    if not self._is_good_quality(similarity):
                         bad_pixels_coords.append((x, y))
                 else:
                     # Out of bounds is also a bad pixel
@@ -2031,7 +2085,7 @@ class FlowVisualizer:
             final_flow = coarse_result['flow']
             final_similarity = coarse_result['similarity']
 
-            if coarse_result['similarity'] > original_similarity and coarse_result['similarity'] < 0.9:
+            if coarse_result['similarity'] > original_similarity and coarse_result['similarity'] < self.FINE_CORRECTION_THRESHOLD:
                 fine_result = self._perform_fine_correction(frame1, frame2, (orig_x, orig_y), coarse_result['target'])
                 if fine_result and fine_result['similarity'] > coarse_result['similarity']:
                     final_flow = fine_result['flow']
