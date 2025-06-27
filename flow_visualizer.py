@@ -44,16 +44,16 @@ class FlowVisualizer:
         self.frames = self.load_video_frames()
         self.flow_files = self.find_flow_files()
         
-        if len(self.frames) == 0:
-            raise ValueError("No frames loaded from video")
+        if len(self.frames) <= 1:
+            raise ValueError("Not enough frames loaded from video")
         if len(self.flow_files) == 0:
             raise ValueError("No flow files found in directory")
             
-        print(f"Loaded {len(self.frames)} frames and {len(self.flow_files)} flow files")
+        print(f"Loaded {len(self.frames) - 1} original frames ({len(self.frames)} with duplicate) and {len(self.flow_files)} flow files")
         
         # Current state
         self.current_pair = 0
-        self.max_pairs = min(len(self.frames) - 1, len(self.flow_files))
+        self.max_pairs = len(self.frames) - 1
         
         # LOD support - moved up to be available for preloading
         self.current_lod_level = 0  # Current LOD level
@@ -138,8 +138,8 @@ class FlowVisualizer:
         
         for i in range(num_flows):
             # Print progress
-            progress_percent = (i + 1) / num_flows * 100
-            sys.stdout.write(f"\rLoading data: {i+1}/{num_flows} ({progress_percent:.1f}%)")
+            progress_percent = (i + 1) / (num_flows + 1) * 100
+            sys.stdout.write(f"\rLoading data: {i+1}/{num_flows + 1} ({progress_percent:.1f}%)")
             sys.stdout.flush()
 
             # Load main flow
@@ -167,6 +167,22 @@ class FlowVisualizer:
                         except Exception as e:
                             print(f"\nWarning: Could not load LOD file {lod_file}: {e}")
         
+        # Add flow for the last duplicated frame
+        if num_flows > 0:
+            last_flow = self.flow_data_cache.get(num_flows - 1)
+            if last_flow is not None:
+                progress_percent = (num_flows + 1) / (num_flows + 1) * 100
+                sys.stdout.write(f"\rLoading data: {num_flows + 1}/{num_flows + 1} ({progress_percent:.1f}%)")
+                sys.stdout.flush()
+
+                self.flow_data_cache[num_flows] = last_flow.copy()
+
+                # Add LODs for duplicated frame by copying from the previous one
+                for lod_level in range(self.max_lod_levels):
+                    last_lod = self.lod_data_cache.get((num_flows - 1, lod_level))
+                    if last_lod is not None:
+                        self.lod_data_cache[(num_flows, lod_level)] = last_lod.copy()
+        
         print("\nAll data preloaded successfully.")
     
     def load_video_frames(self):
@@ -193,6 +209,8 @@ class FlowVisualizer:
             frame_count += 1
             
         cap.release()
+        if frames:
+            frames.append(frames[-1])
         return frames
     
     def find_flow_files(self):

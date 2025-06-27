@@ -808,7 +808,7 @@ class VideoFlowProcessor:
     def process_video(self, input_path, output_path, max_frames=1000, start_frame=0, 
                      start_time=None, duration=None, vertical=False, flow_only=False, taa=False, flow_format='gamedev', 
                      save_flow=None, force_recompute=False, use_flow_cache=None, auto_play=True,
-                     taa_compare=False):
+                     taa_compare=False, skip_lods=False):
         """Main processing function"""
         import os
         
@@ -895,7 +895,7 @@ class VideoFlowProcessor:
                 print(f"Force recompute enabled, will overwrite cache: {flow_cache_dir}")
         
         # Check and generate LOD pyramids if needed
-        if use_cached_flow:
+        if use_cached_flow and not skip_lods:
             # Check if LOD pyramids exist
             lods_exist = self.check_flow_lods_exist(flow_cache_dir, len(frames))
             if not lods_exist:
@@ -904,6 +904,8 @@ class VideoFlowProcessor:
                 print("LOD pyramids generated successfully!")
             else:
                 print("LOD pyramids found in cache")
+        elif skip_lods:
+            print("Skipping LOD pyramid check/generation (--skip-lods enabled)")
         
         # Load VideoFlow model only if we need to compute flow
         if not use_cached_flow:
@@ -1138,10 +1140,12 @@ class VideoFlowProcessor:
         out.release()
         
         # Generate LOD pyramids for cached flow if we computed new flow
-        if not use_cached_flow and flow_cache_dir:
+        if not use_cached_flow and flow_cache_dir and not skip_lods:
             print("Generating LOD pyramids for computed flow...")
             self.generate_lods_for_cache(flow_cache_dir, len(frames))
             print("LOD pyramids generated!")
+        elif not use_cached_flow and skip_lods:
+            print("Skipping LOD pyramid generation for computed flow (--skip-lods enabled)")
         
         # Auto-play the resulting video if enabled
         if auto_play:
@@ -1248,6 +1252,8 @@ def main():
                        help='Disable automatic video playback after processing')
     parser.add_argument('--taa-compare', action='store_true',
                        help='Enable TAA comparison mode with multiple stabilization strengths')
+    parser.add_argument('--skip-lods', action='store_true',
+                       help='Skip LOD (Level-of-Detail) pyramid generation/loading for faster processing')
     
     args = parser.parse_args()
     
@@ -1343,20 +1349,26 @@ def main():
             print("Flow computation completed!")
             
             # Generate LOD pyramids for the computed flow
-            print("Generating LOD pyramids...")
-            processor.generate_lods_for_cache(flow_cache_dir, len(frames))
-            print("LOD pyramids generated!")
+            if not args.skip_lods:
+                print("Generating LOD pyramids...")
+                processor.generate_lods_for_cache(flow_cache_dir, len(frames))
+                print("LOD pyramids generated!")
+            else:
+                print("Skipping LOD pyramid generation (--skip-lods enabled)")
         else:
             print(f"Using existing flow cache: {flow_cache_dir}")
             
             # Check and generate LOD pyramids if needed
-            lods_exist = processor.check_flow_lods_exist(flow_cache_dir, len(frames))
-            if not lods_exist:
-                print("LOD pyramids not found, generating...")
-                processor.generate_lods_for_cache(flow_cache_dir, len(frames))
-                print("LOD pyramids generated successfully!")
+            if not args.skip_lods:
+                lods_exist = processor.check_flow_lods_exist(flow_cache_dir, len(frames))
+                if not lods_exist:
+                    print("LOD pyramids not found, generating...")
+                    processor.generate_lods_for_cache(flow_cache_dir, len(frames))
+                    print("LOD pyramids generated successfully!")
+                else:
+                    print("LOD pyramids found in cache")
             else:
-                print("LOD pyramids found in cache")
+                print("Skipping LOD pyramid check/generation (--skip-lods enabled)")
         
         # Launch interactive visualizer
         print("Launching interactive flow visualizer...")
@@ -1488,7 +1500,7 @@ def main():
                               flow_only=args.flow_only, taa=args.taa, flow_format=args.flow_format, save_flow=args.save_flow,
                               force_recompute=args.force_recompute, use_flow_cache=args.use_flow_cache, 
                               auto_play=not args.no_autoplay,
-                              taa_compare=args.taa_compare)
+                              taa_compare=args.taa_compare, skip_lods=args.skip_lods)
         
         if not args.no_autoplay and not args.taa_compare:
             print("\n✓ VideoFlow processing completed successfully! Video should open automatically.")
