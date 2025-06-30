@@ -190,29 +190,34 @@ class FlowCacheManager:
         cache_path = Path(input_path).parent / cache_dir_name
         return str(cache_path)
     
-    def check_cache_exists(self, cache_dir: str, max_frames: int) -> Tuple[bool, Optional[str]]:
-        """Check if complete flow cache exists for the requested number of frames"""
+    def check_cache_exists(self, cache_dir: str, max_frames: int) -> Tuple[bool, Optional[str], List[int]]:
+        """
+        Check if complete flow cache exists.
+        Returns: (is_complete, format_type, missing_frames_indices)
+        """
         if not os.path.exists(cache_dir):
-            return False, None
-            
-        flo_files = []
-        npz_files = []
-        
-        for i in range(max_frames):
-            flo_file = os.path.join(cache_dir, f"flow_frame_{i:06d}.flo")
-            npz_file = os.path.join(cache_dir, f"flow_frame_{i:06d}.npz")
-            
-            if os.path.exists(flo_file):
-                flo_files.append(flo_file)
-            if os.path.exists(npz_file):
-                npz_files.append(npz_file)
-        
-        if len(flo_files) == max_frames:
-            return True, 'flo'
-        elif len(npz_files) == max_frames:
-            return True, 'npz'
+            return False, None, list(range(max_frames))
+
+        # Check for any .npz or .flo file to determine format
+        all_files = os.listdir(cache_dir)
+        has_npz = any(f.endswith('.npz') for f in all_files)
+        has_flo = any(f.endswith('.flo') for f in all_files)
+
+        if has_npz:
+            format_type = 'npz'
+        elif has_flo:
+            format_type = 'flo'
         else:
-            return False, None
+            return False, None, list(range(max_frames))
+
+        missing_frames = []
+        for i in range(max_frames):
+            flow_file = os.path.join(cache_dir, f"flow_frame_{i:06d}.{format_type}")
+            if not os.path.exists(flow_file):
+                missing_frames.append(i)
+        
+        is_complete = not missing_frames
+        return is_complete, format_type if is_complete else None, missing_frames
     
     def load_cached_flow(self, cache_dir: str, frame_idx: int, format_type: str = 'auto') -> np.ndarray:
         """Load cached optical flow for specific frame"""

@@ -1049,15 +1049,31 @@ class VideoFlowProcessor:
         if use_flow_cache is not None:
             # Use specific cache directory
             flow_cache_dir = use_flow_cache
-            if os.path.exists(flow_cache_dir):
-                cache_exists, cached_flow_format = self.check_flow_cache_exists(flow_cache_dir, len(frames))
-                if cache_exists:
-                    use_cached_flow = True
-                    print(f"Using optical flow cache from: {flow_cache_dir} (format: {cached_flow_format})")
-                else:
-                    print(f"Warning: Specified cache directory incomplete or missing: {flow_cache_dir}")
+            cache_exists, cached_flow_format, missing_frames = self.check_flow_cache_exists(flow_cache_dir, len(frames))
+            if cache_exists:
+                use_cached_flow = True
+                print(f"Using optical flow cache from: {flow_cache_dir} (format: {cached_flow_format})")
             else:
-                print(f"Warning: Specified cache directory not found: {flow_cache_dir}")
+                if not os.path.exists(flow_cache_dir):
+                     error_message = (
+                        f"Error: The specified cache directory does not exist.\n"
+                        f"  Directory: {flow_cache_dir}\n"
+                        "  Please provide a valid path for '--use-flow-cache'."
+                    )
+                else:
+                    error_message = (
+                        f"Error: The specified cache directory is incomplete.\n"
+                        f"  Directory: {flow_cache_dir}\n"
+                        f"  Reason: Found {len(frames) - len(missing_frames)} of {len(frames)} required flow files.\n"
+                    )
+                    if len(missing_frames) < 20:
+                        error_message += f"  Missing frame indices: {missing_frames}\n"
+                    else:
+                        error_message += f"  Missing {len(missing_frames)} frames, including: {missing_frames[:10]}...\n"
+                    error_message += "  Please check the directory or remove '--use-flow-cache' to generate a new cache."
+
+                print(error_message, file=sys.stderr)
+                sys.exit(1)
         else:
             # Generate automatic cache directory
             flow_cache_dir = self.generate_flow_cache_path(
@@ -1066,7 +1082,7 @@ class VideoFlowProcessor:
             )
             
             if not force_recompute:
-                cache_exists, cached_flow_format = self.check_flow_cache_exists(flow_cache_dir, len(frames))
+                cache_exists, cached_flow_format, _ = self.check_flow_cache_exists(flow_cache_dir, len(frames))
                 if cache_exists:
                     use_cached_flow = True
                     print(f"Found existing optical flow cache: {flow_cache_dir} (format: {cached_flow_format})")
@@ -1507,7 +1523,7 @@ def main():
             )
         
         # Check if cache exists, if not compute it
-        cache_exists, cached_flow_format = processor.check_flow_cache_exists(flow_cache_dir, len(frames))
+        cache_exists, cached_flow_format, missing_frames = processor.check_flow_cache_exists(flow_cache_dir, len(frames))
         
         if not cache_exists or args.force_recompute:
             print(f"Computing optical flow and saving to cache: {flow_cache_dir}")

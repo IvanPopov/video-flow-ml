@@ -28,10 +28,13 @@ import torch
 from tqdm import tqdm
 from VideoFlow.core.utils.frame_utils import writeFlow
 import subprocess
+import concurrent.futures
+import math
 
 # Add flow_processor to path for loading flow data
 sys.path.insert(0, os.getcwd())
 from flow_processor import VideoFlowProcessor
+import correction_worker
 
 class FlowVisualizer:
     def __init__(self, video_path, flow_dir, start_frame=0, max_frames=None):
@@ -103,9 +106,9 @@ class FlowVisualizer:
             frame2 = self.frames[1]
             flow = self.load_flow_data(0)
             if 'cuda' in str(self.processor.device):
-                self.quality_maps[0] = self.generate_quality_frame_gpu(frame1, frame2, flow)
+                self.quality_maps[0] = correction_worker.generate_quality_frame_gpu(frame1, frame2, flow, self.processor.device, self.GOOD_QUALITY_THRESHOLD)
             else:
-                self.quality_maps[0] = self.generate_quality_frame_fast(frame1, frame2, flow)
+                self.quality_maps[0] = correction_worker.generate_quality_frame_fast(frame1, frame2, flow, self.GOOD_QUALITY_THRESHOLD)
             print("Initial quality map ready!")
         
         # Zoom state
@@ -609,7 +612,10 @@ class FlowVisualizer:
                     return
                 
                 # Generate quality map
-                quality_map = self.generate_quality_frame_fast(frame1, frame2, flow)
+                if 'cuda' in str(self.processor.device):
+                    quality_map = correction_worker.generate_quality_frame_gpu(frame1, frame2, flow, self.processor.device, self.GOOD_QUALITY_THRESHOLD)
+                else:
+                    quality_map = correction_worker.generate_quality_frame_fast(frame1, frame2, flow, self.GOOD_QUALITY_THRESHOLD)
                 
                 # Check if result is still needed
                 if not self.stop_computation.is_set():
@@ -686,9 +692,9 @@ class FlowVisualizer:
             
             # Choose computation method based on device availability
             if 'cuda' in str(self.processor.device):
-                quality_map = self.generate_quality_frame_gpu(frame1, frame2, flow)
+                quality_map = correction_worker.generate_quality_frame_gpu(frame1, frame2, flow, self.processor.device, self.GOOD_QUALITY_THRESHOLD)
             else:
-                quality_map = self.generate_quality_frame_fast(frame1, frame2, flow)
+                quality_map = correction_worker.generate_quality_frame_fast(frame1, frame2, flow, self.GOOD_QUALITY_THRESHOLD)
 
             self.quality_maps[frame_idx] = quality_map
             duration = time.time() - start_time
@@ -723,89 +729,14 @@ class FlowVisualizer:
         Rotation is not calculated and is returned as 0.
         Returns: (dx, dy, angle, confidence)
         """
-        # Ensure images are grayscale and float32
-        if len(img1.shape) == 3:
-            img1 = cv2.cvtColor(img1, cv2.COLOR_RGB2GRAY)
-        if len(img2.shape) == 3:
-            img2 = cv2.cvtColor(img2, cv2.COLOR_RGB2GRAY)
-        img1 = img1.astype(np.float32)
-        img2 = img2.astype(np.float32)
-
-        # Ensure both images have the same size
-        if img1.shape != img2.shape:
-            # Get the minimum dimensions
-            h1, w1 = img1.shape[:2]
-            h2, w2 = img2.shape[:2]
-            min_h = min(h1, h2)
-            min_w = min(w1, w2)
-            
-            # Crop both images to the same size
-            img1 = img1[:min_h, :min_w]
-            img2 = img2[:min_h, :min_w]
-            
-            # If the resulting images are too small, return default values
-            if min_h < 2 or min_w < 2:
-                return 0.0, 0.0, 0.0, 0.0
-
-        # Use phase correlation to find the translation
-        (dx, dy), confidence = cv2.phaseCorrelate(img1, img2)
-
-        # Angle is not calculated, return 0 as per requirement
-        angle = 0.0
-
-        return dx, dy, angle, confidence
+        return correction_worker.phase_correlation_with_rotation(img1, img2)
     
-    def _generate_spiral_path(self, width, height):
-        """Generates coordinates in a spiral path outwards from the center."""
-        x, y = 0, 0
-        dx, dy = 0, -1
-        # Iterate enough times to cover the whole area
-        for i in range(max(width, height)**2):
-            if (-width/2 < x <= width/2) and (-height/2 < y <= height/2):
-                yield (x, y)
-            if x == y or (x < 0 and x == -y) or (x > 0 and x == 1-y):
-                dx, dy = -dy, dx
-            x, y = x + dx, y + dy
-
     def _perform_coarse_correction(self, frame1, frame2, source_pixel, lod_flow_vector):
         """Performs coarse correction using phase correlation."""
-        orig_x, orig_y = source_pixel
-        lod_flow_x, lod_flow_y = lod_flow_vector
-
-        # Calculate target position using LOD flow
-        lod_target_x = orig_x - lod_flow_x
-        lod_target_y = orig_y - lod_flow_y
-        
-        # Extract regions around source and LOD target
-        region1, _ = self.extract_region(frame1, orig_x, orig_y, self.detail_analysis_region_size)
-        region2, _ = self.extract_region(frame2, lod_target_x, lod_target_y, self.detail_analysis_region_size)
-        
-        # Perform phase correlation
-        dx, dy, angle, confidence = self.phase_correlation_with_rotation(region1, region2)
-        
-        # Calculate corrected flow vector and target
-        corrected_flow_x = lod_flow_x - dx
-        corrected_flow_y = lod_flow_y - dy
-        final_target_x = orig_x - corrected_flow_x
-        final_target_y = orig_y - corrected_flow_y
-
-        # Calculate quality of this correction
-        h, w = frame1.shape[:2]
-        similarity = 0.0
-        if (0 <= final_target_x < w and 0 <= final_target_y < h):
-            similarity = self.calculate_pixel_quality(
-                frame1[orig_y, orig_x],
-                frame2[int(final_target_y), int(final_target_x)]
-            )
-
-        return {
-            'flow': (corrected_flow_x, corrected_flow_y),
-            'target': (final_target_x, final_target_y),
-            'similarity': similarity,
-            'phase_shift': (dx, dy),
-            'angle': angle,
-            'confidence': confidence
-        }
+        return correction_worker.perform_coarse_correction(
+            frame1, frame2, source_pixel, lod_flow_vector,
+            self.detail_analysis_region_size
+        )
 
     def _perform_fine_correction(self, frame1, frame2, source_pixel, coarse_target_pixel):
         """
@@ -813,83 +744,10 @@ class FlowVisualizer:
         1. Template Matching (NCC) to find the best structural patch.
         2. Conditional Spiral Search if the patch center's color is a poor match.
         """
-        src_x, src_y = source_pixel
-        source_color = frame1[src_y, src_x]
-
-        # 1. Extract template and search area
-        template, _ = self.extract_region(frame1, src_x, src_y, self.template_radius)
-        search_area, search_bounds = self.extract_region(frame2, coarse_target_pixel[0], coarse_target_pixel[1], self.search_radius)
-
-        if template.shape[0] != int(2 * self.template_radius) or search_area.shape[0] != int(2 * self.search_radius):
-            return None
-
-        # 2. Perform template matching
-        res = cv2.matchTemplate(search_area, template, cv2.TM_CCOEFF_NORMED)
-        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
-        
-        # 3. Find center of the best matched patch
-        top_left_in_search = max_loc
-        patch_center_x = search_bounds[0] + top_left_in_search[0] + self.template_radius
-        patch_center_y = search_bounds[1] + top_left_in_search[1] + self.template_radius
-        patch_target = (patch_center_x, patch_center_y)
-
-        # 4. Check color of the patch center
-        h, w = frame2.shape[:2]
-        if not (0 <= patch_target[0] < w and 0 <= patch_target[1] < h):
-            return None # Patch center is out of bounds
-
-        patch_center_color = frame2[int(patch_center_y), int(patch_center_x)]
-        patch_center_similarity = self.calculate_pixel_quality(source_color, patch_center_color)
-
-        final_target_coords = patch_target
-        final_similarity = patch_center_similarity
-
-        # 5. Conditional Spiral Search
-        # If the structural match is good but color is bad, search for a better color nearby.
-        if not self._is_good_quality(patch_center_similarity):
-            # print(f"Patch center color is poor ({patch_center_similarity:.2f}). Starting spiral search for better color...")
-            
-            found_better_pixel = False
-            # Search outwards from the center of the found patch
-            search_dim = int(self.template_radius * 2) # Search within the 11x11 patch area
-            for dx, dy in self._generate_spiral_path(search_dim, search_dim):
-                check_x = patch_target[0] + dx
-                check_y = patch_target[1] + dy
-
-                if 0 <= check_x < w and 0 <= check_y < h:
-                    target_color = frame2[int(check_y), int(check_x)]
-                    similarity = self.calculate_pixel_quality(source_color, target_color)
-                    
-                    # Stop at the first pixel that meets the color criteria
-                    if self._is_good_quality(similarity):
-                        final_target_coords = (check_x, check_y)
-                        final_similarity = similarity
-                        found_better_pixel = True
-                        # print(f"Found suitable pixel at {final_target_coords} with similarity {final_similarity:.2f}.")
-                        break # Exit spiral search
-            
-            # if not found_better_pixel:
-                #print("Spiral search did not find a better pixel. Using original patch center.")
-
-        # 6. Calculate final flow and prepare return data
-        final_target_x, final_target_y = final_target_coords
-        final_flow_x = src_x - final_target_x
-        final_flow_y = src_y - final_target_y
-        
-        res_vis = cv2.normalize(res, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
-        res_vis = cv2.cvtColor(res_vis, cv2.COLOR_GRAY2BGR)
-        cv2.circle(res_vis, max_loc, 5, (0,255,0), 1)
-
-        return {
-            'flow': (final_flow_x, final_flow_y),
-            'target': (final_target_x, final_target_y),
-            'similarity': final_similarity,
-            'confidence': max_val, # NCC confidence for the patch
-            'template': template,
-            'search_area': search_area,
-            'response_map': res_vis,
-            'match_location': max_loc
-        }
+        return correction_worker.perform_fine_correction(
+            frame1, frame2, source_pixel, coarse_target_pixel,
+            self.template_radius, self.search_radius, self.GOOD_QUALITY_THRESHOLD
+        )
 
     def get_highest_available_lod(self, frame_idx):
         """Get the highest available LOD level for a frame"""
@@ -901,28 +759,7 @@ class FlowVisualizer:
     
     def extract_region(self, image, center_x, center_y, radius):
         """Extract a square region around a center point"""
-        h, w = image.shape[:2]
-        
-        # Calculate bounds
-        x1 = max(0, int(center_x - radius))
-        y1 = max(0, int(center_y - radius))
-        x2 = min(w, int(center_x + radius))
-        y2 = min(h, int(center_y + radius))
-        
-        # Extract region
-        region = image[y1:y2, x1:x2]
-        
-        # Pad if necessary to make square
-        target_size = int(2 * radius) # Ensure target_size is an integer
-        if region.shape[0] < target_size or region.shape[1] < target_size:
-            pad_h = max(0, target_size - region.shape[0])
-            pad_w = max(0, target_size - region.shape[1])
-            if len(image.shape) == 3:
-                region = np.pad(region, ((0, pad_h), (0, pad_w), (0, 0)), mode='constant')
-            else:
-                region = np.pad(region, ((0, pad_h), (0, pad_w)), mode='constant')
-        
-        return region, (x1, y1, x2, y2)
+        return correction_worker.extract_region(image, center_x, center_y, radius)
     
     def on_left_click(self, event):
         """Handle left mouse click for detail analysis or marking the quality map."""
@@ -981,7 +818,7 @@ class FlowVisualizer:
                 (orig_x, orig_y) != self.detail_analysis_data['source_pixel']):
                 
                 if not self.check_exit_detail_mode("Clicking on another pixel"):
-                    return
+                    return True
             
             # Check if this pixel has poor flow quality
             if self.current_flow is not None:
@@ -1381,6 +1218,14 @@ class FlowVisualizer:
             variable=self.save_corrected_var,
         )
         save_check.pack(side=tk.LEFT, padx=(10, 5))
+
+        self.multithreaded_var = tk.BooleanVar(value=False)
+        multithread_check = ttk.Checkbutton(
+            correction_other_frame,
+            text="Multithreaded",
+            variable=self.multithreaded_var,
+        )
+        multithread_check.pack(side=tk.LEFT, padx=(10, 5))
 
         self.highlight_errors_var = tk.BooleanVar(value=False)
         highlight_check = ttk.Checkbutton(
@@ -2012,35 +1857,7 @@ class FlowVisualizer:
     
     def calculate_pixel_quality(self, src_color, target_color):
         """Calculate quality score for a single pixel pair"""
-        src_f = src_color.astype(float)
-        tgt_f = target_color.astype(float)
-
-        # 1. Euclidean distance in RGB space
-        rgb_distance = np.sqrt(np.sum((src_f - tgt_f) ** 2))
-        rgb_max_distance = np.sqrt(3 * 255**2)  # Maximum possible distance
-        rgb_similarity = 1.0 - (rgb_distance / rgb_max_distance)
-        
-        # 2. Normalized absolute difference
-        abs_diff = np.mean(np.abs(src_f - tgt_f)) / 255.0
-        abs_similarity = 1.0 - abs_diff
-        
-        # 3. Cosine similarity (treating colors as vectors)
-        src_norm = np.linalg.norm(src_f)
-        target_norm = np.linalg.norm(tgt_f)
-        
-        # Use a small epsilon to avoid division by zero and handle near-black colors robustly
-        if src_norm > 1e-6 and target_norm > 1e-6:
-            cosine_sim = np.dot(src_f, tgt_f) / (src_norm * target_norm)
-            cosine_similarity = (cosine_sim + 1.0) / 2.0  # Normalize to [0,1]
-        else:
-            # If one or both colors are black/near-black, angle is not a good metric.
-            # Instead, base similarity on the difference in their brightness (norms).
-            norm_diff = np.abs(src_norm - target_norm)
-            cosine_similarity = 1.0 - (norm_diff / rgb_max_distance)
-        
-        # Use the average of all similarity metrics
-        overall_similarity = (rgb_similarity + abs_similarity + cosine_similarity) / 3.0
-        return overall_similarity
+        return correction_worker.calculate_pixel_quality(src_color, target_color)
     
     def generate_quality_frame(self, frame1, frame2, flow):
         """Generate a quality visualization frame"""
@@ -2104,7 +1921,7 @@ class FlowVisualizer:
             similarities = np.array(similarities)
             
             # Color coding
-            good_mask = similarities > 0.8
+            good_mask = similarities > self.GOOD_QUALITY_THRESHOLD
             
             # Good quality pixels - green
             good_indices = np.where(good_mask)[0]
@@ -2131,72 +1948,7 @@ class FlowVisualizer:
     
     def generate_quality_frame_fast(self, frame1, frame2, flow):
         """Generate a quality visualization frame - optimized version"""
-        if flow is None:
-            return np.zeros_like(frame1)
-        
-        h, w = frame1.shape[:2]
-        fh, fw = flow.shape[:2]
-        quality_frame = np.zeros((h, w, 3), dtype=np.uint8)
-        
-        # Calculate scale factors if flow and frame dimensions don't match
-        scale_x = w / fw if fw > 0 else 1.0
-        scale_y = h / fh if fh > 0 else 1.0
-        
-        # Resize flow to match frame dimensions if needed
-        if (fh != h or fw != w):
-            flow = cv2.resize(flow, (w, h), interpolation=cv2.INTER_LINEAR)
-            # Scale flow vectors by the resize ratio
-            flow[:, :, 0] *= scale_x
-            flow[:, :, 1] *= scale_y
-        
-        # Downsample for faster computation if image is large
-        downsample_factor = 1
-        if h * w > 500000:  # If more than 500k pixels
-            downsample_factor = 2
-        elif h * w > 1000000:  # If more than 1M pixels
-            downsample_factor = 4
-        
-        # Process with downsampling
-        step = downsample_factor
-        
-        for y in range(0, h, step):
-            for x in range(0, w, step):
-                # Get flow vector
-                flow_x = flow[y, x, 0]
-                flow_y = flow[y, x, 1]
-                
-                # Calculate target position
-                target_x = x - flow_x
-                target_y = y - flow_y
-                
-                # Check bounds
-                if (0 <= target_x < w and 0 <= target_y < h):
-                    # Get colors
-                    src_color = frame1[y, x]
-                    target_color = frame2[int(target_y), int(target_x)]
-                    
-                    # Use the consistent, robust quality metric
-                    similarity = self.calculate_pixel_quality(src_color, target_color)
-                    
-                    # Color coding
-                    if self._is_good_quality(similarity):
-                        # Good quality - green, scaled for better visibility
-                        intensity = int(255 * (similarity - 0.5) * 2)
-                        color = [0, np.clip(intensity, 0, 255), 0]
-                    else:
-                        # Bad quality - red
-                        intensity = int(255 * (1.0 - similarity))
-                        color = [intensity, 0, 0]
-                else:
-                    # Out of bounds - red
-                    color = [255, 0, 0]
-                
-                # Fill block if downsampled
-                y_end = min(y + step, h)
-                x_end = min(x + step, w)
-                quality_frame[y:y_end, x:x_end] = color
-        
-        return quality_frame
+        return correction_worker.generate_quality_frame_fast(frame1, frame2, flow, self.GOOD_QUALITY_THRESHOLD)
     
     def get_arrow_color(self, src_x, src_y, target_x, target_y):
         """Determine arrow color based on color consistency between source and target pixels"""
@@ -2829,6 +2581,16 @@ class FlowVisualizer:
 
     def _correct_frames_in_range(self, start_frame, end_frame, description):
         """
+        Dispatcher for batch correction. Runs either single-threaded or multi-threaded
+        based on the UI checkbox.
+        """
+        if self.multithreaded_var.get():
+            self._correct_frames_in_range_multithreaded(start_frame, end_frame, description)
+        else:
+            self._correct_frames_in_range_singlethreaded(start_frame, end_frame, description)
+
+    def _correct_frames_in_range_singlethreaded(self, start_frame, end_frame, description):
+        """
         Internal method to correct frames in a specified range.
         
         Args:
@@ -2954,97 +2716,153 @@ class FlowVisualizer:
         self.correct_all_frames_btn.config(state=tk.NORMAL)
         self.correct_range_btn.config(state=tk.NORMAL)
 
+    def _correct_frames_in_range_multithreaded(self, start_frame, end_frame, description):
+        """
+        Corrects frames in a specified range using a thread pool.
+        """
+        frame_indices = list(range(start_frame, end_frame + 1))
+        frame_count = len(frame_indices)
+        
+        # --- UI and Worker Setup ---
+        self.correct_errors_btn.config(state=tk.DISABLED)
+        self.correct_all_frames_btn.config(state=tk.DISABLED)
+        self.correct_range_btn.config(state=tk.DISABLED)
+        self.root.update_idletasks()
+        
+        num_workers = os.cpu_count() or 1
+        min_chunk_size = 10
+        
+        # Calculate chunk size, ensuring it's not too small
+        chunk_size = max(min_chunk_size, math.ceil(frame_count / num_workers))
+        chunks = [frame_indices[i:i + chunk_size] for i in range(0, frame_count, chunk_size)]
+        
+        # --- Log Header ---
+        print(f"\n=== Multithreaded Batch Correction Started for {description} ===")
+        print(f"Processing {frame_count} frames on {len(chunks)} workers.")
+
+        corrected_flow_dir = Path(self.flow_dir).with_name(Path(self.flow_dir).name + "_corrected")
+        corrected_flow_dir.mkdir(exist_ok=True)
+        print(f"Corrected flows will be saved to: {corrected_flow_dir.resolve()}")
+
+        batch_start_time = time.time()
+        all_results = []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+            # Prepare arguments for each worker
+            worker_args = []
+            for i, chunk in enumerate(chunks):
+                arg_tuple = (
+                    i + 1,                     # worker_id
+                    chunk,                     # frame_indices
+                    self.frames,               # All video frames
+                    self.flow_data_cache,      # Full flow cache
+                    self.lod_data_cache,       # Full LOD cache
+                    str(self.processor.device),# Device string
+                    self.max_lod_levels,       # Max LOD levels
+                    self.flow_files,           # List of original flow files
+                    {                          # Constants
+                        'GOOD_QUALITY_THRESHOLD': self.GOOD_QUALITY_THRESHOLD,
+                        'FINE_CORRECTION_THRESHOLD': self.FINE_CORRECTION_THRESHOLD,
+                        'DETAIL_ANALYSIS_REGION_SIZE': self.detail_analysis_region_size,
+                        'TEMPLATE_RADIUS': self.template_radius,
+                        'SEARCH_RADIUS': self.search_radius,
+                    }
+                )
+                worker_args.append(arg_tuple)
+            
+            # Submit jobs and track progress with tqdm
+            futures = [executor.submit(correction_worker.worker_process, *args) for args in worker_args]
+            
+            self.progress_label.config(text="Workers processing frames...")
+            self.progressbar.config(maximum=len(futures), value=0)
+            
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    worker_results = future.result()
+                    if worker_results:
+                        all_results.extend(worker_results)
+                    self.progressbar.step(1)
+                    self.root.update_idletasks()
+                except Exception as e:
+                    print(f"A worker failed with an exception: {e}")
+                    import traceback
+                    traceback.print_exc()
+        
+        batch_duration = time.time() - batch_start_time
+        
+        # --- Aggregate Results and Verify Output ---
+        print("\n--- Verifying Output and Aggregating Results ---")
+        total_initial_errors = sum(r['initial'] for r in all_results if r)
+        total_final_errors = sum(r['final'] for r in all_results if r)
+        total_improved = sum(r['improved'] for r in all_results if r)
+        total_failed = sum(r['failed'] for r in all_results if r)
+        frames_processed = len(all_results) - sum(1 for r in all_results if r and r['skipped'])
+        frames_skipped = sum(1 for r in all_results if r and r['skipped'])
+        
+        missing_files = []
+        for frame_idx in frame_indices:
+            try:
+                original_flow_path = Path(self.flow_files[frame_idx])
+                expected_output_path = corrected_flow_dir / original_flow_path.name
+                if not expected_output_path.exists():
+                    missing_files.append((frame_idx, str(expected_output_path)))
+            except IndexError:
+                print(f"Warning: Verification failed for frame index {frame_idx}. Index out of range for flow files list.")
+        
+        if not missing_files:
+            print("Verification successful: All expected output files were found.")
+        else:
+            print(f"Verification FAILED: Found {len(missing_files)} missing output files.")
+            for idx, path in missing_files[:10]:
+                print(f"  - Missing: Frame {idx} at {path}")
+            if len(missing_files) > 10:
+                print(f"  ... and {len(missing_files) - 10} more.")
+
+        # --- Log Footer ---
+        total_corrected = total_initial_errors - total_final_errors
+        overall_success_rate = (total_corrected / total_initial_errors * 100) if total_initial_errors > 0 else 0
+        avg_time_per_frame = batch_duration / frame_count if frame_count > 0 else 0
+
+        print("-" * 65)
+        print(f"=== Multithreaded Batch Correction Complete ===")
+        print(f"Total time: {batch_duration:.2f}s ({avg_time_per_frame:.2f}s/frame)")
+        
+        # --- Reporting ---
+        summary_message = (
+            f"Multithreaded correction complete for {description} in {batch_duration:.2f}s.\n\n"
+            f"Frames Processed: {frames_processed}/{frame_count} on {len(chunks)} workers.\n"
+            f"Frames Skipped: {frames_skipped}\n"
+            f"Total Initial Errors: {total_initial_errors:,}\n"
+            f"Total Final Errors: {total_final_errors:,}\n"
+            f"Successfully Corrected: {total_corrected:,}\n"
+            f"Overall Success Rate: {overall_success_rate:.1f}%"
+        )
+        
+        # Add verification result to summary message
+        if not missing_files:
+            summary_message += "\n\nVerification successful: All corrected flow files were saved correctly."
+        else:
+            summary_message += f"\n\nVERIFICATION FAILED: {len(missing_files)} corrected flow files are missing."
+            summary_message += "\nPlease check the console output for a list of missing files."
+
+        if self.save_corrected_var.get() and frames_processed > 0:
+             summary_message += f"\n\nCorrected flows saved to:\n{corrected_flow_dir.resolve()}"
+             summary_message += "\n\nNOTE: The current view has NOT been updated. Please restart the visualizer on the '_corrected' directory to see the results."
+
+        messagebox.showinfo("Batch Complete", summary_message)
+        
+        # --- UI Cleanup ---
+        self.progress_label.config(text="")
+        self.progressbar.config(value=0)
+        self.correct_errors_btn.config(state=tk.NORMAL)
+        self.correct_all_frames_btn.config(state=tk.NORMAL)
+        self.correct_range_btn.config(state=tk.NORMAL)
+
     def generate_quality_frame_gpu(self, frame1, frame2, flow):
         """
         Generate a quality visualization frame using GPU (PyTorch) for acceleration.
         """
-
-        device = self.processor.device
-        h, w = frame1.shape[:2]
-
-        # --- 1. Prepare Tensors ---
-        # Convert inputs to PyTorch tensors and move to the selected device
-        frame1_t = torch.from_numpy(frame1).to(device).float() / 255.0
-        frame2_t = torch.from_numpy(frame2).to(device).float() / 255.0
-        flow_t = torch.from_numpy(flow).to(device).float()
-
-        # Ensure flow matches frame dimensions, scaling if necessary
-        fh, fw = flow_t.shape[:2]
-        if fh != h or fw != w:
-            flow_t = torch.nn.functional.interpolate(flow_t.permute(2, 0, 1).unsqueeze(0), size=(h, w), mode='bilinear', align_corners=False).squeeze(0).permute(1, 2, 0)
-            flow_t[..., 0] *= w / fw
-            flow_t[..., 1] *= h / fh
-
-        # --- 2. Calculate Target Coordinates ---
-        # Create coordinate grids
-        y_coords, x_coords = torch.meshgrid(torch.arange(h, device=device), torch.arange(w, device=device), indexing='ij')
-        
-        # Calculate target positions based on flow vectors
-        target_x = x_coords - flow_t[..., 0]
-        target_y = y_coords - flow_t[..., 1]
-        
-        # --- 3. Sample Target Colors using manual "floor" indexing to match CPU logic ---
-        # `grid_sample` with `mode='nearest'` rounds, while CPU logic truncates (`int()`).
-        # This discrepancy was the source of major inconsistencies. We now manually replicate
-        # the truncation ('floor') behavior on the GPU for 1:1 matching with the correction algorithm.
-        out_of_bounds_mask = (target_x < 0) | (target_x >= w) | (target_y < 0) | (target_y >= h)
-
-        # Truncate coordinates to integers (equivalent to `int()` in CPU code)
-        target_x_int = target_x.long()
-        target_y_int = target_y.long()
-
-        # Clamp coordinates to be within valid range to prevent indexing errors
-        target_x_clamped = torch.clamp(target_x_int, 0, w - 1)
-        target_y_clamped = torch.clamp(target_y_int, 0, h - 1)
-        
-        # Use advanced indexing to gather colors from the target frame. This is the GPU equivalent
-        # of `frame2[int(y), int(x)]`
-        sampled_colors = frame2_t[target_y_clamped, target_x_clamped]
-
-        # --- 4. Calculate Pixel Quality on GPU ---
-        src_colors = frame1_t
-        
-        # Euclidean distance
-        rgb_distance = torch.sqrt(torch.sum((src_colors - sampled_colors) ** 2, dim=-1))
-        rgb_max_dist = 1.732  # sqrt(3)
-        rgb_similarity = 1.0 - (rgb_distance / rgb_max_dist)
-        
-        # Normalized absolute difference
-        abs_diff = torch.mean(torch.abs(src_colors - sampled_colors), dim=-1)
-        abs_similarity = 1.0 - abs_diff
-        
-        # Cosine similarity
-        cosine_sim = torch.nn.functional.cosine_similarity(src_colors, sampled_colors, dim=-1)
-        cosine_similarity = (cosine_sim + 1.0) / 2.0  # Normalize to [0, 1]
-        
-        # Combine similarities
-        overall_similarity = (rgb_similarity + abs_similarity + cosine_similarity) / 3.0
-
-        # --- 5. Create Quality Map Image with Scaled Intensity ---
-        # Calculate potential intensity values for both channels across all pixels
-        # This mirrors the logic from the original CPU-based 'generate_quality_frame_fast'
-        green_intensity = torch.clamp((overall_similarity - 0.5) * 2.0, 0, 1)
-        red_intensity = torch.clamp(1.0 - overall_similarity, 0, 1)
-
-        # Create a mask for good vs. bad pixels
-        is_good_mask = overall_similarity > self.GOOD_QUALITY_THRESHOLD
-
-        # Create an empty frame tensor
-        quality_frame_t = torch.zeros_like(src_colors) # src_colors is (h, w, 3)
-
-        # Apply scaled green for good pixels
-        quality_frame_t[..., 1] = torch.where(is_good_mask, green_intensity, 0)
-        # Apply scaled red for bad pixels
-        quality_frame_t[..., 0] = torch.where(is_good_mask, 0, red_intensity)
-        
-        # Correctly handle out-of-bounds pixels by checking coordinates, not sampled color
-        red_color = torch.tensor([1.0, 0.0, 0.0], device=device)
-        quality_frame_t = torch.where(out_of_bounds_mask.unsqueeze(-1), red_color, quality_frame_t)
-
-        # Convert back to NumPy array for display
-        quality_frame = (quality_frame_t * 255).byte().cpu().numpy()
-        
-        return quality_frame
+        return correction_worker.generate_quality_frame_gpu(frame1, frame2, flow, self.processor.device, self.GOOD_QUALITY_THRESHOLD)
         
     def run_taa_processor(self):
         """
@@ -3271,7 +3089,7 @@ class FlowVisualizer:
             similarities = np.array(similarities)
             
             # Color coding
-            good_mask = similarities > 0.8
+            good_mask = similarities > self.GOOD_QUALITY_THRESHOLD
             
             # Good quality pixels - green
             good_indices = np.where(good_mask)[0]
