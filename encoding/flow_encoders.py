@@ -117,6 +117,39 @@ class GamedevFlowEncoder(FlowEncoder):
         return rgb_8bit.astype(np.uint8)
 
 
+class MotionVectorsFlowEncoder(FlowEncoder):
+    """
+    Motion Vectors flow encoder - clamped and normalized to 8-bit RG
+    - Clamp flow to [-64, +64] pixels
+    - Map to [0, 255] (UNORM 8-bit)
+    - Store in RG channels (R=horizontal, G=vertical)
+    """
+    
+    def __init__(self, clamp_range: float = 64.0):
+        self.clamp_range = clamp_range
+
+    def encode(self, flow: np.ndarray, width: int, height: int) -> np.ndarray:
+        """Encode optical flow in motion-vectors format"""
+        # Clamp to [-clamp_range, +clamp_range] range
+        clamped = np.clip(flow, -self.clamp_range, self.clamp_range)
+        
+        # Map [-clamp_range, +clamp_range] to [0, 1]
+        encoded = (clamped + self.clamp_range) / (2 * self.clamp_range)
+        encoded = np.clip(encoded, 0, 1)
+        
+        # Create RGB image
+        h, w = flow.shape[:2]
+        rgb = np.zeros((h, w, 3), dtype=np.float32)
+        rgb[:, :, 0] = encoded[:, :, 0]  # R channel: horizontal flow
+        rgb[:, :, 1] = encoded[:, :, 1]  # G channel: vertical flow
+        rgb[:, :, 2] = 0.0               # B channel: unused
+        
+        # Convert to 8-bit, handle NaN and inf values
+        rgb_8bit = rgb * 255
+        rgb_8bit = np.nan_to_num(rgb_8bit, nan=0.0, posinf=255.0, neginf=0.0)
+        return rgb_8bit.astype(np.uint8)
+
+
 class TorchvisionFlowEncoder(FlowEncoder):
     """
     Torchvision flow encoder - color wheel format
@@ -186,7 +219,8 @@ class FlowEncoderFactory:
     _encoders = {
         'hsv': HSVFlowEncoder,
         'gamedev': GamedevFlowEncoder,
-        'torchvision': TorchvisionFlowEncoder
+        'torchvision': TorchvisionFlowEncoder,
+        'motion-vectors': MotionVectorsFlowEncoder
     }
     
     @classmethod

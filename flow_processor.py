@@ -902,6 +902,10 @@ class VideoFlowProcessor:
         """Encode optical flow in gamedev format using encoding module"""
         return encode_flow(flow, width, height, 'gamedev')
     
+    def encode_motion_vectors_format(self, flow, width, height):
+        """Encode optical flow in motion vectors format using encoding module"""
+        return encode_flow(flow, width, height, 'motion-vectors')
+    
     def encode_torchvision_format(self, flow, width, height):
         """Encode optical flow using torchvision format using encoding module"""
         return encode_flow(flow, width, height, 'torchvision')
@@ -940,7 +944,7 @@ class VideoFlowProcessor:
         )
         
     def generate_output_filename(self, input_path, output_dir, start_time=None, duration=None, 
-                                start_frame=0, max_frames=1000, vertical=False, flow_only=False, taa=False):
+                                start_frame=0, max_frames=1000, vertical=False, flow_only=False, taa=False, lossless=False, uncompressed=False):
         """Generate automatic output filename based on parameters"""
         import os
         
@@ -982,14 +986,20 @@ class VideoFlowProcessor:
         elif vertical:
             parts.append("vert")
         
+        if uncompressed:
+            parts.append("uncompressed")
+        elif lossless:
+            parts.append("lossless")
+        
         # Join parts and add extension
-        filename = "_".join(parts) + ".mp4"
+        extension = ".avi" if lossless or uncompressed else ".mp4"
+        filename = "_".join(parts) + extension
         return os.path.join(results_dir, filename)
     
     def process_video(self, input_path, output_path, max_frames=1000, start_frame=0, 
                      start_time=None, duration=None, vertical=False, flow_only=False, taa=False, flow_format='gamedev', 
                      save_flow=None, force_recompute=False, use_flow_cache=None, auto_play=True,
-                     taa_compare=False, skip_lods=False):
+                     taa_compare=False, skip_lods=False, lossless=False, uncompressed=False):
         """Main processing function"""
         import os
         
@@ -1024,7 +1034,7 @@ class VideoFlowProcessor:
         if os.path.isdir(output_path):
             output_path = self.generate_output_filename(
                 input_path, output_path, start_time, duration, 
-                start_frame, max_frames, vertical, flow_only, taa
+                start_frame, max_frames, vertical, flow_only, taa, lossless=lossless, uncompressed=uncompressed
             )
             print(f"Auto-generated output filename: {os.path.basename(output_path)}")
         
@@ -1134,7 +1144,14 @@ class VideoFlowProcessor:
                     cache_save_format = 'npz'
         
         # Setup output video using processed frame dimensions
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        if uncompressed:
+            fourcc = 0
+            print("Using uncompressed video codec. Output will be .avi and file size will be very large.")
+        elif lossless:
+            fourcc = cv2.VideoWriter_fourcc(*'FFV1')
+            print("Using lossless FFV1 codec (ensure you have ffmpeg installed). Output will be .avi")
+        else:
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         
         if taa_compare:
             # For 6 videos (orig, flow, 4x TAA), use 2x3 grid (2 cols, 3 rows) for more square aspect
@@ -1240,6 +1257,8 @@ class VideoFlowProcessor:
                 flow_viz = self.encode_hsv_format(flow, width, height)
             elif flow_format == 'torchvision':
                 flow_viz = self.encode_torchvision_format(flow, width, height)
+            elif flow_format == 'motion-vectors':
+                flow_viz = self.encode_motion_vectors_format(flow, width, height)
             else:
                 flow_viz = self.encode_gamedev_format(flow, width, height)
             
@@ -1421,7 +1440,7 @@ def main():
                        help='Output only optical flow visualization (no original video)')
     parser.add_argument('--taa', action='store_true',
                        help='Add TAA (Temporal Anti-Aliasing) effect visualization using inverted optical flow from previous frame')
-    parser.add_argument('--flow-format', choices=['gamedev', 'hsv', 'torchvision'], default='gamedev',
+    parser.add_argument('--flow-format', choices=['gamedev', 'hsv', 'torchvision', 'motion-vectors'], default='gamedev',
                        help='Optical flow encoding format: gamedev (RG channels), hsv (standard visualization), or torchvision (color wheel)')
     parser.add_argument('--tile', action='store_true',
                        help='Enable tile-based processing: split frames into 1280x1280 square tiles (optimal for VideoFlow MOF model)')
@@ -1457,6 +1476,10 @@ def main():
                        help='Enable TAA comparison mode with multiple stabilization strengths')
     parser.add_argument('--skip-lods', action='store_true',
                        help='Skip LOD (Level-of-Detail) pyramid generation/loading for faster processing')
+    parser.add_argument('--lossless', action='store_true',
+                        help='Save the output video using a lossless codec (FFV1 in .avi container)')
+    parser.add_argument('--uncompressed', action='store_true',
+                        help='Save the output video completely uncompressed (raw frames in .avi container)')
     
     args = parser.parse_args()
     
@@ -1706,7 +1729,8 @@ def main():
                               flow_only=args.flow_only, taa=args.taa, flow_format=args.flow_format, save_flow=args.save_flow,
                               force_recompute=args.force_recompute, use_flow_cache=args.use_flow_cache, 
                               auto_play=not args.no_autoplay,
-                              taa_compare=args.taa_compare, skip_lods=args.skip_lods)
+                              taa_compare=args.taa_compare, skip_lods=args.skip_lods,
+                              lossless=args.lossless, uncompressed=args.uncompressed)
         
         if not args.no_autoplay and not args.taa_compare:
             print("\n✓ VideoFlow processing completed successfully! Video should open automatically.")
