@@ -174,7 +174,8 @@ class FlowRunnerApp(QWidget):
             ('flow_only', False, 'Flow only', 'Output only optical flow without video composition'),
             ('taa', True, 'TAA', 'Apply Temporal Anti-Aliasing for smoother results'),
             ('lossless', False, 'Lossless', 'Use lossless compression (FFV1)'),
-            ('uncompressed', False, 'Uncompressed', 'Save without any compression (raw format)')
+            ('uncompressed', False, 'Uncompressed', 'Save without any compression (raw format)'),
+            ('skip_lods', False, 'Skip LODs', 'Skip Level of Detail (LOD) generation for faster processing')
         ]
         
         row = 1
@@ -375,16 +376,68 @@ class FlowRunnerApp(QWidget):
         preview_title = SubtitleLabel("Video Preview")
         preview_layout.addWidget(preview_title)
         
-        # Video display
-        self.video_label = QLabel()
-        self.video_label.setMinimumSize(400, 300)
-        self.video_label.setStyleSheet("border: 1px solid gray; background-color: black;")
+        # Video display container
+        self.video_container = QWidget()
+        self.video_container.setMinimumSize(400, 300)
+        self.video_container.setStyleSheet("border: 1px solid gray; background-color: black;")
+        
+        # Video label inside container
+        self.video_label = QLabel(self.video_container)
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setText("No video loaded")
-        preview_layout.addWidget(self.video_label)
+        self.video_label.setStyleSheet("border: none; background-color: black;")
         
-        # Simple video info only - no controls
-        # Initialize range values for processing
+        # Control buttons style
+        button_style = """
+            QPushButton {
+                background-color: rgba(0, 0, 0, 150);
+                border: 2px solid white;
+                border-radius: 20px;
+                color: white;
+            }
+            QPushButton:hover {
+                background-color: rgba(0, 0, 0, 200);
+            }
+        """
+        
+        # Pause/Play button in top-right corner
+        self.pause_play_btn = PushButton(self.video_container)
+        self.pause_play_btn.setIcon(qta.icon('fa5s.pause'))
+        self.pause_play_btn.setFixedSize(40, 40)
+        self.pause_play_btn.setStyleSheet(button_style)
+        self.pause_play_btn.clicked.connect(self.toggle_video_playback)
+        self.pause_play_btn.hide()  # Hidden until video is loaded
+        
+        # Restart button next to pause button
+        self.restart_btn = PushButton(self.video_container)
+        self.restart_btn.setIcon(qta.icon('fa5s.undo'))
+        self.restart_btn.setFixedSize(40, 40)
+        self.restart_btn.setStyleSheet(button_style)
+        self.restart_btn.setToolTip("Restart video from beginning")
+        self.restart_btn.clicked.connect(self.restart_video)
+        self.restart_btn.hide()  # Hidden until video is loaded
+        
+        # Video statistics in bottom-right corner
+        self.video_stats_label = QLabel(self.video_container)
+        self.video_stats_label.setStyleSheet("""
+            QLabel {
+                background-color: rgba(0, 0, 0, 150);
+                border: 1px solid white;
+                border-radius: 5px;
+                color: white;
+                padding: 5px;
+                font-family: 'Consolas', monospace;
+                font-size: 10px;
+            }
+        """)
+        self.video_stats_label.setText("Frame: 0/0\nTime: 0.00s")
+        self.video_stats_label.hide()  # Hidden until video is loaded
+        
+        preview_layout.addWidget(self.video_container)
+        
+        # Initialize video playback state
+        self.is_video_playing = False
+        self.current_frame_number = 0
         self.range_start = 0
         self.range_end = 100
         
@@ -657,10 +710,31 @@ class FlowRunnerApp(QWidget):
         self.current_frame = frame
         self.total_frames = total_frames
         self.fps = fps
+        self.current_frame_number = 0
         
         # Update UI
         self.display_frame(frame)
         self.frame_info_label.setText(f"Total frames: {total_frames}, FPS: {fps:.2f}, Duration: {total_frames/fps:.2f}s")
+        
+        # Show video controls and stats
+        self.pause_play_btn.show()
+        self.restart_btn.show()
+        self.video_stats_label.show()
+        self.update_video_layout()
+        
+        # Auto-start video playback
+        self.is_video_playing = True
+        self.pause_play_btn.setIcon(qta.icon('fa5s.pause'))
+        
+        # Initialize and show stats
+        self.update_video_stats()
+        
+        # Create and start timer for playback
+        if not hasattr(self, 'video_timer'):
+            self.video_timer = QTimer()
+            self.video_timer.timeout.connect(self.update_video_frame)
+        
+        self.video_timer.start(int(1000 / self.fps))
         
         # Initialize range values for processing
         self.range_start = 0
@@ -681,14 +755,137 @@ class FlowRunnerApp(QWidget):
         # Scale to fit label while maintaining aspect ratio
         pixmap = QPixmap.fromImage(q_image)
         scaled_pixmap = pixmap.scaled(
-            self.video_label.size(), 
+            self.video_container.size(), 
             Qt.AspectRatioMode.KeepAspectRatio, 
             Qt.TransformationMode.SmoothTransformation
         )
         
         self.video_label.setPixmap(scaled_pixmap)
+        self.update_video_layout()
+        
+        # Update stats if video is loaded (for manual frame changes)
+        if hasattr(self, 'total_frames') and self.total_frames > 0:
+            self.update_video_stats()
 
-    
+    def update_video_layout(self):
+        """Update video container layout and button position"""
+        if not hasattr(self, 'video_container'):
+            return
+            
+        # Resize video label to fill container
+        self.video_label.resize(self.video_container.size())
+        
+        container_width = self.video_container.width()
+        container_height = self.video_container.height()
+        
+        # Position restart button in top-right corner
+        restart_x = container_width - self.restart_btn.width() - 10
+        restart_y = 10
+        self.restart_btn.move(restart_x, restart_y)
+        
+        # Position pause button next to restart button
+        pause_x = restart_x - self.pause_play_btn.width() - 5
+        pause_y = 10
+        self.pause_play_btn.move(pause_x, pause_y)
+        
+        # Position video statistics in bottom-right corner
+        self.video_stats_label.adjustSize()  # Resize to fit content
+        stats_x = container_width - self.video_stats_label.width() - 10
+        stats_y = container_height - self.video_stats_label.height() - 10
+        self.video_stats_label.move(stats_x, stats_y)
+
+    def resizeEvent(self, event):
+        """Handle window resize"""
+        super().resizeEvent(event)
+        if hasattr(self, 'video_container'):
+            QTimer.singleShot(1, self.update_video_layout)
+
+    def toggle_video_playback(self):
+        """Toggle video playback"""
+        if not self.video_path or self.total_frames == 0:
+            return
+            
+        if self.is_video_playing:
+            # Pause playback
+            if hasattr(self, 'video_timer'):
+                self.video_timer.stop()
+            self.is_video_playing = False
+            self.pause_play_btn.setIcon(qta.icon('fa5s.play'))
+        else:
+            # Start playback
+            self.is_video_playing = True
+            self.pause_play_btn.setIcon(qta.icon('fa5s.pause'))
+            
+            # Create timer for playback
+            if not hasattr(self, 'video_timer'):
+                self.video_timer = QTimer()
+                self.video_timer.timeout.connect(self.update_video_frame)
+            
+            self.video_timer.start(int(1000 / self.fps))  # Timer interval based on video FPS
+
+    def restart_video(self):
+        """Restart video from beginning"""
+        if not self.video_path or self.total_frames == 0:
+            return
+            
+        self.current_frame_number = 0
+        self.load_and_display_frame(0)
+        self.update_video_stats()
+        
+        # If video was playing, continue playing from beginning
+        if self.is_video_playing and hasattr(self, 'video_timer'):
+            self.video_timer.start(int(1000 / self.fps))
+
+    def update_video_frame(self):
+        """Update the current video frame during playback"""
+        if not self.is_video_playing:
+            return
+            
+        # Load and display current frame
+        self.load_and_display_frame(self.current_frame_number)
+        
+        # Update video statistics
+        self.update_video_stats()
+        
+        # Move to next frame
+        self.current_frame_number += 1
+        
+        # Loop back to beginning when reaching the end
+        if self.current_frame_number >= self.total_frames:
+            self.current_frame_number = 0
+
+    def update_video_stats(self):
+        """Update video statistics display"""
+        if not hasattr(self, 'video_stats_label') or self.total_frames == 0:
+            return
+            
+        current_time = self.current_frame_number / self.fps
+        total_time = self.total_frames / self.fps
+        
+        stats_text = f"Frame: {self.current_frame_number + 1}/{self.total_frames}\nTime: {current_time:.2f}s / {total_time:.2f}s"
+        self.video_stats_label.setText(stats_text)
+
+    def load_and_display_frame(self, frame_number):
+        """Load and display a specific frame"""
+        if not self.video_path or not os.path.exists(self.video_path):
+            return
+            
+        try:
+            cap = cv2.VideoCapture(str(self.video_path))
+            if not cap.isOpened():
+                cap.release()
+                return
+                
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+            ret, frame = cap.read()
+            
+            if ret:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                self.display_frame(frame)
+                
+            cap.release()
+        except Exception as e:
+            print(f"Error loading frame {frame_number}: {e}")
 
     def generate_command(self, extra_flags=None):
         """Generate the flow_processor command based on current settings"""
@@ -839,6 +1036,11 @@ class FlowRunnerApp(QWidget):
     def closeEvent(self, event):
         """Handle application close"""
         self.save_settings()
+        
+        # Stop video playback
+        if hasattr(self, 'video_timer') and self.video_timer.isActive():
+            self.video_timer.stop()
+        self.is_video_playing = False
         
         # Clean up threads
         if self.video_thread and self.video_thread.isRunning():
