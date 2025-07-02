@@ -269,7 +269,7 @@ class FlowRunnerApp(QWidget):
         # Flow format
         flow_layout.addWidget(BodyLabel("Flow format:"), 2, 0)
         self.flow_format_combo = ComboBox()
-        self.flow_format_combo.addItems(['color', 'grayscale', 'motion-vectors'])
+        self.flow_format_combo.addItems(['gamedev', 'hsv', 'torchvision', 'motion-vectors'])
         self.flow_format_combo.setToolTip("Output format for optical flow visualization")
         self.flow_format_combo.currentTextChanged.connect(self.on_setting_changed)
         flow_layout.addWidget(self.flow_format_combo, 2, 1)
@@ -539,7 +539,7 @@ class FlowRunnerApp(QWidget):
             # Load combo settings
             combo_settings = [
                 (self.device_combo, 'device', 'cuda', ['cpu', 'cuda']),
-                (self.flow_format_combo, 'flow_format', 'color', ['color', 'grayscale', 'motion-vectors']),
+                (self.flow_format_combo, 'flow_format', 'motion-vectors', ['gamedev', 'hsv', 'torchvision', 'motion-vectors']),
                 (self.save_flow_combo, 'save_flow', 'npz', ['none', 'npz', 'flo', 'both']),
                 (self.time_control_combo, 'time_control', 'Control by frame', ['Control by frame', 'Control by time'])
             ]
@@ -933,7 +933,7 @@ class FlowRunnerApp(QWidget):
             cmd_parts.extend(["--device", self.device_combo.currentText()])
         
         # Flow format
-        if self.flow_format_combo.currentText() != 'color':
+        if self.flow_format_combo.currentText() != 'gamedev':
             cmd_parts.extend(["--flow-format", self.flow_format_combo.currentText()])
         
         # Save flow format
