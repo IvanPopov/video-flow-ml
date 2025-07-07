@@ -1151,7 +1151,7 @@ class VideoFlowProcessor:
             fourcc = cv2.VideoWriter_fourcc(*'FFV1')
             print("Using lossless FFV1 codec (ensure you have ffmpeg installed). Output will be .avi")
         else:
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v') # mp4v
         
         if taa_compare:
             # For 6 videos (orig, flow, 4x TAA), use 2x3 grid (2 cols, 3 rows) for more square aspect
@@ -1161,7 +1161,7 @@ class VideoFlowProcessor:
             canvas_h = int(canvas_w / (4/3))  # Target 4:3 aspect ratio instead of 16:9
             output_size = (canvas_w, canvas_h)
         elif flow_only:
-            output_size = (width, height)  # Flow only: processed dimensions
+            output_size = (width, height * 2)  # Vertical stack: Original on top, Flow on bottom
         elif taa:
             if vertical:
                 output_size = (width, height * 4)  # Vertical: same width, quad height (Original + Flow + TAA+Flow + TAA Simple)

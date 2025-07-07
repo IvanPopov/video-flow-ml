@@ -81,8 +81,7 @@ class VideoComposer:
         flow_bgr = cv2.cvtColor(flow_viz, cv2.COLOR_RGB2BGR)
         
         if flow_only:
-            # Return only optical flow without text overlays
-            return flow_bgr
+            return np.concatenate([orig_bgr, flow_bgr], axis=0)
         
         # Add text overlays (only when not flow_only)
         mode_text = " (Fast)" if fast_mode else ""
