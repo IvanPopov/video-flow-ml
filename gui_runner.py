@@ -919,7 +919,7 @@ class FlowRunnerApp(QWidget):
                 cmd_parts.extend(["--start-frame", str(int(self.start_frame_spin.value()))])
             
             if self.max_frames_spin.value() > 0:
-                cmd_parts.extend(["--max-frames", str(int(self.max_frames_spin.value()))])
+                cmd_parts.extend(["--frames", str(int(self.max_frames_spin.value()))])
         else:  # Control by time
             # Use time-based parameters
             if self.start_time_spin.value() > 0:

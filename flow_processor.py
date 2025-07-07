@@ -494,7 +494,8 @@ class VideoFlowProcessor:
             parts.append("lossless")
         
         # Join parts and add extension
-        extension = ".avi" if lossless or uncompressed else ".mp4"
+        # MJPG codec requires AVI container, MP4 container doesn't support it
+        extension = ".avi" if lossless or uncompressed else ".avi"  # Use AVI for MJPG compatibility
         filename = "_".join(parts) + extension
         return os.path.join(results_dir, filename)
     
@@ -653,7 +654,8 @@ class VideoFlowProcessor:
             fourcc = cv2.VideoWriter_fourcc(*'FFV1')
             print("Using lossless FFV1 codec (ensure you have ffmpeg installed). Output will be .avi")
         else:
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v') # mp4v
+            fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+            print("Using MJPG codec. Output will be .avi for compatibility.")
         
         if taa_compare:
             # For 6 videos (orig, flow, 4x TAA), use 2x3 grid (2 cols, 3 rows) for more square aspect
@@ -1197,7 +1199,7 @@ def main():
     
     try:
         # Create output filename with frame/time range if not specified
-        if args.output == 'videoflow_result.mp4':
+        if args.output == 'videoflow_result.mp4':  # Default output pattern (will be changed to .avi)
             # Default output name, add range info
             mode = ""
             if args.fast:
@@ -1220,11 +1222,11 @@ def main():
                 
                 start_time_str = f"{args.start_time:.1f}s" if args.start_time is not None else f"{start_frame}f"
                 duration_str = f"{args.duration:.1f}s" if args.duration is not None else f"{max_frames}f"
-                args.output = f"videoflow_{start_time_str}_{duration_str}{mode}.mp4"
+                args.output = f"videoflow_{start_time_str}_{duration_str}{mode}.avi"
             else:
                 # Use frame-based naming
                 end_frame = args.start_frame + args.frames - 1
-                args.output = f"videoflow_{args.start_frame:06d}_{end_frame:06d}{mode}.mp4"
+                args.output = f"videoflow_{args.start_frame:06d}_{end_frame:06d}{mode}.avi"
         
         processor.process_video(args.input, args.output, max_frames=args.frames, start_frame=args.start_frame,
                               start_time=args.start_time, duration=args.duration, vertical=args.vertical, 
