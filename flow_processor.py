@@ -29,7 +29,7 @@ from effects import TAAProcessor, apply_taa_effect
 from storage import FlowCacheManager
 from visualization import VideoComposer, create_side_by_side, add_text_overlay, create_video_grid
 from filtering import AdaptiveOpticalFlowKalmanFilter
-from processing import VideoFlowInference
+from processing.flow_inference import VideoFlowInference
 
 
 class VideoFlowProcessor:
