@@ -30,13 +30,16 @@ from storage import FlowCacheManager
 from visualization import VideoComposer, create_side_by_side, add_text_overlay, create_video_grid
 from filtering import AdaptiveOpticalFlowKalmanFilter
 from processing.flow_inference import VideoFlowInference
+from processing.memflow_inference import MemFlowInference
 
 
 class VideoFlowProcessor:
     def __init__(self, device='auto', fast_mode=False, tile_mode=False, sequence_length=5, flow_smoothing=0.0,
                  kalman_process_noise=0.01, kalman_measurement_noise=0.1, kalman_prediction_confidence=0.7,
-                 kalman_motion_model='constant_acceleration', kalman_outlier_threshold=3.0, kalman_min_track_length=3):
-        """Initialize VideoFlow processor with pure VideoFlow implementation"""
+                 kalman_motion_model='constant_acceleration', kalman_outlier_threshold=3.0, kalman_min_track_length=3,
+                 flow_model='videoflow', model_path=None, stage='sintel', 
+                 vf_dataset='sintel', vf_architecture='mof', vf_variant='standard'):
+        """Initialize optical flow processor with model selection support"""
         # Initialize device manager
         self.device_manager = DeviceManager()
         self.device = self.device_manager.get_device(device)
@@ -45,15 +48,44 @@ class VideoFlowProcessor:
         self.tile_mode = tile_mode
         self.sequence_length = sequence_length
         self.flow_smoothing = flow_smoothing
+        self.flow_model = flow_model.lower()
+        self.stage = stage
+        
+        # VideoFlow specific parameters
+        self.vf_dataset = vf_dataset
+        self.vf_architecture = vf_architecture
+        self.vf_variant = vf_variant
+        
         self.previous_smoothed_flow = None  # For temporal flow smoothing
         
-        # Initialize VideoFlow inference engine
-        self.inference_engine = VideoFlowInference(
-            device=self.device,
-            fast_mode=fast_mode,
-            tile_mode=tile_mode,
-            sequence_length=sequence_length
-        )
+        # Initialize inference engine based on selected model
+        if self.flow_model == 'memflow':
+            # Determine model path for MemFlow
+            if model_path is None:
+                model_path = f'MemFlow_ckpt/MemFlowNet_{stage}.pth'
+            
+            self.inference_engine = MemFlowInference(
+                device=self.device,
+                model_path=model_path,
+                stage=stage,
+                sequence_length=sequence_length
+            )
+            print(f"Using MemFlow model: {model_path}")
+        elif self.flow_model == 'videoflow':
+            # VideoFlow with configurable dataset and architecture
+            self.inference_engine = VideoFlowInference(
+                device=self.device,
+                fast_mode=fast_mode,
+                tile_mode=tile_mode,
+                sequence_length=sequence_length,
+                dataset=vf_dataset,
+                architecture=vf_architecture,
+                variant=vf_variant
+            )
+            model_variant_str = f"_{vf_variant}" if vf_variant == 'noise' and vf_dataset == 'things' else ""
+            print(f"Using VideoFlow model: {vf_architecture.upper()}_{vf_dataset}{model_variant_str}.pth")
+        else:
+            raise ValueError(f"Unsupported flow model: {flow_model}. Choose 'videoflow' or 'memflow'")
         
         # Kalman filter parameters
         self.kalman_process_noise = kalman_process_noise
@@ -77,16 +109,26 @@ class VideoFlowProcessor:
         # Initialize video composer
         self.video_composer = VideoComposer()
         
-        print(f"VideoFlow Processor initialized - Device: {self.device}")
+        print(f"Optical Flow Processor initialized - Device: {self.device}")
         self.device_manager.print_device_info()
+        print(f"Model: {self.flow_model.upper()}")
         print(f"Fast mode: {fast_mode}")
-        print(f"Tile mode: {tile_mode}")
+        if self.flow_model == 'videoflow':
+            print(f"Tile mode: {tile_mode}")
+        else:
+            print(f"Tile mode: Not used (MemFlow processes full frames)")
         print(f"Sequence length: {sequence_length} frames")
         if flow_smoothing > 0:
             print(f"Flow smoothing: {flow_smoothing:.2f} (color-consistency stabilization enabled)")
         
+    def load_model(self):
+        """Load optical flow model (VideoFlow or MemFlow)"""
+        self.inference_engine.load_model()
+        
     def load_videoflow_model(self):
-        """Load VideoFlow MOF model"""
+        """Load VideoFlow MOF model (legacy method - use load_model instead)"""
+        if self.flow_model != 'videoflow':
+            raise RuntimeError("Cannot call load_videoflow_model when using MemFlow. Use load_model() instead.")
         self.inference_engine.load_model()
         
     def get_video_fps(self, video_path):
@@ -184,8 +226,13 @@ class VideoFlowProcessor:
         return self.cache_manager.file_handler.load_flow_npz(filename)
     
     def generate_flow_cache_path(self, input_path, start_frame, max_frames, sequence_length, fast_mode, tile_mode):
-        """Generate cache directory path based on video processing parameters"""
-        return self.cache_manager.generate_cache_path(input_path, start_frame, max_frames, sequence_length, fast_mode, tile_mode)
+        """Generate cache directory path based on video processing parameters and model configuration"""
+        return self.cache_manager.generate_cache_path(
+            input_path, start_frame, max_frames, sequence_length, fast_mode, tile_mode,
+            model=self.flow_model, dataset=self.vf_dataset if self.flow_model == 'videoflow' else self.stage,
+            architecture=self.vf_architecture if self.flow_model == 'videoflow' else 'none',
+            variant=self.vf_variant if self.flow_model == 'videoflow' else 'none'
+        )
     
     def check_flow_cache_exists(self, cache_dir, max_frames):
         """Check if complete flow cache exists for the requested number of frames"""
@@ -620,9 +667,9 @@ class VideoFlowProcessor:
         elif skip_lods:
             print("Skipping LOD pyramid check/generation (--skip-lods enabled)")
         
-        # Load VideoFlow model only if we need to compute flow
+        # Load optical flow model only if we need to compute flow
         if not use_cached_flow:
-            self.load_videoflow_model()
+            self.load_model()
         
         # Setup flow saving directory if requested or if we need to cache
         flow_base_filename = None
@@ -921,7 +968,7 @@ class VideoFlowProcessor:
         return self.video_composer.create_video_grid(frames_dict, grid_shape, target_aspect)
 
 def main():
-    parser = argparse.ArgumentParser(description='VideoFlow Optical Flow Processor')
+    parser = argparse.ArgumentParser(description='Optical Flow Processor (VideoFlow/MemFlow)')
     parser.add_argument('--input', default='big_buck_bunny_720p_h264.mov',
                        help='Input video file')
     parser.add_argument('--output', default='results',
@@ -984,6 +1031,20 @@ def main():
                         help='Save the output video using a lossless codec (FFV1 in .avi container)')
     parser.add_argument('--uncompressed', action='store_true',
                         help='Save the output video completely uncompressed (raw frames in .avi container)')
+    parser.add_argument('--model', choices=['videoflow', 'memflow'], default='videoflow',
+                        help='Choose optical flow model: videoflow (VideoFlow MOF) or memflow (MemFlow)')
+    parser.add_argument('--model-path', type=str, default=None,
+                        help='Custom path to model weights (only for MemFlow)')
+    parser.add_argument('--stage', choices=['sintel', 'things', 'kitti'], default='sintel',
+                        help='Training stage/dataset (default: sintel, affects model selection for MemFlow)')
+    
+    # VideoFlow specific options
+    parser.add_argument('--vf-dataset', choices=['sintel', 'things', 'kitti'], default='sintel',
+                        help='Dataset for VideoFlow model (default: sintel)')
+    parser.add_argument('--vf-architecture', choices=['mof', 'bof'], default='mof',
+                        help='VideoFlow architecture: mof (MOFNet) or bof (BOFNet) (default: mof)')
+    parser.add_argument('--vf-variant', choices=['standard', 'noise'], default='standard',
+                        help='VideoFlow model variant: standard or noise (288960noise) (default: standard)')
     
     args = parser.parse_args()
     
@@ -991,17 +1052,54 @@ def main():
         print(f"Error: Input video not found: {args.input}")
         return
     
-    if not os.path.exists('VideoFlow'):
-        print("Error: VideoFlow repository not found. Please run:")
-        print("git clone https://github.com/XiaoyuShi97/VideoFlow.git")
-        return
+    # Check dependencies based on selected model
+    if args.model == 'videoflow':
+        if not os.path.exists('VideoFlow'):
+            print("Error: VideoFlow repository not found. Please run:")
+            print("git clone https://github.com/XiaoyuShi97/VideoFlow.git")
+            return
         
-    if not os.path.exists('VideoFlow_ckpt/MOF_sintel.pth'):
-        print("Error: VideoFlow model weights not found.")
-        print("Please download MOF_sintel.pth from:")
-        print("https://github.com/XiaoyuShi97/VideoFlow")
-        print("and place it in VideoFlow_ckpt/")
-        return
+        # Build VideoFlow model filename based on parameters
+        arch_upper = args.vf_architecture.upper()
+        dataset = args.vf_dataset
+        if args.vf_variant == 'noise' and args.vf_dataset == 'things':
+            model_filename = f"{arch_upper}_{dataset}_288960noise.pth"
+        else:
+            model_filename = f"{arch_upper}_{dataset}.pth"
+        
+        vf_model_path = f"VideoFlow_ckpt/{model_filename}"
+        
+        if not os.path.exists(vf_model_path):
+            print(f"Error: VideoFlow model weights not found: {vf_model_path}")
+            print("Available VideoFlow models in VideoFlow_ckpt/:")
+            if os.path.exists('VideoFlow_ckpt'):
+                for f in os.listdir('VideoFlow_ckpt'):
+                    if f.endswith('.pth'):
+                        print(f"  - {f}")
+            else:
+                print("  No VideoFlow_ckpt directory found")
+            return
+    elif args.model == 'memflow':
+        if not os.path.exists('MemFlow'):
+            print("Error: MemFlow repository not found. Please ensure MemFlow is properly integrated.")
+            return
+            
+        # Check for MemFlow weights
+        if args.model_path is None:
+            model_path = f'MemFlow_ckpt/MemFlowNet_{args.stage}.pth'
+        else:
+            model_path = args.model_path
+            
+        if not os.path.exists(model_path):
+            print(f"Error: MemFlow model weights not found: {model_path}")
+            print(f"Available MemFlow models in MemFlow_ckpt/:")
+            if os.path.exists('MemFlow_ckpt'):
+                for f in os.listdir('MemFlow_ckpt'):
+                    if f.endswith('.pth'):
+                        print(f"  - {f}")
+            else:
+                print("  No MemFlow_ckpt directory found")
+            return
     
     # Special mode: interactive flow visualizer
     if args.interactive:
@@ -1015,7 +1113,10 @@ def main():
                                       kalman_prediction_confidence=args.kalman_prediction_confidence,
                                       kalman_motion_model=args.kalman_motion_model,
                                       kalman_outlier_threshold=args.kalman_outlier_threshold,
-                                      kalman_min_track_length=args.kalman_min_track_length)
+                                      kalman_min_track_length=args.kalman_min_track_length,
+                                      flow_model=args.model, model_path=args.model_path, stage=args.stage,
+                                      vf_dataset=args.vf_dataset, vf_architecture=args.vf_architecture, 
+                                      vf_variant=args.vf_variant)
         
         # Handle time-based parameters for frame extraction
         if args.start_time is not None or args.duration is not None:
@@ -1056,7 +1157,7 @@ def main():
             print(f"Computing optical flow and saving to cache: {flow_cache_dir}")
             
             # Load model and compute flow
-            processor.load_videoflow_model()
+            processor.load_model()
             os.makedirs(flow_cache_dir, exist_ok=True)
             
             # Compute flow for all frames
@@ -1113,8 +1214,17 @@ def main():
             "--video", args.input,
             "--flow-dir", flow_cache_dir,
             "--start-frame", str(start_frame),
-            "--max-frames", str(len(frames))
+            "--max-frames", str(len(frames)),
+            "--model", args.model,
+            "--stage", args.stage,
+            "--vf-dataset", args.vf_dataset,
+            "--vf-architecture", args.vf_architecture,
+            "--vf-variant", args.vf_variant
         ]
+        
+        # Add model path if specified
+        if args.model_path:
+            visualizer_cmd.extend(["--model-path", args.model_path])
         
         try:
             subprocess.run(visualizer_cmd, check=True)
@@ -1172,7 +1282,10 @@ def main():
         
         # Create temporary processor just for tile calculation
         temp_processor = VideoFlowProcessor(device='cpu', fast_mode=False, tile_mode=True, 
-                                          sequence_length=args.sequence_length, flow_smoothing=0.0)
+                                          sequence_length=args.sequence_length, flow_smoothing=0.0,
+                                          flow_model=args.model, model_path=args.model_path, stage=args.stage,
+                                          vf_dataset=args.vf_dataset, vf_architecture=args.vf_architecture, 
+                                          vf_variant=args.vf_variant)
         
         print(f"\nTile grid analysis:")
         tile_width, tile_height, cols, rows, tiles_info = temp_processor.calculate_tile_grid(width, height)
@@ -1195,7 +1308,10 @@ def main():
                                   kalman_prediction_confidence=args.kalman_prediction_confidence,
                                   kalman_motion_model=args.kalman_motion_model,
                                   kalman_outlier_threshold=args.kalman_outlier_threshold,
-                                  kalman_min_track_length=args.kalman_min_track_length)
+                                  kalman_min_track_length=args.kalman_min_track_length,
+                                  flow_model=args.model, model_path=args.model_path, stage=args.stage,
+                                  vf_dataset=args.vf_dataset, vf_architecture=args.vf_architecture, 
+                                  vf_variant=args.vf_variant)
     
     try:
         # Create output filename with frame/time range if not specified
@@ -1236,10 +1352,11 @@ def main():
                               taa_compare=args.taa_compare, skip_lods=args.skip_lods,
                               lossless=args.lossless, uncompressed=args.uncompressed)
         
+        model_name = args.model.upper()
         if not args.no_autoplay and not args.taa_compare:
-            print("\n✓ VideoFlow processing completed successfully! Video should open automatically.")
+            print(f"\n✓ {model_name} processing completed successfully! Video should open automatically.")
         else:
-            print("\n✓ VideoFlow processing completed successfully!")
+            print(f"\n✓ {model_name} processing completed successfully!")
         
     except Exception as e:
         print(f"\n✗ Error: {e}")

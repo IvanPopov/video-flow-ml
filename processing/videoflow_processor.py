@@ -31,7 +31,8 @@ class VideoFlowProcessor:
     Uses VideoFlowCore internally for actual model inference.
     """
     
-    def __init__(self, device, fast_mode=False, tile_mode=False, sequence_length=5):
+    def __init__(self, device, fast_mode=False, tile_mode=False, sequence_length=5,
+                 dataset='sintel', architecture='mof', variant='standard'):
         """
         Initialize VideoFlow processor
         
@@ -40,20 +41,29 @@ class VideoFlowProcessor:
             fast_mode: Enable fast mode with reduced model complexity
             tile_mode: Enable tile-based processing for large frames
             sequence_length: Number of frames to use in sequence for inference
+            dataset: Training dataset ('sintel', 'things', 'kitti')
+            architecture: Model architecture ('mof' for MOFNet, 'bof' for BOFNet)
+            variant: Model variant ('standard' or 'noise' for things_288960noise)
         """
         self.device = device
         self.fast_mode = fast_mode
         self.tile_mode = tile_mode
         self.sequence_length = sequence_length
+        self.dataset = dataset
+        self.architecture = architecture
+        self.variant = variant
         
-        # Initialize core inference engine
-        self.core = VideoFlowCore(device, fast_mode)
+        # Initialize core inference engine with model configuration
+        self.core = VideoFlowCore(device, fast_mode, dataset, architecture, variant)
         
         print(f"VideoFlow Processor initialized:")
         print(f"  Device: {device}")
         print(f"  Fast mode: {fast_mode}")
         print(f"  Tile mode: {tile_mode}")
         print(f"  Sequence length: {sequence_length}")
+        print(f"  Dataset: {dataset}")
+        print(f"  Architecture: {architecture.upper()}")
+        print(f"  Variant: {variant}")
     
     def load_model(self):
         """Load VideoFlow MOF model using core engine"""

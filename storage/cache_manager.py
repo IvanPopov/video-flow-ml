@@ -170,9 +170,24 @@ class FlowCacheManager:
         self.lod_generator = LODGenerator()
     
     def generate_cache_path(self, input_path: str, start_frame: int, max_frames: int, 
-                          sequence_length: int, fast_mode: bool, tile_mode: bool) -> str:
-        """Generate cache directory path based on video processing parameters"""
+                          sequence_length: int, fast_mode: bool, tile_mode: bool,
+                          model: str = 'videoflow', dataset: str = 'sintel', 
+                          architecture: str = 'mof', variant: str = 'standard') -> str:
+        """Generate cache directory path based on video processing parameters and model configuration"""
         video_name = Path(input_path).stem
+        
+        # Model configuration parameters - include all parameters for uniqueness
+        model_params = [model]
+        if model == 'videoflow':
+            # Always include all VideoFlow parameters to ensure unique cache paths
+            model_params.append(architecture)
+            model_params.append(dataset)
+            model_params.append(variant)
+        elif model == 'memflow':
+            # Always include dataset for MemFlow
+            model_params.append(dataset)
+        
+        # Processing parameters
         cache_params = [
             f"seq{sequence_length}",
             f"start{start_frame}",
@@ -183,9 +198,11 @@ class FlowCacheManager:
             cache_params.append("fast")
         if tile_mode:
             cache_params.append("tile")
-            
+        
+        # Combine model and processing parameters
+        model_id = "_".join(model_params)
         cache_id = "_".join(cache_params)
-        cache_dir_name = f"{video_name}_flow_cache_{cache_id}"
+        cache_dir_name = f"{video_name}_flow_cache_{model_id}_{cache_id}"
         
         cache_path = Path(input_path).parent / cache_dir_name
         return str(cache_path)

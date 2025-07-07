@@ -37,12 +37,16 @@ from flow_processor import VideoFlowProcessor
 import correction_worker
 
 class FlowVisualizer:
-    def __init__(self, video_path, flow_dir, start_frame=0, max_frames=None):
+    def __init__(self, video_path, flow_dir, start_frame=0, max_frames=None, 
+                 flow_model='videoflow', model_path=None, stage='sintel',
+                 vf_dataset='sintel', vf_architecture='mof', vf_variant='standard'):
         self.video_path = video_path
         self.flow_dir = flow_dir
         self.start_frame = start_frame
         self.max_frames = max_frames
-        self.processor = VideoFlowProcessor()
+        self.processor = VideoFlowProcessor(flow_model=flow_model, model_path=model_path, stage=stage,
+                                          vf_dataset=vf_dataset, vf_architecture=vf_architecture, 
+                                          vf_variant=vf_variant)
         
         # Load video frames
         self.frames = self.load_video_frames()
@@ -3121,6 +3125,20 @@ def main():
     parser.add_argument('--start-frame', type=int, default=0, help='Starting frame number')
     parser.add_argument('--max-frames', type=int, default=None, help='Maximum number of frames')
     
+    # Model parameters
+    parser.add_argument('--model', choices=['videoflow', 'memflow'], default='videoflow',
+                        help='Choose optical flow model: videoflow or memflow')
+    parser.add_argument('--model-path', type=str, default=None,
+                        help='Custom path to model weights (only for MemFlow)')
+    parser.add_argument('--stage', choices=['sintel', 'things', 'kitti'], default='sintel',
+                        help='Training stage/dataset for MemFlow')
+    parser.add_argument('--vf-dataset', choices=['sintel', 'things', 'kitti'], default='sintel',
+                        help='Dataset for VideoFlow model')
+    parser.add_argument('--vf-architecture', choices=['mof', 'bof'], default='mof',
+                        help='VideoFlow architecture: mof (MOFNet) or bof (BOFNet)')
+    parser.add_argument('--vf-variant', choices=['standard', 'noise'], default='standard',
+                        help='VideoFlow model variant: standard or noise')
+    
     args = parser.parse_args()
     
     if not os.path.exists(args.video):
@@ -3132,7 +3150,10 @@ def main():
         return
     
     try:
-        visualizer = FlowVisualizer(args.video, args.flow_dir, args.start_frame, args.max_frames)
+        visualizer = FlowVisualizer(args.video, args.flow_dir, args.start_frame, args.max_frames,
+                                   flow_model=args.model, model_path=args.model_path, stage=args.stage,
+                                   vf_dataset=args.vf_dataset, vf_architecture=args.vf_architecture,
+                                   vf_variant=args.vf_variant)
         visualizer.run()
     except Exception as e:
         print(f"Error: {e}")

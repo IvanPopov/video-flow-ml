@@ -175,7 +175,8 @@ class FlowRunnerApp(QWidget):
             ('taa', True, 'TAA', 'Apply Temporal Anti-Aliasing for smoother results'),
             ('lossless', False, 'Lossless', 'Use lossless compression (FFV1)'),
             ('uncompressed', False, 'Uncompressed', 'Save without any compression (raw format)'),
-            ('skip_lods', False, 'Skip LODs', 'Skip Level of Detail (LOD) generation for faster processing')
+            ('skip_lods', False, 'Skip LODs', 'Skip Level of Detail (LOD) generation for faster processing'),
+            ('force_recompute', False, 'Force recompute', 'Delete existing cache and force recomputation of optical flow')
         ]
         
         row = 1
@@ -257,40 +258,76 @@ class FlowRunnerApp(QWidget):
         flow_title = BodyLabel("Flow Parameters")
         flow_layout.addWidget(flow_title, 0, 0, 1, 2)
         
+        # Model selection
+        flow_layout.addWidget(BodyLabel("Model:"), 1, 0)
+        self.model_combo = ComboBox()
+        self.model_combo.addItems(['videoflow', 'memflow'])
+        self.model_combo.setCurrentText('videoflow')
+        self.model_combo.setToolTip("Optical flow model: VideoFlow (MOF) or MemFlow")
+        self.model_combo.currentTextChanged.connect(self.on_model_changed)
+        flow_layout.addWidget(self.model_combo, 1, 1)
+        
+        # Dataset selection (for both models)
+        flow_layout.addWidget(BodyLabel("Dataset:"), 2, 0)
+        self.dataset_combo = ComboBox()
+        self.dataset_combo.addItems(['sintel', 'things', 'kitti'])
+        self.dataset_combo.setCurrentText('sintel')
+        self.dataset_combo.setToolTip("Training dataset for the model")
+        self.dataset_combo.currentTextChanged.connect(self.on_setting_changed)
+        flow_layout.addWidget(self.dataset_combo, 2, 1)
+        
+        # VideoFlow architecture selection (only for VideoFlow)
+        flow_layout.addWidget(BodyLabel("VF Architecture:"), 3, 0)
+        self.vf_architecture_combo = ComboBox()
+        self.vf_architecture_combo.addItems(['mof', 'bof'])
+        self.vf_architecture_combo.setCurrentText('mof')
+        self.vf_architecture_combo.setToolTip("VideoFlow architecture: MOF (MOFNet) or BOF (BOFNet)")
+        self.vf_architecture_combo.currentTextChanged.connect(self.on_setting_changed)
+        flow_layout.addWidget(self.vf_architecture_combo, 3, 1)
+        
+        # VideoFlow variant selection (only for VideoFlow)
+        flow_layout.addWidget(BodyLabel("VF Variant:"), 4, 0)
+        self.vf_variant_combo = ComboBox()
+        self.vf_variant_combo.addItems(['standard', 'noise'])
+        self.vf_variant_combo.setCurrentText('standard')
+        self.vf_variant_combo.setToolTip("VideoFlow variant: standard or noise (things_288960noise)")
+        self.vf_variant_combo.currentTextChanged.connect(self.on_setting_changed)
+        flow_layout.addWidget(self.vf_variant_combo, 4, 1)
+        
         # Device
-        flow_layout.addWidget(BodyLabel("Device:"), 1, 0)
+        flow_layout.addWidget(BodyLabel("Device:"), 5, 0)
         self.device_combo = ComboBox()
         self.device_combo.addItems(['cuda', 'cpu'])
         self.device_combo.setCurrentText('cuda')
         self.device_combo.setToolTip("Processing device (CPU or CUDA GPU)")
         self.device_combo.currentTextChanged.connect(self.on_setting_changed)
-        flow_layout.addWidget(self.device_combo, 1, 1)
+        flow_layout.addWidget(self.device_combo, 5, 1)
         
         # Flow format
-        flow_layout.addWidget(BodyLabel("Flow format:"), 2, 0)
+        flow_layout.addWidget(BodyLabel("Flow format:"), 6, 0)
         self.flow_format_combo = ComboBox()
         self.flow_format_combo.addItems(['gamedev', 'hsv', 'torchvision', 'motion-vectors'])
         self.flow_format_combo.setToolTip("Output format for optical flow visualization")
         self.flow_format_combo.currentTextChanged.connect(self.on_setting_changed)
-        flow_layout.addWidget(self.flow_format_combo, 2, 1)
+        flow_layout.addWidget(self.flow_format_combo, 6, 1)
         
         # Save flow format
-        flow_layout.addWidget(BodyLabel("Save flow:"), 3, 0)
+        flow_layout.addWidget(BodyLabel("Save flow:"), 7, 0)
         self.save_flow_combo = ComboBox()
         self.save_flow_combo.addItems(['none', 'npz', 'flo', 'both'])
         self.save_flow_combo.setCurrentText('npz')
         self.save_flow_combo.setToolTip("Format for saving flow data: flo (Middlebury), npz (NumPy), both, none (don't save)")
         self.save_flow_combo.currentTextChanged.connect(self.on_setting_changed)
-        flow_layout.addWidget(self.save_flow_combo, 3, 1)
+        flow_layout.addWidget(self.save_flow_combo, 7, 1)
         
         # Sequence length
-        flow_layout.addWidget(BodyLabel("Sequence length:"), 4, 0)
+        flow_layout.addWidget(BodyLabel("Sequence length:"), 8, 0)
         self.sequence_length_spin = SpinBox()
         self.sequence_length_spin.setRange(3, 20)
         self.sequence_length_spin.setValue(5)
         self.sequence_length_spin.setToolTip("Number of frames in processing sequence")
         self.sequence_length_spin.valueChanged.connect(self.on_setting_changed)
-        flow_layout.addWidget(self.sequence_length_spin, 4, 1)
+        flow_layout.addWidget(self.sequence_length_spin, 8, 1)
         
         layout.addWidget(flow_card)
 
@@ -538,6 +575,10 @@ class FlowRunnerApp(QWidget):
             
             # Load combo settings
             combo_settings = [
+                (self.model_combo, 'model', 'videoflow', ['videoflow', 'memflow']),
+                (self.dataset_combo, 'dataset', 'sintel', ['sintel', 'things', 'kitti']),
+                (self.vf_architecture_combo, 'vf_architecture', 'mof', ['mof', 'bof']),
+                (self.vf_variant_combo, 'vf_variant', 'standard', ['standard', 'noise']),
                 (self.device_combo, 'device', 'cuda', ['cpu', 'cuda']),
                 (self.flow_format_combo, 'flow_format', 'motion-vectors', ['gamedev', 'hsv', 'torchvision', 'motion-vectors']),
                 (self.save_flow_combo, 'save_flow', 'npz', ['none', 'npz', 'flo', 'both']),
@@ -553,6 +594,15 @@ class FlowRunnerApp(QWidget):
             
             # Apply time control visibility changes manually (without triggering save)
             self.update_time_control_visibility()
+            
+            # Apply model-specific UI state changes without triggering save
+            current_model = self.model_combo.currentText()
+            if current_model == 'videoflow':
+                self.vf_architecture_combo.setEnabled(True)
+                self.vf_variant_combo.setEnabled(True)
+            else:  # memflow
+                self.vf_architecture_combo.setEnabled(False)
+                self.vf_variant_combo.setEnabled(False)
             
         finally:
             self.blockSignals(False)
@@ -587,6 +637,10 @@ class FlowRunnerApp(QWidget):
         self.settings.setValue('kalman_smooth', self.kalman_smooth_spin.value())
         
         # Save combo settings
+        self.settings.setValue('model', self.model_combo.currentText())
+        self.settings.setValue('dataset', self.dataset_combo.currentText())
+        self.settings.setValue('vf_architecture', self.vf_architecture_combo.currentText())
+        self.settings.setValue('vf_variant', self.vf_variant_combo.currentText())
         self.settings.setValue('device', self.device_combo.currentText())
         self.settings.setValue('flow_format', self.flow_format_combo.currentText())
         self.settings.setValue('save_flow', self.save_flow_combo.currentText())
@@ -596,6 +650,21 @@ class FlowRunnerApp(QWidget):
         """Called when any setting changes"""
         self.save_settings()
         self.command_timer.start(100)  # Update command after 100ms delay
+        
+    def on_model_changed(self):
+        """Handle model selection changes to show/hide model-specific options"""
+        current_model = self.model_combo.currentText()
+        
+        # Show/hide VideoFlow-specific options
+        if current_model == 'videoflow':
+            self.vf_architecture_combo.setEnabled(True)
+            self.vf_variant_combo.setEnabled(True)
+        else:  # memflow
+            self.vf_architecture_combo.setEnabled(False)
+            self.vf_variant_combo.setEnabled(False)
+        
+        # Also trigger general setting change
+        self.on_setting_changed()
         
     def update_time_control_visibility(self):
         """Update time control visibility without triggering signals"""
@@ -927,6 +996,25 @@ class FlowRunnerApp(QWidget):
             
             if self.duration_spin.value() > 0:
                 cmd_parts.extend(["--duration", str(int(self.duration_spin.value()))])
+        
+        # Model
+        if self.model_combo.currentText() != 'videoflow':
+            cmd_parts.extend(["--model", self.model_combo.currentText()])
+        
+        # Dataset selection (for both MemFlow and VideoFlow)
+        if self.dataset_combo.currentText() != 'sintel':
+            if self.model_combo.currentText() == 'memflow':
+                cmd_parts.extend(["--stage", self.dataset_combo.currentText()])
+            else:  # videoflow
+                cmd_parts.extend(["--vf-dataset", self.dataset_combo.currentText()])
+        
+        # VideoFlow-specific options
+        if self.model_combo.currentText() == 'videoflow':
+            if self.vf_architecture_combo.currentText() != 'mof':
+                cmd_parts.extend(["--vf-architecture", self.vf_architecture_combo.currentText()])
+            
+            if self.vf_variant_combo.currentText() != 'standard':
+                cmd_parts.extend(["--vf-variant", self.vf_variant_combo.currentText()])
         
         # Device
         if self.device_combo.currentText() != 'cuda':

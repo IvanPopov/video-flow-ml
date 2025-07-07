@@ -32,7 +32,8 @@ class VideoFlowInference:
     For new code, consider using VideoFlowProcessor or VideoFlowCore directly.
     """
     
-    def __init__(self, device, fast_mode=False, tile_mode=False, sequence_length=5):
+    def __init__(self, device, fast_mode=False, tile_mode=False, sequence_length=5, 
+                 dataset='sintel', architecture='mof', variant='standard'):
         """
         Initialize VideoFlow inference engine
         
@@ -41,15 +42,22 @@ class VideoFlowInference:
             fast_mode: Enable fast mode with reduced model complexity
             tile_mode: Enable tile-based processing for large frames
             sequence_length: Number of frames to use in sequence for inference
+            dataset: Training dataset ('sintel', 'things', 'kitti')
+            architecture: Model architecture ('mof' for MOFNet, 'bof' for BOFNet)
+            variant: Model variant ('standard' or 'noise' for things_288960noise)
         """
         # Delegate to VideoFlowProcessor
-        self._processor = VideoFlowProcessor(device, fast_mode, tile_mode, sequence_length)
+        self._processor = VideoFlowProcessor(device, fast_mode, tile_mode, sequence_length, 
+                                           dataset, architecture, variant)
         
         # Store parameters for compatibility
         self.device = device
         self.fast_mode = fast_mode
         self.tile_mode = tile_mode
         self.sequence_length = sequence_length
+        self.dataset = dataset
+        self.architecture = architecture
+        self.variant = variant
         
         # Legacy attributes for backward compatibility
         self.model = None  # Will be set when model is loaded

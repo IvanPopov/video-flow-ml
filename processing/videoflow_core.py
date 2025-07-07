@@ -49,25 +49,43 @@ class VideoFlowCore:
     - No padding, no format conversion
     """
     
-    def __init__(self, device, fast_mode=False):
+    def __init__(self, device, fast_mode=False, dataset='sintel', architecture='mof', variant='standard'):
         """
         Initialize VideoFlow core engine
         
         Args:
             device: PyTorch device ('cuda', 'cpu', or torch.device)
             fast_mode: Enable fast mode with reduced model complexity
+            dataset: Training dataset ('sintel', 'things', 'kitti')
+            architecture: Model architecture ('mof' for MOFNet, 'bof' for BOFNet)
+            variant: Model variant ('standard' or 'noise' for things_288960noise)
         """
         self.device = device
         self.fast_mode = fast_mode
+        self.dataset = dataset
+        self.architecture = architecture.lower()
+        self.variant = variant
         
         # Model components
         self.model = None
         self.cfg = None
         
     def load_model(self):
-        """Load VideoFlow MOF model with optional fast mode optimizations"""
-        # Get VideoFlow configuration
+        """Load VideoFlow model with dynamic model path selection based on dataset/architecture/variant"""
+        # Get VideoFlow configuration (still use sintel config as base)
         self.cfg = get_cfg()
+        
+        # Generate model path based on architecture, dataset, and variant
+        arch_upper = self.architecture.upper()
+        if self.variant == 'noise' and self.dataset == 'things':
+            model_filename = f"{arch_upper}_{self.dataset}_288960noise.pth"
+        else:
+            model_filename = f"{arch_upper}_{self.dataset}.pth"
+        
+        model_path = f"VideoFlow_ckpt/{model_filename}"
+        
+        # Override the config model path
+        self.cfg.model = model_path
         
         # Apply fast mode optimizations
         if self.fast_mode:
@@ -76,11 +94,10 @@ class VideoFlowCore:
             self.cfg.corr_radius = 3    # Reduce correlation radius
         
         # Check if model weights exist
-        model_path = self.cfg.model
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"VideoFlow model weights not found: {model_path}")
         
-        # Build network
+        # Build network (architecture is automatically detected from the weights)
         self.model = build_network(self.cfg)
         
         # Load pre-trained weights
@@ -95,6 +112,8 @@ class VideoFlowCore:
         # Move to device and set evaluation mode
         self.model.to(self.device)
         self.model.eval()
+        
+        print(f"VideoFlow model loaded: {model_filename}")
         
         return model_path
     
@@ -180,6 +199,9 @@ class VideoFlowCore:
         return {
             "status": "loaded",
             "model_path": getattr(self.cfg, 'model', 'unknown') if self.cfg else 'unknown',
+            "dataset": self.dataset,
+            "architecture": self.architecture.upper(),
+            "variant": self.variant,
             "config": {
                 "decoder_depth": getattr(self.cfg, 'decoder_depth', 'default'),
                 "corr_levels": getattr(self.cfg, 'corr_levels', 'default'),
