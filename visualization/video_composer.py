@@ -76,20 +76,19 @@ class VideoComposer:
         if flow_viz.shape[:2] != (h, w):
             flow_viz = cv2.resize(flow_viz, (w, h))
         
-        # Convert to BGR for video writing and add text overlays
+        # Convert to BGR for video writing
         orig_bgr = cv2.cvtColor(original, cv2.COLOR_RGB2BGR)
         flow_bgr = cv2.cvtColor(flow_viz, cv2.COLOR_RGB2BGR)
         
-        # Add text overlays
+        if flow_only:
+            return np.concatenate([orig_bgr, flow_bgr], axis=0)
+        
+        # Add text overlays (only when not flow_only)
         mode_text = " (Fast)" if fast_mode else ""
         
         orig_bgr = self.add_text_overlay(orig_bgr, f"Original{mode_text}", 'top-left')
         flow_bgr = self.add_text_overlay(flow_bgr, f"Optical Flow{mode_text}", 'top-left')
         flow_bgr = self.add_text_overlay(flow_bgr, f"{model_name} ({flow_format.upper()})", 'bottom-left')
-        
-        if flow_only:
-            # Return only optical flow
-            return flow_bgr
         
         if taa_frame is not None and taa_simple_frame is not None:
             # Both TAA modes: flow-based and simple
