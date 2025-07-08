@@ -1,3 +1,6 @@
 [submodule "VideoFlow"]
 	path = VideoFlow
 	url = https://github.com/XiaoyuShi97/VideoFlow.git
+[submodule "MemFlow"]
+	path = MemFlow
+	url = https://github.com/DQiaole/MemFlow.git
