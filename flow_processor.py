@@ -534,7 +534,7 @@ class VideoFlowProcessor:
         
         return decoded_flows
     
-    def create_difference_overlay(self, original_flow, decoded_flow, magnitude_threshold=0.5):
+    def create_difference_overlay(self, original_flow, decoded_flow, magnitude_threshold=0.9):
         """
         Create difference overlay between original and decoded flow
         
@@ -1107,6 +1107,7 @@ class VideoFlowProcessor:
             taa_simple_frame = None
             taa_external_frame = None  # TAA with external flow
             difference_overlay = None  # Difference overlay
+            external_flow_viz = None  # External flow visualization
 
             if taa:
                 # Use previous frame's flow with inverted direction for TAA
@@ -1150,6 +1151,18 @@ class VideoFlowProcessor:
                         )
                         taa_external_frame = taa_external_result
                         
+                        # Create visualization of external flow (using same format as original flow)
+                        if flow_format == 'hsv':
+                            external_flow_viz = self.encode_hsv_format(external_flow, width, height)
+                        elif flow_format == 'torchvision':
+                            external_flow_viz = self.encode_torchvision_format(external_flow, width, height)
+                        elif flow_format == 'motion-vectors-rg8':
+                            external_flow_viz = self.encode_motion_vectors_rg8_format(external_flow, width, height)
+                        elif flow_format == 'motion-vectors-rgb8':
+                            external_flow_viz = self.encode_motion_vectors_rgb8_format(external_flow, width, height)
+                        else:
+                            external_flow_viz = self.encode_gamedev_format(external_flow, width, height)
+                        
                         # Create difference overlay between original and external flow
                         difference_overlay = self.create_difference_overlay(flow, external_flow, magnitude_threshold=0.5)
                         
@@ -1180,6 +1193,18 @@ class VideoFlowProcessor:
                             sequence_id='external_taa'
                         )
                         taa_external_frame = taa_external_result
+                        
+                        # Create visualization of external flow (using same format as original flow)
+                        if flow_format == 'hsv':
+                            external_flow_viz = self.encode_hsv_format(external_flow, width, height)
+                        elif flow_format == 'torchvision':
+                            external_flow_viz = self.encode_torchvision_format(external_flow, width, height)
+                        elif flow_format == 'motion-vectors-rg8':
+                            external_flow_viz = self.encode_motion_vectors_rg8_format(external_flow, width, height)
+                        elif flow_format == 'motion-vectors-rgb8':
+                            external_flow_viz = self.encode_motion_vectors_rgb8_format(external_flow, width, height)
+                        else:
+                            external_flow_viz = self.encode_gamedev_format(external_flow, width, height)
                         
                         # Create difference overlay between original and external flow
                         difference_overlay = self.create_difference_overlay(flow, external_flow, magnitude_threshold=0.5)
@@ -1219,8 +1244,10 @@ class VideoFlowProcessor:
                 combined = self.create_video_grid(frames_to_display, grid_shape=(3, 2), target_aspect=4/3)
             elif flow_input is not None and taa_external_frame is not None and difference_overlay is not None:
                 # Flow input mode: create 6-video grid
+                # Use external flow visualization if available, otherwise fall back to original flow
+                display_flow_viz = external_flow_viz if external_flow_viz is not None else flow_viz
                 combined = self.create_6_video_grid(
-                    frames[i], flow_viz, taa_frame, taa_simple_frame, 
+                    frames[i], display_flow_viz, taa_frame, taa_simple_frame, 
                     taa_external_frame, difference_overlay, vertical=vertical
                 )
             else:
@@ -1325,7 +1352,7 @@ class VideoFlowProcessor:
         
         Args:
             original_frame: Original video frame (RGB)
-            flow_viz: Flow visualization (RGB)
+            flow_viz: External flow visualization (RGB) - shows the loaded flow visualization
             taa_frame: TAA with original flow (RGB, may be float)
             taa_simple_frame: TAA without flow (RGB, may be float)
             taa_external_frame: TAA with external flow (RGB, may be float)
@@ -1359,7 +1386,7 @@ class VideoFlowProcessor:
             
             # Add text labels
             combined = self.add_text_overlay(combined, "Original", (10, 10))
-            combined = self.add_text_overlay(combined, "Flow", (10, h + 10))
+            combined = self.add_text_overlay(combined, "External Flow", (10, h + 10))
             combined = self.add_text_overlay(combined, "TAA + Original Flow", (10, 2*h + 10))
             combined = self.add_text_overlay(combined, "TAA Simple", (10, 3*h + 10))
             combined = self.add_text_overlay(combined, "TAA + External Flow", (10, 4*h + 10))
@@ -1382,7 +1409,7 @@ class VideoFlowProcessor:
             
             # Add text labels
             combined = self.add_text_overlay(combined, "Original", (10, 10))
-            combined = self.add_text_overlay(combined, "Flow", (w + 10, 10))
+            combined = self.add_text_overlay(combined, "External Flow", (w + 10, 10))
             combined = self.add_text_overlay(combined, "TAA + Original Flow", (10, h + 10))
             combined = self.add_text_overlay(combined, "TAA Simple", (w + 10, h + 10))
             combined = self.add_text_overlay(combined, "TAA + External Flow", (10, 2*h + 10))

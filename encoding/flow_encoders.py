@@ -213,8 +213,8 @@ class MotionVectorsRGB8FlowEncoder(FlowEncoder):
         direction_y[nonzero_mask] = flow_y[nonzero_mask] / magnitude[nonzero_mask]
         
         # Clamp direction to [-1, 1] and map to [0, 1]
-        direction_x_norm = (np.clip(direction_x, -1, 1) + 1) / 2
-        direction_y_norm = (np.clip(direction_y, -1, 1) + 1) / 2
+        direction_x_norm = (np.clip(direction_x, -1, 1))# + 1) / 2
+        direction_y_norm = (np.clip(direction_y, -1, 1))# + 1) / 2
         
         # Map magnitude from [0, clamp_range] to [0, 1]
         magnitude_norm = magnitude_clamped / self.clamp_range
@@ -225,15 +225,14 @@ class MotionVectorsRGB8FlowEncoder(FlowEncoder):
         rgb[:, :, 1] = direction_y_norm  # G channel: normalized direction Y
         rgb[:, :, 2] = magnitude_norm    # B channel: normalized magnitude
         
-        # Преобразование из YCbCr в RGB, предполагая что в rgb:
-        # rgb[:, :, 0] = Cb, rgb[:, :, 1] = Cr, rgb[:, :, 2] = Y (Y в B-канале)
-        # Формулы:
-        # R = Y + 1.402 * (Cr - 0.5)
-        # G = Y - 0.344136 * (Cb - 0.5) - 0.714136 * (Cr - 0.5)
-        # B = Y + 1.772 * (Cb - 0.5)
         Cb = rgb[:, :, 0]
         Cr = rgb[:, :, 1]
         Y  = rgb[:, :, 2]
+
+        Y = Y * (1 - 0.7) + 0.5 * 0.7 # lerp(r, 0.5, 0.7) 
+        Cb = 0.5 + Cb * 0.2
+        Cr = 0.5 + Cr * 0.2
+
         R = Y + 1.402 * (Cr - 0.5)
         G = Y - 0.344136 * (Cb - 0.5) - 0.714136 * (Cr - 0.5)
         B = Y + 1.772 * (Cb - 0.5)
@@ -262,16 +261,14 @@ class MotionVectorsRGB8FlowEncoder(FlowEncoder):
         G = normalized[:, :, 1]
         B = normalized[:, :, 2]
 
-        # Формулы преобразования RGB -> YCbCr (YCbCr ITU-R BT.601)
-        # Y  = 0.299*R + 0.587*G + 0.114*B
-        # Cb = 0.5643*(B - Y) + 0.5
-        # Cr = 0.7132*(R - Y) + 0.5
-
         Y  = 0.299 * R + 0.587 * G + 0.114 * B
         Cb = 0.5643 * (B - Y) + 0.5
         Cr = 0.7132 * (R - Y) + 0.5
 
-        # Записываем Y в B компоненту normalized, Cb в R, Cr в G
+        Y = (Y - 0.5 * 0.7) / (1 - 0.7) 
+        Cb = (-0.5 + Cb) / 0.2
+        Cr = (-0.5 + Cr) / 0.2
+
         normalized[:, :, 0] = Cb
         normalized[:, :, 1] = Cr
         normalized[:, :, 2] = Y
@@ -284,8 +281,8 @@ class MotionVectorsRGB8FlowEncoder(FlowEncoder):
         magnitude_norm = normalized[:, :, 2]    # B channel: normalized magnitude
         
         # Map direction from [0, 1] back to [-1, 1]
-        direction_x = (direction_x_norm * 2) - 1
-        direction_y = (direction_y_norm * 2) - 1
+        direction_x = (direction_x_norm)# * 2) - 1
+        direction_y = (direction_y_norm)# * 2) - 1
         
         # Map magnitude from [0, 1] back to [0, clamp_range]
         magnitude = magnitude_norm * self.clamp_range
