@@ -416,9 +416,20 @@ class FlowRunnerApp(QWidget):
         browse_cache_btn.clicked.connect(self.browse_flow_cache)
         io_layout.addWidget(browse_cache_btn, 3, 2)
         
+        # Flow input video (for TAA comparison)
+        io_layout.addWidget(BodyLabel("Flow input video:"), 4, 0)
+        self.flow_input_edit = LineEdit()
+        self.flow_input_edit.setToolTip("Path to video with encoded motion vectors in bottom half (for TAA comparison)")
+        self.flow_input_edit.textChanged.connect(self.on_setting_changed)
+        io_layout.addWidget(self.flow_input_edit, 4, 1)
+        
+        browse_flow_input_btn = PushButton("Browse")
+        browse_flow_input_btn.clicked.connect(self.browse_flow_input)
+        io_layout.addWidget(browse_flow_input_btn, 4, 2)
+        
         # Cache status
         self.flow_cache_status_label = BodyLabel("")
-        io_layout.addWidget(self.flow_cache_status_label, 4, 0, 1, 3)
+        io_layout.addWidget(self.flow_cache_status_label, 5, 0, 1, 3)
         
         layout.addWidget(io_card)
 
@@ -555,14 +566,17 @@ class FlowRunnerApp(QWidget):
             self.input_video_edit.blockSignals(True)
             self.output_path_edit.blockSignals(True)
             self.flow_cache_edit.blockSignals(True)
+            self.flow_input_edit.blockSignals(True)
             
             self.input_video_edit.setText(self.settings.value('input_video', ''))
             self.output_path_edit.setText(self.settings.value('output_path', ''))
             self.flow_cache_edit.setText(self.settings.value('flow_cache', ''))
+            self.flow_input_edit.setText(self.settings.value('flow_input', ''))
             
             self.input_video_edit.blockSignals(False)
             self.output_path_edit.blockSignals(False)
             self.flow_cache_edit.blockSignals(False)
+            self.flow_input_edit.blockSignals(False)
             
             # Load processing settings
             for key, widget in self.flag_widgets.items():
@@ -643,6 +657,7 @@ class FlowRunnerApp(QWidget):
         self.settings.setValue('input_video', self.input_video_edit.text())
         self.settings.setValue('output_path', self.output_path_edit.text())
         self.settings.setValue('flow_cache', self.flow_cache_edit.text())
+        self.settings.setValue('flow_input', self.flow_input_edit.text())
         
         # Save processing settings
         for key, widget in self.flag_widgets.items():
@@ -762,6 +777,14 @@ class FlowRunnerApp(QWidget):
         dir_path = QFileDialog.getExistingDirectory(self, "Select Flow Cache Directory")
         if dir_path:
             self.flow_cache_edit.setText(dir_path)
+
+    def browse_flow_input(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Flow Input Video", "", 
+            "Video Files (*.mp4 *.avi *.mov *.mkv *.webm *.flv);;All Files (*)"
+        )
+        if file_path:
+            self.flow_input_edit.setText(file_path)
 
     def load_video(self, video_path):
         """Load video for preview"""
@@ -1007,6 +1030,10 @@ class FlowRunnerApp(QWidget):
         # Flow cache
         if self.flow_cache_edit.text():
             cmd_parts.extend(["--flow-cache", f'"{self.flow_cache_edit.text()}"'])
+        
+        # Flow input video
+        if self.flow_input_edit.text():
+            cmd_parts.extend(["--flow-input", f'"{self.flow_input_edit.text()}"'])
         
         # Boolean flags
         for key, widget in self.flag_widgets.items():

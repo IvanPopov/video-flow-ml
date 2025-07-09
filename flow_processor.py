@@ -39,7 +39,7 @@ class VideoFlowProcessor:
                  kalman_motion_model='constant_acceleration', kalman_outlier_threshold=3.0, kalman_min_track_length=3,
                  flow_model='videoflow', model_path=None, stage='sintel', 
                  vf_dataset='sintel', vf_architecture='mof', vf_variant='standard',
-                 taa_emulate_compression=False, motion_vectors_clamp_range=32.0):
+                 taa_emulate_compression=False, motion_vectors_clamp_range=32.0, flow_input=None):
         """Initialize optical flow processor with model selection support"""
         # Initialize device manager
         self.device_manager = DeviceManager()
@@ -106,9 +106,13 @@ class VideoFlowProcessor:
         # Motion vectors encoding parameters
         self.motion_vectors_clamp_range = motion_vectors_clamp_range
         
+        # Flow input video path (for TAA comparison with external flow)
+        self.flow_input = flow_input
+        
         # TAA processors for consistent state management
         self.taa_flow_processor = TAAProcessor(alpha=0.1, emulate_compression=taa_emulate_compression)
         self.taa_simple_processor = TAAProcessor(alpha=0.1)
+        self.taa_external_processor = TAAProcessor(alpha=0.1, emulate_compression=taa_emulate_compression)
         
         # Initialize storage manager
         self.cache_manager = FlowCacheManager()
@@ -476,6 +480,99 @@ class VideoFlowProcessor:
         """Encode optical flow using torchvision format using encoding module"""
         return encode_flow(flow, width, height, 'torchvision')
     
+    def extract_flow_from_video(self, video_path, max_frames=1000, start_frame=0, 
+                               start_time=None, duration=None, flow_format='motion-vectors-rg8'):
+        """
+        Extract and decode motion vectors from bottom half of video frames
+        
+        Args:
+            video_path: Path to video with encoded flow in bottom half
+            max_frames: Maximum number of frames to extract
+            start_frame: Starting frame number
+            start_time: Starting time in seconds
+            duration: Duration in seconds
+            flow_format: Format of encoded flow ('motion-vectors-rg8' or 'motion-vectors-rgb8')
+            
+        Returns:
+            List of decoded flow arrays (H, W, 2) for each frame
+        """
+        # Extract frames from flow video
+        frame_extractor = FrameExtractor(video_path, fast_mode=self.fast_mode)
+        flow_frames, fps, width, height, actual_start = frame_extractor.extract_frames(
+            max_frames=max_frames, 
+            start_frame=start_frame,
+            start_time=start_time,
+            duration=duration
+        )
+        
+        # Calculate original frame dimensions (top half)
+        original_height = height // 2
+        
+        decoded_flows = []
+        
+        print(f"Extracting flow from {len(flow_frames)} frames...")
+        
+        for i, frame in enumerate(flow_frames):
+            # Extract bottom half containing encoded flow
+            encoded_flow = frame[original_height:, :, :]
+            
+            # Decode flow based on format
+            if flow_format == 'motion-vectors-rg8':
+                from encoding.flow_encoders import decode_motion_vectors
+                decoded_flow = decode_motion_vectors(encoded_flow, 
+                                                   clamp_range=self.motion_vectors_clamp_range, 
+                                                   format_variant='rg8')
+            elif flow_format == 'motion-vectors-rgb8':
+                from encoding.flow_encoders import decode_motion_vectors
+                decoded_flow = decode_motion_vectors(encoded_flow, 
+                                                   clamp_range=self.motion_vectors_clamp_range, 
+                                                   format_variant='rgb8')
+            else:
+                raise ValueError(f"Unsupported flow format: {flow_format}")
+            
+            decoded_flows.append(decoded_flow)
+        
+        return decoded_flows
+    
+    def create_difference_overlay(self, original_flow, decoded_flow, magnitude_threshold=0.5):
+        """
+        Create difference overlay between original and decoded flow
+        
+        Args:
+            original_flow: Original optical flow (H, W, 2)
+            decoded_flow: Decoded optical flow (H, W, 2)
+            magnitude_threshold: Threshold for significant differences
+            
+        Returns:
+            Difference overlay image (H, W, 3) with visual representation
+        """
+        # Calculate flow differences
+        diff_flow = original_flow - decoded_flow
+        
+        # Calculate magnitude of differences
+        diff_magnitude = np.sqrt(diff_flow[:, :, 0]**2 + diff_flow[:, :, 1]**2)
+        
+        # Create overlay image
+        h, w = diff_flow.shape[:2]
+        overlay = np.zeros((h, w, 3), dtype=np.uint8)
+        
+        # Use HSV encoding for difference visualization
+        from encoding.flow_encoders import HSVFlowEncoder
+        hsv_encoder = HSVFlowEncoder()
+        diff_viz = hsv_encoder.encode(diff_flow, w, h)
+        
+        # Create mask for significant differences
+        significant_diff_mask = diff_magnitude > magnitude_threshold
+        
+        # Apply overlay: show difference only where it's significant
+        overlay[significant_diff_mask] = diff_viz[significant_diff_mask]
+        
+        # Add magnitude-based intensity (darker for smaller differences)
+        intensity = np.clip(diff_magnitude / (magnitude_threshold * 2), 0, 1)
+        overlay = (overlay * intensity[:, :, np.newaxis]).astype(np.uint8)
+        
+        return overlay
+    
     def apply_taa_effect(self, current_frame, flow_pixels=None, previous_taa_frame=None, alpha=0.1, use_flow=True):
         """Apply TAA effect using effects module with persistent processors"""
         if use_flow:
@@ -585,9 +682,30 @@ class VideoFlowProcessor:
     def process_video(self, input_path, output_path, max_frames=1000, start_frame=0, 
                      start_time=None, duration=None, vertical=False, flow_only=False, taa=False, flow_format='gamedev', 
                      save_flow=None, force_recompute=False, use_flow_cache=None, auto_play=True,
-                     taa_compare=False, skip_lods=False, lossless=False, uncompressed=False):
+                     taa_compare=False, skip_lods=False, lossless=False, uncompressed=False, flow_input=None):
         """Main processing function"""
         import os
+        from video.frame_extractor import FrameExtractor
+        
+        # Flow input processing (override from self.flow_input if provided)
+        if flow_input is None:
+            flow_input = self.flow_input
+        
+        # Check flow input and prepare configuration
+        if flow_input is not None:
+            if not os.path.exists(flow_input):
+                raise ValueError(f"Flow input video not found: {flow_input}")
+            
+            if not taa:
+                print("Warning: --flow-input requires --taa to be enabled. Enabling TAA mode.")
+                taa = True
+            
+            print(f"[Configuration] Flow Input Processing:")
+            print(f"  Flow Input Video: {flow_input}")
+            print(f"  Flow Format: {flow_format}")
+            print(f"  Clamp Range: ±{self.motion_vectors_clamp_range} pixels")
+            print(f"  Mode: TAA comparison with external flow")
+            print()
         
         # TAA Compare Mode Setup
         if taa_compare:
@@ -671,6 +789,48 @@ class VideoFlowProcessor:
             print(f"  Motion Model: {self.kalman_motion_model}")
         
         print()  # Add blank line for readability
+        
+        # Extract flow from external video if provided
+        decoded_flows = None
+        if flow_input is not None:
+            print(f"[Flow Input] Extracting flow from external video...")
+            
+            # Get info about flow input video
+            flow_extractor = FrameExtractor(flow_input, fast_mode=self.fast_mode)
+            flow_info_frames, _, _, _, _ = flow_extractor.extract_frames(max_frames=10000, start_frame=0)
+            flow_input_total_frames = len(flow_info_frames)
+            
+            # We need exactly len(frames) flow frames
+            frames_needed = len(frames)
+            flow_frames_to_extract = min(frames_needed, flow_input_total_frames)
+            
+            print(f"  Flow input has {flow_input_total_frames} frames")
+            print(f"  Main video has {len(frames)} frames")
+            print(f"  Will extract {flow_frames_to_extract} flow frames starting from frame 0")
+            
+            # Extract flow from external video (always start from frame 0)
+            decoded_flows = self.extract_flow_from_video(
+                flow_input, flow_frames_to_extract, 0, None, None, flow_format
+            )
+            
+            if len(decoded_flows) == 0:
+                raise ValueError("No flow data could be extracted from flow input video")
+            
+            # If flow input is shorter than main video, extend with last frame
+            if len(decoded_flows) < frames_needed:
+                last_flow = decoded_flows[-1]
+                original_length = len(decoded_flows)
+                while len(decoded_flows) < frames_needed:
+                    decoded_flows.append(last_flow.copy())
+                print(f"  Warning: Flow input shorter than main video. Extended from {original_length} to {len(decoded_flows)} frames using last frame.")
+            
+            # If flow input is longer than main video, trim to match
+            elif len(decoded_flows) > frames_needed:
+                decoded_flows = decoded_flows[:frames_needed]
+                print(f"  Flow input longer than main video. Trimmed to {len(decoded_flows)} frames.")
+            
+            print(f"  Successfully prepared {len(decoded_flows)} flow frames")
+            print()
         
         # Setup flow caching
         flow_cache_dir = None
@@ -821,10 +981,18 @@ class VideoFlowProcessor:
         elif flow_only:
             output_size = (width, height * 2)  # Vertical stack: Original on top, Flow on bottom
         elif taa:
-            if vertical:
-                output_size = (width, height * 4)  # Vertical: same width, quad height (Original + Flow + TAA+Flow + TAA Simple)
+            if flow_input is not None:
+                # Flow input mode: 6 videos in 2x3 grid
+                if vertical:
+                    output_size = (width, height * 6)  # Vertical: same width, 6x height
+                else:
+                    output_size = (width * 2, height * 3)  # 2x3 grid: double width, triple height
             else:
-                output_size = (width * 2, height * 2)  # 2x2 grid: double width, double height
+                # Standard TAA mode: 4 videos
+                if vertical:
+                    output_size = (width, height * 4)  # Vertical: same width, quad height (Original + Flow + TAA+Flow + TAA Simple)
+                else:
+                    output_size = (width * 2, height * 2)  # 2x2 grid: double width, double height
         elif vertical:
             output_size = (width, height * 2)  # Vertical: same width, double height
         else:
@@ -937,6 +1105,8 @@ class VideoFlowProcessor:
             # Apply TAA effects if requested
             taa_frame = None
             taa_simple_frame = None
+            taa_external_frame = None  # TAA with external flow
+            difference_overlay = None  # Difference overlay
 
             if taa:
                 # Use previous frame's flow with inverted direction for TAA
@@ -956,19 +1126,73 @@ class VideoFlowProcessor:
                             taa_result = self.apply_taa_effect(frames[i], stabilized_flow, prev_taa, alpha=0.1, use_flow=True)
                             taa_compare_frames[name] = taa_result.copy()
                     
-                    # Normal TAA processing (for backward compatibility)
-                    taa_result = self.apply_taa_effect(frames[i], previous_flow, None, alpha=0.1, use_flow=True)
+                    # Normal TAA processing with current computed flow
+                    taa_result = self.taa_flow_processor.apply_taa(
+                        current_frame=frames[i],
+                        flow_pixels=previous_flow,
+                        previous_taa_frame=None,
+                        alpha=0.1,
+                        use_flow=True,
+                        sequence_id='flow_taa'
+                    )
                     taa_frame = taa_result
+                    
+                    # Apply TAA with external flow if provided
+                    if flow_input is not None and i < len(decoded_flows):
+                        external_flow = decoded_flows[i]
+                        taa_external_result = self.taa_external_processor.apply_taa(
+                            current_frame=frames[i],
+                            flow_pixels=external_flow,
+                            previous_taa_frame=None,
+                            alpha=0.1,
+                            use_flow=True,
+                            sequence_id='external_taa'
+                        )
+                        taa_external_frame = taa_external_result
+                        
+                        # Create difference overlay between original and external flow
+                        difference_overlay = self.create_difference_overlay(flow, external_flow, magnitude_threshold=0.5)
+                        
                 else:
                     # First frame or no previous flow - apply TAA without flow
-                    taa_result = self.apply_taa_effect(frames[i], None, None, alpha=0.1, use_flow=True)
+                    taa_result = self.taa_flow_processor.apply_taa(
+                        current_frame=frames[i],
+                        flow_pixels=None,
+                        previous_taa_frame=None,
+                        alpha=0.1,
+                        use_flow=True,
+                        sequence_id='flow_taa'
+                    )
                     taa_frame = taa_result
                     if taa_compare:
                         for name in self.taa_compare_kalman_filters.keys():
                             taa_compare_frames[name] = taa_result.copy()
+                    
+                    # Apply TAA with external flow if provided (first frame)
+                    if flow_input is not None and i < len(decoded_flows):
+                        external_flow = decoded_flows[i]
+                        taa_external_result = self.taa_external_processor.apply_taa(
+                            current_frame=frames[i],
+                            flow_pixels=external_flow,
+                            previous_taa_frame=None,
+                            alpha=0.1,
+                            use_flow=True,
+                            sequence_id='external_taa'
+                        )
+                        taa_external_frame = taa_external_result
+                        
+                        # Create difference overlay between original and external flow
+                        difference_overlay = self.create_difference_overlay(flow, external_flow, magnitude_threshold=0.5)
 
                 # Apply simple TAA (no flow) with alpha=0.1
-                taa_simple_result = self.apply_taa_effect(frames[i], None, None, alpha=0.1, use_flow=False)
+                taa_simple_result = self.taa_simple_processor.apply_taa(
+                    current_frame=frames[i],
+                    flow_pixels=None,
+                    previous_taa_frame=None,
+                    alpha=0.1,
+                    use_flow=False,
+                    sequence_id='simple_taa'
+                )
                 taa_simple_frame = taa_simple_result
                 
             # Store current flow for next frame's TAA
@@ -993,6 +1217,12 @@ class VideoFlowProcessor:
                     frames_to_display[label] = taa_compare_frames[name].astype(np.uint8)
                 
                 combined = self.create_video_grid(frames_to_display, grid_shape=(3, 2), target_aspect=4/3)
+            elif flow_input is not None and taa_external_frame is not None and difference_overlay is not None:
+                # Flow input mode: create 6-video grid
+                combined = self.create_6_video_grid(
+                    frames[i], flow_viz, taa_frame, taa_simple_frame, 
+                    taa_external_frame, difference_overlay, vertical=vertical
+                )
             else:
                 model_name = "MOF_sintel" if hasattr(self, 'model') else "VideoFlow"
                 combined = self.create_side_by_side(frames[i], flow_viz, vertical=vertical, flow_only=flow_only, 
@@ -1087,6 +1317,78 @@ class VideoFlowProcessor:
     def create_video_grid(self, frames_dict, grid_shape, target_aspect=16/9):
         """Arrange multiple video frames into a grid with a target aspect ratio"""
         return self.video_composer.create_video_grid(frames_dict, grid_shape, target_aspect)
+    
+    def create_6_video_grid(self, original_frame, flow_viz, taa_frame, taa_simple_frame, 
+                           taa_external_frame, difference_overlay, vertical=False):
+        """
+        Create 6-video grid layout for flow input mode
+        
+        Args:
+            original_frame: Original video frame (RGB)
+            flow_viz: Flow visualization (RGB)
+            taa_frame: TAA with original flow (RGB, may be float)
+            taa_simple_frame: TAA without flow (RGB, may be float)
+            taa_external_frame: TAA with external flow (RGB, may be float)
+            difference_overlay: Difference overlay between flows (RGB)
+            vertical: Whether to stack vertically
+            
+        Returns:
+            Combined frame with 6 videos (BGR for video output)
+        """
+        import cv2
+        h, w = original_frame.shape[:2]
+        
+        # Convert all frames to BGR format and ensure proper data types
+        # (matching the processing done in create_side_by_side)
+        orig_bgr = cv2.cvtColor(original_frame, cv2.COLOR_RGB2BGR)
+        flow_bgr = cv2.cvtColor(flow_viz, cv2.COLOR_RGB2BGR)
+        taa_bgr = cv2.cvtColor(np.clip(taa_frame, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+        taa_simple_bgr = cv2.cvtColor(np.clip(taa_simple_frame, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+        taa_external_bgr = cv2.cvtColor(np.clip(taa_external_frame, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+        diff_bgr = cv2.cvtColor(difference_overlay, cv2.COLOR_RGB2BGR)
+        
+        if vertical:
+            # Stack vertically: 6 videos in single column
+            combined = np.zeros((h * 6, w, 3), dtype=np.uint8)
+            combined[0:h, :, :] = orig_bgr
+            combined[h:2*h, :, :] = flow_bgr
+            combined[2*h:3*h, :, :] = taa_bgr
+            combined[3*h:4*h, :, :] = taa_simple_bgr
+            combined[4*h:5*h, :, :] = taa_external_bgr
+            combined[5*h:6*h, :, :] = diff_bgr
+            
+            # Add text labels
+            combined = self.add_text_overlay(combined, "Original", (10, 10))
+            combined = self.add_text_overlay(combined, "Flow", (10, h + 10))
+            combined = self.add_text_overlay(combined, "TAA + Original Flow", (10, 2*h + 10))
+            combined = self.add_text_overlay(combined, "TAA Simple", (10, 3*h + 10))
+            combined = self.add_text_overlay(combined, "TAA + External Flow", (10, 4*h + 10))
+            combined = self.add_text_overlay(combined, "Flow Difference", (10, 5*h + 10))
+        else:
+            # 2x3 grid: 2 columns, 3 rows
+            combined = np.zeros((h * 3, w * 2, 3), dtype=np.uint8)
+            
+            # Top row
+            combined[0:h, 0:w, :] = orig_bgr
+            combined[0:h, w:2*w, :] = flow_bgr
+            
+            # Middle row
+            combined[h:2*h, 0:w, :] = taa_bgr
+            combined[h:2*h, w:2*w, :] = taa_simple_bgr
+            
+            # Bottom row
+            combined[2*h:3*h, 0:w, :] = taa_external_bgr
+            combined[2*h:3*h, w:2*w, :] = diff_bgr
+            
+            # Add text labels
+            combined = self.add_text_overlay(combined, "Original", (10, 10))
+            combined = self.add_text_overlay(combined, "Flow", (w + 10, 10))
+            combined = self.add_text_overlay(combined, "TAA + Original Flow", (10, h + 10))
+            combined = self.add_text_overlay(combined, "TAA Simple", (w + 10, h + 10))
+            combined = self.add_text_overlay(combined, "TAA + External Flow", (10, 2*h + 10))
+            combined = self.add_text_overlay(combined, "Flow Difference", (w + 10, 2*h + 10))
+        
+        return combined
 
 def main():
     parser = argparse.ArgumentParser(description='Optical Flow Processor (VideoFlow/MemFlow)')
@@ -1114,6 +1416,8 @@ def main():
                        help='Add TAA (Temporal Anti-Aliasing) effect visualization using inverted optical flow from previous frame')
     parser.add_argument('--taa-emulate-compression', action='store_true',
                        help='Emulate motion vectors compression/decompression in TAA processing (uint8 RG format)')
+    parser.add_argument('--flow-input', type=str, default=None,
+                       help='Input video with encoded motion vectors in bottom half (for TAA comparison with external flow)')
     parser.add_argument('--flow-format', choices=['gamedev', 'hsv', 'torchvision', 'motion-vectors-rg8', 'motion-vectors-rgb8'], default='gamedev',
                        help='Optical flow encoding format: gamedev (RG channels), hsv (standard visualization), torchvision (color wheel), motion-vectors-rg8 (RG channels normalized), motion-vectors-rgb8 (direction+magnitude)')
     parser.add_argument('--motion-vectors-clamp-range', type=float, default=32.0,
@@ -1242,7 +1546,8 @@ def main():
                                       flow_model=args.model, model_path=args.model_path, stage=args.stage,
                                       vf_dataset=args.vf_dataset, vf_architecture=args.vf_architecture, 
                                       vf_variant=args.vf_variant, taa_emulate_compression=args.taa_emulate_compression,
-                                      motion_vectors_clamp_range=args.motion_vectors_clamp_range)
+                                      motion_vectors_clamp_range=args.motion_vectors_clamp_range,
+                                      flow_input=args.flow_input)
         
         # Handle time-based parameters for frame extraction
         if args.start_time is not None or args.duration is not None:
@@ -1424,7 +1729,8 @@ def main():
                                           flow_model=args.model, model_path=args.model_path, stage=args.stage,
                                           vf_dataset=args.vf_dataset, vf_architecture=args.vf_architecture, 
                                           vf_variant=args.vf_variant, taa_emulate_compression=False,
-                                          motion_vectors_clamp_range=args.motion_vectors_clamp_range)
+                                          motion_vectors_clamp_range=args.motion_vectors_clamp_range,
+                                          flow_input=args.flow_input)
         
         print(f"\nTile grid analysis:")
         tile_width, tile_height, cols, rows, tiles_info = temp_processor.calculate_tile_grid(width, height)
@@ -1451,7 +1757,8 @@ def main():
                                   flow_model=args.model, model_path=args.model_path, stage=args.stage,
                                   vf_dataset=args.vf_dataset, vf_architecture=args.vf_architecture, 
                                   vf_variant=args.vf_variant, taa_emulate_compression=args.taa_emulate_compression,
-                                  motion_vectors_clamp_range=args.motion_vectors_clamp_range)
+                                  motion_vectors_clamp_range=args.motion_vectors_clamp_range,
+                                  flow_input=args.flow_input)
     
     try:
         # Create output filename with frame/time range if not specified
@@ -1490,7 +1797,7 @@ def main():
                               force_recompute=args.force_recompute, use_flow_cache=args.use_flow_cache, 
                               auto_play=not args.no_autoplay,
                               taa_compare=args.taa_compare, skip_lods=args.skip_lods,
-                              lossless=args.lossless, uncompressed=args.uncompressed)
+                              lossless=args.lossless, uncompressed=args.uncompressed, flow_input=args.flow_input)
         
         model_name = args.model.upper()
         if not args.no_autoplay and not args.taa_compare:
