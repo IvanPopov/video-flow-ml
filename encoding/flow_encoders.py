@@ -212,31 +212,46 @@ class MotionVectorsRGB8FlowEncoder(FlowEncoder):
         direction_x[nonzero_mask] = flow_x[nonzero_mask] / magnitude[nonzero_mask]
         direction_y[nonzero_mask] = flow_y[nonzero_mask] / magnitude[nonzero_mask]
         
-        # Clamp direction to [-1, 1] and map to [0, 1]
-        direction_x_norm = (np.clip(direction_x, -1, 1))# + 1) / 2
-        direction_y_norm = (np.clip(direction_y, -1, 1))# + 1) / 2
-        
-        # Map magnitude from [0, clamp_range] to [0, 1]
-        magnitude_norm = magnitude_clamped / self.clamp_range
-        
-        # Create RGB image
-        rgb = np.zeros((h, w, 3), dtype=np.float32)
-        rgb[:, :, 0] = direction_x_norm  # R channel: normalized direction X
-        rgb[:, :, 1] = direction_y_norm  # G channel: normalized direction Y
-        rgb[:, :, 2] = magnitude_norm    # B channel: normalized magnitude
-        
-        Cb = rgb[:, :, 0]
-        Cr = rgb[:, :, 1]
-        Y  = rgb[:, :, 2]
+        if False:
+            # Clamp direction to [-1, 1] and map to [0, 1]
+            direction_x_norm = np.clip(direction_x, -1, 1)
+            direction_y_norm = np.clip(direction_y, -1, 1)
+            
+            # Map magnitude from [0, clamp_range] to [0, 1]
+            magnitude_norm = magnitude_clamped / self.clamp_range
+            
+            # Create RGB image
+            rgb = np.zeros((h, w, 3), dtype=np.float32)
+            rgb[:, :, 0] = direction_x_norm  # R channel: normalized direction X
+            rgb[:, :, 1] = direction_y_norm  # G channel: normalized direction Y
+            rgb[:, :, 2] = magnitude_norm    # B channel: normalized magnitude
+            
+            Cb = rgb[:, :, 0]
+            Cr = rgb[:, :, 1]
+            Y  = rgb[:, :, 2]
 
-        Y = Y * (1 - 0.7) + 0.5 * 0.7 # lerp(r, 0.5, 0.7) 
-        Cb = 0.5 + Cb * 0.2
-        Cr = 0.5 + Cr * 0.2
+            Y = Y * (1 - 0.7) + 0.5 * 0.7 # lerp(r, 0.5, 0.7) 
+            Cb = 0.5 + Cb * 0.2
+            Cr = 0.5 + Cr * 0.2
 
-        R = Y + 1.402 * (Cr - 0.5)
-        G = Y - 0.344136 * (Cb - 0.5) - 0.714136 * (Cr - 0.5)
-        B = Y + 1.772 * (Cb - 0.5)
-        rgb = np.stack([R, G, B], axis=-1)
+            R = Y + 1.402 * (Cr - 0.5)
+            G = Y - 0.344136 * (Cb - 0.5) - 0.714136 * (Cr - 0.5)
+            B = Y + 1.772 * (Cb - 0.5)
+            rgb = np.stack([R, G, B], axis=-1)
+        else:
+            # Clamp direction to [-1, 1] and map to [0, 1]
+            direction_x_norm = (np.clip(direction_x, -1, 1) + 1) / 2
+            direction_y_norm = (np.clip(direction_y, -1, 1)+ 1) / 2
+            
+            # Map magnitude from [0, clamp_range] to [0, 1]
+            magnitude_norm = magnitude_clamped / self.clamp_range
+            
+            # Create RGB image
+            rgb = np.zeros((h, w, 3), dtype=np.float32)
+            rgb[:, :, 0] = direction_x_norm  # R channel: normalized direction X
+            rgb[:, :, 1] = direction_y_norm  # G channel: normalized direction Y
+            rgb[:, :, 2] = magnitude_norm    # B channel: normalized magnitude
+
 
         # Convert to 8-bit, handle NaN and inf values
         rgb_8bit = rgb * 255
@@ -256,36 +271,48 @@ class MotionVectorsRGB8FlowEncoder(FlowEncoder):
         # Convert from uint8 to float32 in [0, 1] range
         normalized = encoded_flow.astype(np.float32) / 255.0
         
-        # Преобразование из RGB в YCbCr, где Y будет записан в B компоненту normalized
-        R = normalized[:, :, 0]
-        G = normalized[:, :, 1]
-        B = normalized[:, :, 2]
+        if False:
+            R = normalized[:, :, 0]
+            G = normalized[:, :, 1]
+            B = normalized[:, :, 2]
 
-        Y  = 0.299 * R + 0.587 * G + 0.114 * B
-        Cb = 0.5643 * (B - Y) + 0.5
-        Cr = 0.7132 * (R - Y) + 0.5
+            Y  = 0.299 * R + 0.587 * G + 0.114 * B
+            Cb = 0.5643 * (B - Y) + 0.5
+            Cr = 0.7132 * (R - Y) + 0.5
 
-        Y = (Y - 0.5 * 0.7) / (1 - 0.7) 
-        Cb = (-0.5 + Cb) / 0.2
-        Cr = (-0.5 + Cr) / 0.2
+            Y = (Y - 0.5 * 0.7) / (1 - 0.7) 
+            Cb = (-0.5 + Cb) / 0.2
+            Cr = (-0.5 + Cr) / 0.2
 
-        normalized[:, :, 0] = Cb
-        normalized[:, :, 1] = Cr
-        normalized[:, :, 2] = Y
+            normalized[:, :, 0] = Cb
+            normalized[:, :, 1] = Cr
+            normalized[:, :, 2] = Y
+
+            # Extract normalized direction from RG channels
+            direction_x_norm = normalized[:, :, 0]  # R channel: normalized direction X
+            direction_y_norm = normalized[:, :, 1]  # G channel: normalized direction Y
+            magnitude_norm = normalized[:, :, 2]    # B channel: normalized magnitude
+            
+            # Map direction from [0, 1] back to [-1, 1]
+            direction_x = (direction_x_norm)# * 2) - 1
+            direction_y = (direction_y_norm)# * 2) - 1
+            
+            # Map magnitude from [0, 1] back to [0, clamp_range]
+            magnitude = magnitude_norm * self.clamp_range
+        else:
+            # Extract normalized direction from RG channels
+            direction_x_norm = normalized[:, :, 0]  # R channel: normalized direction X
+            direction_y_norm = normalized[:, :, 1]  # G channel: normalized direction Y
+            magnitude_norm = normalized[:, :, 2]    # B channel: normalized magnitude
+            
+            # Map direction from [0, 1] back to [-1, 1]
+            direction_x = (direction_x_norm * 2) - 1
+            direction_y = (direction_y_norm * 2) - 1
+            
+            # Map magnitude from [0, 1] back to [0, clamp_range]
+            magnitude = magnitude_norm * self.clamp_range
 
         h, w = encoded_flow.shape[:2]
-        
-        # Extract normalized direction from RG channels
-        direction_x_norm = normalized[:, :, 0]  # R channel: normalized direction X
-        direction_y_norm = normalized[:, :, 1]  # G channel: normalized direction Y
-        magnitude_norm = normalized[:, :, 2]    # B channel: normalized magnitude
-        
-        # Map direction from [0, 1] back to [-1, 1]
-        direction_x = (direction_x_norm)# * 2) - 1
-        direction_y = (direction_y_norm)# * 2) - 1
-        
-        # Map magnitude from [0, 1] back to [0, clamp_range]
-        magnitude = magnitude_norm * self.clamp_range
         
         # Reconstruct flow vectors
         flow = np.zeros((h, w, 2), dtype=np.float32)

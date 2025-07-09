@@ -536,16 +536,18 @@ class VideoFlowProcessor:
     
     def create_difference_overlay(self, original_flow, decoded_flow, magnitude_threshold=0.9):
         """
-        Create difference overlay between original and decoded flow
+        Create difference overlay between original and decoded flow using radar colors
         
         Args:
             original_flow: Original optical flow (H, W, 2)
             decoded_flow: Decoded optical flow (H, W, 2)
-            magnitude_threshold: Threshold for significant differences
+            magnitude_threshold: Threshold for significant differences (not used in new version)
             
         Returns:
-            Difference overlay image (H, W, 3) with visual representation
+            Difference overlay image (H, W, 3) with radar color coding and legend overlay at bottom
         """
+        import cv2
+        
         # Calculate flow differences
         diff_flow = original_flow - decoded_flow
         
@@ -556,20 +558,69 @@ class VideoFlowProcessor:
         h, w = diff_flow.shape[:2]
         overlay = np.zeros((h, w, 3), dtype=np.uint8)
         
-        # Use HSV encoding for difference visualization
-        from encoding.flow_encoders import HSVFlowEncoder
-        hsv_encoder = HSVFlowEncoder()
-        diff_viz = hsv_encoder.encode(diff_flow, w, h)
+        # Define error levels and corresponding radar colors (RGB)
+        error_levels = [0.1, 0.5, 1.0, 2.0, 4.0]
+        radar_colors = [
+            (0, 255, 0),      # Green (very small errors)
+            (255, 255, 0),    # Yellow (small errors)
+            (255, 165, 0),    # Orange (medium errors)
+            (255, 0, 0),      # Red (large errors)
+            (255, 0, 255),    # Magenta (very large errors)
+        ]
         
-        # Create mask for significant differences
-        significant_diff_mask = diff_magnitude > magnitude_threshold
+        # Apply radar colors based on error magnitude
+        for i, (level, color) in enumerate(zip(error_levels, radar_colors)):
+            if i == 0:
+                # First level: errors <= 0.001
+                mask = diff_magnitude <= level
+            elif i == len(error_levels) - 1:
+                # Last level: errors > 0.2
+                mask = diff_magnitude > error_levels[i-1]
+            else:
+                # Middle levels: previous_level < errors <= current_level
+                mask = (diff_magnitude > error_levels[i-1]) & (diff_magnitude <= level)
+            
+            overlay[mask] = color
         
-        # Apply overlay: show difference only where it's significant
-        overlay[significant_diff_mask] = diff_viz[significant_diff_mask]
+        # Create compact legend with small colored squares
+        legend_height = 25
+        legend_y_start = h - legend_height
         
-        # Add magnitude-based intensity (darker for smaller differences)
-        intensity = np.clip(diff_magnitude / (magnitude_threshold * 2), 0, 1)
-        overlay = (overlay * intensity[:, :, np.newaxis]).astype(np.uint8)
+        # Position legend squares in bottom-left corner
+        square_size = 12
+        square_spacing = 45
+        start_x = 10
+        start_y = h - 20
+        
+        # Draw color squares with white border and numbers
+        for i, (level, color) in enumerate(zip(error_levels, radar_colors)):
+            x_pos = start_x + i * square_spacing
+            
+            # Draw white border (square + 2 pixels)
+            cv2.rectangle(overlay, (x_pos - 1, start_y - square_size - 1), 
+                         (x_pos + square_size + 1, start_y + 1), (255, 255, 255), -1)
+            
+            # Draw colored square
+            cv2.rectangle(overlay, (x_pos, start_y - square_size), 
+                         (x_pos + square_size, start_y), color, -1)
+            
+            # Add number label
+            if i == len(error_levels) - 1:
+                label = f">{error_levels[i-1]:.3f}"
+            else:
+                label = f"{level:.3f}"
+            
+            # Position number to the right of square
+            text_x = x_pos + square_size + 3
+            text_y = start_y - 4
+            
+            # Add black shadow
+            cv2.putText(overlay, label, (text_x + 1, text_y + 1), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 0), 1)
+            
+            # Add white text
+            cv2.putText(overlay, label, (text_x, text_y), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
         
         return overlay
     
