@@ -125,7 +125,7 @@ class MotionVectorsFlowEncoder(FlowEncoder):
     - Store in RG channels (R=horizontal, G=vertical)
     """
     
-    def __init__(self, clamp_range: float = 64.0):
+    def __init__(self, clamp_range: float = 16.0):
         self.clamp_range = clamp_range
 
     def encode(self, flow: np.ndarray, width: int, height: int) -> np.ndarray:
@@ -148,6 +148,30 @@ class MotionVectorsFlowEncoder(FlowEncoder):
         rgb_8bit = rgb * 255
         rgb_8bit = np.nan_to_num(rgb_8bit, nan=0.0, posinf=255.0, neginf=0.0)
         return rgb_8bit.astype(np.uint8)
+
+    def decode(self, encoded_flow: np.ndarray) -> np.ndarray:
+        """
+        Decode motion vectors format back to float32 flow vectors
+        
+        Args:
+            encoded_flow: Encoded flow as uint8 RGB image (only RG channels used)
+            
+        Returns:
+            Decoded flow as float32 array (H, W, 2)
+        """
+        # Convert from uint8 to float32 in [0, 1] range
+        normalized = encoded_flow.astype(np.float32) / 255.0
+        
+        # Extract RG channels (horizontal, vertical flow)
+        h, w = encoded_flow.shape[:2]
+        flow = np.zeros((h, w, 2), dtype=np.float32)
+        flow[:, :, 0] = normalized[:, :, 0]  # R channel: horizontal flow
+        flow[:, :, 1] = normalized[:, :, 1]  # G channel: vertical flow
+        
+        # Map [0, 1] back to [-clamp_range, +clamp_range]
+        decoded = (flow * 2 * self.clamp_range) - self.clamp_range
+        
+        return decoded
 
 
 class TorchvisionFlowEncoder(FlowEncoder):
@@ -282,3 +306,35 @@ def encode_flow(flow: np.ndarray, width: int, height: int, format_name: str = 'g
     """
     encoder = FlowEncoderFactory.create_encoder(format_name)
     return encoder.encode(flow, width, height) 
+
+
+def encode_motion_vectors(flow: np.ndarray, clamp_range: float = 64.0) -> np.ndarray:
+    """
+    Standalone function to encode optical flow to motion vectors format (uint8 RG)
+    
+    Args:
+        flow: Optical flow array (H, W, 2) in float32
+        clamp_range: Range to clamp flow values to [-clamp_range, +clamp_range]
+        
+    Returns:
+        Encoded flow as uint8 RGB image (only RG channels used)
+    """
+    encoder = MotionVectorsFlowEncoder(clamp_range=clamp_range)
+    # For encoding, width and height are not used in motion vectors format
+    h, w = flow.shape[:2]
+    return encoder.encode(flow, w, h)
+
+
+def decode_motion_vectors(encoded_flow: np.ndarray, clamp_range: float = 64.0) -> np.ndarray:
+    """
+    Standalone function to decode motion vectors format back to float32 flow vectors
+    
+    Args:
+        encoded_flow: Encoded flow as uint8 RGB image (only RG channels used)
+        clamp_range: Range used during encoding (must match encoding clamp_range)
+        
+    Returns:
+        Decoded flow as float32 array (H, W, 2)
+    """
+    encoder = MotionVectorsFlowEncoder(clamp_range=clamp_range)
+    return encoder.decode(encoded_flow) 

@@ -38,7 +38,8 @@ class VideoFlowProcessor:
                  kalman_process_noise=0.01, kalman_measurement_noise=0.1, kalman_prediction_confidence=0.7,
                  kalman_motion_model='constant_acceleration', kalman_outlier_threshold=3.0, kalman_min_track_length=3,
                  flow_model='videoflow', model_path=None, stage='sintel', 
-                 vf_dataset='sintel', vf_architecture='mof', vf_variant='standard'):
+                 vf_dataset='sintel', vf_architecture='mof', vf_variant='standard',
+                 taa_emulate_compression=False):
         """Initialize optical flow processor with model selection support"""
         # Initialize device manager
         self.device_manager = DeviceManager()
@@ -99,8 +100,11 @@ class VideoFlowProcessor:
         # TAA compare mode state
         self.taa_compare_kalman_filters = {}
         
+        # TAA compression emulation setting
+        self.taa_emulate_compression = taa_emulate_compression
+        
         # TAA processors for consistent state management
-        self.taa_flow_processor = TAAProcessor(alpha=0.1)
+        self.taa_flow_processor = TAAProcessor(alpha=0.1, emulate_compression=taa_emulate_compression)
         self.taa_simple_processor = TAAProcessor(alpha=0.1)
         
         # Initialize storage manager
@@ -991,6 +995,8 @@ def main():
                        help='Output only optical flow visualization (no original video)')
     parser.add_argument('--taa', action='store_true',
                        help='Add TAA (Temporal Anti-Aliasing) effect visualization using inverted optical flow from previous frame')
+    parser.add_argument('--taa-emulate-compression', action='store_true',
+                       help='Emulate motion vectors compression/decompression in TAA processing (uint8 RG format)')
     parser.add_argument('--flow-format', choices=['gamedev', 'hsv', 'torchvision', 'motion-vectors'], default='gamedev',
                        help='Optical flow encoding format: gamedev (RG channels), hsv (standard visualization), or torchvision (color wheel)')
     parser.add_argument('--tile', action='store_true',
@@ -1116,7 +1122,7 @@ def main():
                                       kalman_min_track_length=args.kalman_min_track_length,
                                       flow_model=args.model, model_path=args.model_path, stage=args.stage,
                                       vf_dataset=args.vf_dataset, vf_architecture=args.vf_architecture, 
-                                      vf_variant=args.vf_variant)
+                                      vf_variant=args.vf_variant, taa_emulate_compression=args.taa_emulate_compression)
         
         # Handle time-based parameters for frame extraction
         if args.start_time is not None or args.duration is not None:
@@ -1285,7 +1291,7 @@ def main():
                                           sequence_length=args.sequence_length, flow_smoothing=0.0,
                                           flow_model=args.model, model_path=args.model_path, stage=args.stage,
                                           vf_dataset=args.vf_dataset, vf_architecture=args.vf_architecture, 
-                                          vf_variant=args.vf_variant)
+                                          vf_variant=args.vf_variant, taa_emulate_compression=False)
         
         print(f"\nTile grid analysis:")
         tile_width, tile_height, cols, rows, tiles_info = temp_processor.calculate_tile_grid(width, height)
@@ -1311,7 +1317,7 @@ def main():
                                   kalman_min_track_length=args.kalman_min_track_length,
                                   flow_model=args.model, model_path=args.model_path, stage=args.stage,
                                   vf_dataset=args.vf_dataset, vf_architecture=args.vf_architecture, 
-                                  vf_variant=args.vf_variant)
+                                  vf_variant=args.vf_variant, taa_emulate_compression=args.taa_emulate_compression)
     
     try:
         # Create output filename with frame/time range if not specified

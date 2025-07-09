@@ -6,6 +6,16 @@ import numpy as np
 import cv2
 from typing import Optional, Tuple
 
+# Import motion vectors compression/decompression functions
+try:
+    from encoding.flow_encoders import encode_motion_vectors, decode_motion_vectors
+except ImportError:
+    # Fallback if encoding module is not available
+    def encode_motion_vectors(flow, clamp_range=64.0):
+        raise ImportError("Motion vectors encoding not available")
+    def decode_motion_vectors(encoded_flow, clamp_range=64.0):
+        raise ImportError("Motion vectors decoding not available")
+
 
 class TAAProcessor:
     """
@@ -15,7 +25,8 @@ class TAAProcessor:
     using optical flow for accurate pixel reprojection.
     """
     
-    def __init__(self, alpha: float = 0.1, bilateral_sigma_color: float = 25.0):
+    def __init__(self, alpha: float = 0.1, bilateral_sigma_color: float = 25.0, 
+                 emulate_compression: bool = False, mv_clamp_range: float = 64.0):
         """
         Initialize TAA processor
         
@@ -23,9 +34,13 @@ class TAAProcessor:
             alpha: Blending weight (0.0 = full history, 1.0 = no history)
             bilateral_sigma_color: Color similarity sigma for bilateral filtering.
                                    Lower values are more selective.
+            emulate_compression: Whether to emulate motion vectors compression/decompression
+            mv_clamp_range: Clamp range for motion vectors compression
         """
         self.alpha = alpha
         self.bilateral_sigma_color = bilateral_sigma_color
+        self.emulate_compression = emulate_compression
+        self.mv_clamp_range = mv_clamp_range
         self.history = {}  # Store history for multiple sequences
     
     def apply_taa(self, 
@@ -69,15 +84,43 @@ class TAAProcessor:
             # Simple temporal blending without flow (basic TAA)
             result = alpha * current_float + (1 - alpha) * previous_taa_frame
         else:
+            # Apply compression emulation if enabled
+            processed_flow = self._emulate_compression_if_enabled(flow_pixels)
+            
             # Flow-based TAA (motion-compensated)
             result = self._apply_flow_based_taa(
-                current_float, flow_pixels, previous_taa_frame, alpha, use_bilateral
+                current_float, processed_flow, previous_taa_frame, alpha, use_bilateral
             )
         
         # Update history
         self.history[sequence_id] = result
         return result
     
+    def _emulate_compression_if_enabled(self, flow_pixels: np.ndarray) -> np.ndarray:
+        """
+        Emulate motion vectors compression/decompression if enabled
+        
+        Args:
+            flow_pixels: Original flow pixels
+            
+        Returns:
+            Flow pixels (compressed/decompressed if emulation is enabled)
+        """
+        if not self.emulate_compression:
+            return flow_pixels
+            
+        try:
+            # Compress to uint8 RG format
+            compressed = encode_motion_vectors(flow_pixels, clamp_range=self.mv_clamp_range)
+            
+            # Decompress back to float32
+            decompressed = decode_motion_vectors(compressed, clamp_range=self.mv_clamp_range)
+            
+            return decompressed
+        except ImportError as e:
+            print(f"Warning: Motion vectors compression not available: {e}")
+            return flow_pixels
+
     def _apply_flow_based_taa(self,
                              current_frame: np.ndarray,
                              flow_pixels: np.ndarray,
@@ -318,15 +361,17 @@ class TAAComparisonProcessor:
     TAA comparison processor for side-by-side comparison of different TAA methods
     """
     
-    def __init__(self, alpha: float = 0.1):
+    def __init__(self, alpha: float = 0.1, emulate_compression: bool = False, mv_clamp_range: float = 64.0):
         """
         Initialize comparison processor
         
         Args:
             alpha: Default blending weight
+            emulate_compression: Whether to emulate motion vectors compression/decompression
+            mv_clamp_range: Clamp range for motion vectors compression
         """
-        self.flow_taa = TAAProcessor(alpha)
-        self.simple_taa = TAAProcessor(alpha)
+        self.flow_taa = TAAProcessor(alpha, emulate_compression=emulate_compression, mv_clamp_range=mv_clamp_range)
+        self.simple_taa = TAAProcessor(alpha, emulate_compression=False)  # Simple TAA doesn't use flow
     
     def apply_comparison(self,
                         current_frame: np.ndarray,
@@ -377,7 +422,9 @@ def apply_taa_effect(current_frame: np.ndarray,
                     flow_pixels: Optional[np.ndarray] = None,
                     previous_taa_frame: Optional[np.ndarray] = None,
                     alpha: float = 0.1,
-                    use_flow: bool = True) -> np.ndarray:
+                    use_flow: bool = True,
+                    emulate_compression: bool = False,
+                    mv_clamp_range: float = 64.0) -> np.ndarray:
     """
     Convenience function to apply TAA effect
     
@@ -387,11 +434,13 @@ def apply_taa_effect(current_frame: np.ndarray,
         previous_taa_frame: Previous TAA result frame
         alpha: Blending weight (0.0 = full history, 1.0 = no history)
         use_flow: Whether to use optical flow for reprojection
+        emulate_compression: Whether to emulate motion vectors compression/decompression
+        mv_clamp_range: Clamp range for motion vectors compression
     
     Returns:
         TAA processed frame (float32)
     """
-    processor = TAAProcessor(alpha)
+    processor = TAAProcessor(alpha, emulate_compression=emulate_compression, mv_clamp_range=mv_clamp_range)
     return processor.apply_taa(
         current_frame=current_frame,
         flow_pixels=flow_pixels,
