@@ -39,7 +39,7 @@ class VideoFlowProcessor:
                  kalman_motion_model='constant_acceleration', kalman_outlier_threshold=3.0, kalman_min_track_length=3,
                  flow_model='videoflow', model_path=None, stage='sintel', 
                  vf_dataset='sintel', vf_architecture='mof', vf_variant='standard',
-                 taa_emulate_compression=False):
+                 taa_emulate_compression=False, motion_vectors_clamp_range=32.0):
         """Initialize optical flow processor with model selection support"""
         # Initialize device manager
         self.device_manager = DeviceManager()
@@ -102,6 +102,9 @@ class VideoFlowProcessor:
         
         # TAA compression emulation setting
         self.taa_emulate_compression = taa_emulate_compression
+        
+        # Motion vectors encoding parameters
+        self.motion_vectors_clamp_range = motion_vectors_clamp_range
         
         # TAA processors for consistent state management
         self.taa_flow_processor = TAAProcessor(alpha=0.1, emulate_compression=taa_emulate_compression)
@@ -455,9 +458,19 @@ class VideoFlowProcessor:
         """Encode optical flow in gamedev format using encoding module"""
         return encode_flow(flow, width, height, 'gamedev')
     
-    def encode_motion_vectors_format(self, flow, width, height):
-        """Encode optical flow in motion vectors format using encoding module"""
-        return encode_flow(flow, width, height, 'motion-vectors')
+    def encode_motion_vectors_rg8_format(self, flow, width, height):
+        """Encode optical flow in motion vectors RG8 format using encoding module"""
+        from encoding.flow_encoders import FlowEncoderFactory
+        encoder = FlowEncoderFactory.create_encoder('motion-vectors-rg8', clamp_range=self.motion_vectors_clamp_range)
+        return encoder.encode(flow, width, height)
+    
+    def encode_motion_vectors_rgb8_format(self, flow, width, height):
+        """Encode optical flow in motion vectors RGB8 format using encoding module"""
+        from encoding.flow_encoders import FlowEncoderFactory
+        encoder = FlowEncoderFactory.create_encoder('motion-vectors-rgb8', clamp_range=self.motion_vectors_clamp_range)
+        return encoder.encode(flow, width, height)
+    
+
     
     def encode_torchvision_format(self, flow, width, height):
         """Encode optical flow using torchvision format using encoding module"""
@@ -497,7 +510,7 @@ class VideoFlowProcessor:
         )
         
     def generate_output_filename(self, input_path, output_dir, start_time=None, duration=None, 
-                                start_frame=0, max_frames=1000, vertical=False, flow_only=False, taa=False, lossless=False, uncompressed=False):
+                                start_frame=0, max_frames=1000, vertical=False, flow_only=False, taa=False, lossless=False, uncompressed=False, flow_format='gamedev', fps=30.0):
         """Generate automatic output filename based on parameters"""
         import os
         
@@ -533,20 +546,39 @@ class VideoFlowProcessor:
             parts.append("tile")
         
         if flow_only:
-            parts.append("flow")
+            # Add format information for flow-only mode (avoid repeating "flow")
+            if flow_format != 'gamedev':
+                # Clean up format name: replace dashes with underscores, remove redundant "flow"
+                clean_format = flow_format.replace('-', '_').replace('_flow', '').replace('flow_', '')
+                if flow_format.startswith('motion-vectors'):
+                    # Add motion vectors format with clamp range
+                    parts.append(f"{clean_format}_{int(self.motion_vectors_clamp_range)}")
+                else:
+                    parts.append(clean_format)
+            else:
+                parts.append("gamedev")
         elif taa:
             parts.append("taa")
         elif vertical:
             parts.append("vert")
         
+        # Add FPS information
+        parts.append(f"{fps:.0f}fps")
+        
+        # Add codec information
         if uncompressed:
-            parts.append("uncompressed")
+            parts.append("uncompressed_I420")  # Raw I420 codec
+            codec_name = "I420"
         elif lossless:
-            parts.append("lossless")
+            parts.append("lossless_FFV1")  # FFV1 lossless codec
+            codec_name = "FFV1"
+        else:
+            parts.append("MJPG")  # Default MJPEG
+            codec_name = "MJPG"
         
         # Join parts and add extension
         # MJPG codec requires AVI container, MP4 container doesn't support it
-        extension = ".avi" if lossless or uncompressed else ".avi"  # Use AVI for MJPG compatibility
+        extension = ".avi"  # Use AVI for MJPG compatibility
         filename = "_".join(parts) + extension
         return os.path.join(results_dir, filename)
     
@@ -572,6 +604,7 @@ class VideoFlowProcessor:
                 }
         
         # Handle time-based parameters
+        fps = None
         if start_time is not None or duration is not None:
             fps = self.get_video_fps(input_path)
             print(f"Video FPS: {fps:.2f}")
@@ -584,18 +617,7 @@ class VideoFlowProcessor:
                 max_frames = self.time_to_frame(duration, fps)
                 print(f"Duration: {duration}s -> {max_frames} frames")
         
-        # Check if output_path is a directory and generate filename if needed
-        if os.path.isdir(output_path):
-            output_path = self.generate_output_filename(
-                input_path, output_path, start_time, duration, 
-                start_frame, max_frames, vertical, flow_only, taa, lossless=lossless, uncompressed=uncompressed
-            )
-            print(f"Auto-generated output filename: {os.path.basename(output_path)}")
-        
-        print(f"Processing: {input_path} -> {output_path}")
-        print(f"Frame range: {start_frame} to {start_frame + max_frames - 1}")
-        
-        # Extract frames first
+        # Extract frames first to get accurate FPS
         frame_extractor = FrameExtractor(input_path, fast_mode=self.fast_mode)
         frames, fps, width, height, actual_start = frame_extractor.extract_frames(
             max_frames=max_frames, 
@@ -603,6 +625,52 @@ class VideoFlowProcessor:
             start_time=start_time,
             duration=duration
         )
+        
+        # Check if output_path is a directory and generate filename if needed
+        if os.path.isdir(output_path):
+            output_path = self.generate_output_filename(
+                input_path, output_path, start_time, duration, 
+                start_frame, max_frames, vertical, flow_only, taa, lossless=lossless, uncompressed=uncompressed, flow_format=flow_format, fps=fps
+            )
+            print(f"Auto-generated output filename: {os.path.basename(output_path)}")
+        
+        print(f"Processing: {input_path} -> {output_path}")
+        print(f"Frame range: {start_frame} to {start_frame + max_frames - 1}")
+        print(f"Video FPS: {fps:.2f}")
+        
+        # Log encoder configuration
+        print(f"\n[Configuration] Flow Encoding:")
+        if flow_format == 'hsv':
+            print(f"  Format: HSV color space visualization")
+        elif flow_format == 'torchvision':
+            print(f"  Format: TorchVision color wheel visualization")
+        elif flow_format == 'motion-vectors-rg8':
+            print(f"  Format: Motion Vectors RG8 (normalized XY in RG channels)")
+            print(f"  Clamp Range: ±{self.motion_vectors_clamp_range} pixels")
+        elif flow_format == 'motion-vectors-rgb8':
+            print(f"  Format: Motion Vectors RGB8 (direction+magnitude)")
+            print(f"  Clamp Range: ±{self.motion_vectors_clamp_range} pixels")
+        else:
+            print(f"  Format: GameDev RG channels (legacy)")
+        
+        if taa:
+            print(f"\n[Configuration] TAA Processing:")
+            print(f"  TAA Enabled: True")
+            print(f"  TAA Compression Emulation: {self.taa_emulate_compression}")
+            if self.taa_emulate_compression:
+                print(f"  TAA Encoder: Motion Vectors RG8 (uint8 compression/decompression)")
+            else:
+                print(f"  TAA Encoder: Native float32 precision")
+        
+        if self.flow_smoothing > 0:
+            print(f"\n[Configuration] Flow Stabilization:")
+            print(f"  Kalman Filter Enabled: True")
+            print(f"  Process Noise: {self.kalman_process_noise}")
+            print(f"  Measurement Noise: {self.kalman_measurement_noise}")
+            print(f"  Prediction Confidence: {self.kalman_prediction_confidence}")
+            print(f"  Motion Model: {self.kalman_motion_model}")
+        
+        print()  # Add blank line for readability
         
         # Setup flow caching
         flow_cache_dir = None
@@ -693,6 +761,21 @@ class VideoFlowProcessor:
         
         # Load optical flow model only if we need to compute flow
         if not use_cached_flow:
+            print(f"[Configuration] Optical Flow Model:")
+            print(f"  Model: {self.flow_model}")
+            if hasattr(self, 'stage'):
+                print(f"  Stage: {self.stage}")
+            if self.flow_model == 'videoflow':
+                print(f"  Architecture: {self.vf_architecture}")
+                print(f"  Dataset: {self.vf_dataset}")
+                print(f"  Variant: {self.vf_variant}")
+            if self.fast_mode:
+                print(f"  Fast Mode: Enabled (lower resolution, fewer iterations)")
+            if self.tile_mode:
+                print(f"  Tile Mode: Enabled (process in tiles for large frames)")
+            print(f"  Device: {self.device}")
+            print()
+            
             self.load_model()
         
         # Setup flow saving directory if requested or if we need to cache
@@ -828,12 +911,26 @@ class VideoFlowProcessor:
                 flow = raw_flow
             
             # Encode optical flow based on selected format
+            if i == 0:  # Log encoder info only once
+                if flow_format == 'hsv':
+                    print(f"[Encoder] Using HSV color space encoder")
+                elif flow_format == 'torchvision':
+                    print(f"[Encoder] Using TorchVision color wheel encoder")
+                elif flow_format == 'motion-vectors-rg8':
+                    print(f"[Encoder] Using Motion Vectors RG8 encoder (clamp_range={self.motion_vectors_clamp_range})")
+                elif flow_format == 'motion-vectors-rgb8':
+                    print(f"[Encoder] Using Motion Vectors RGB8 encoder (direction+magnitude format, clamp_range={self.motion_vectors_clamp_range})")
+                else:
+                    print(f"[Encoder] Using GameDev RG channel encoder")
+            
             if flow_format == 'hsv':
                 flow_viz = self.encode_hsv_format(flow, width, height)
             elif flow_format == 'torchvision':
                 flow_viz = self.encode_torchvision_format(flow, width, height)
-            elif flow_format == 'motion-vectors':
-                flow_viz = self.encode_motion_vectors_format(flow, width, height)
+            elif flow_format == 'motion-vectors-rg8':
+                flow_viz = self.encode_motion_vectors_rg8_format(flow, width, height)
+            elif flow_format == 'motion-vectors-rgb8':
+                flow_viz = self.encode_motion_vectors_rgb8_format(flow, width, height)
             else:
                 flow_viz = self.encode_gamedev_format(flow, width, height)
             
@@ -1017,8 +1114,10 @@ def main():
                        help='Add TAA (Temporal Anti-Aliasing) effect visualization using inverted optical flow from previous frame')
     parser.add_argument('--taa-emulate-compression', action='store_true',
                        help='Emulate motion vectors compression/decompression in TAA processing (uint8 RG format)')
-    parser.add_argument('--flow-format', choices=['gamedev', 'hsv', 'torchvision', 'motion-vectors'], default='gamedev',
-                       help='Optical flow encoding format: gamedev (RG channels), hsv (standard visualization), or torchvision (color wheel)')
+    parser.add_argument('--flow-format', choices=['gamedev', 'hsv', 'torchvision', 'motion-vectors-rg8', 'motion-vectors-rgb8'], default='gamedev',
+                       help='Optical flow encoding format: gamedev (RG channels), hsv (standard visualization), torchvision (color wheel), motion-vectors-rg8 (RG channels normalized), motion-vectors-rgb8 (direction+magnitude)')
+    parser.add_argument('--motion-vectors-clamp-range', type=float, default=32.0,
+                       help='Clamp range for motion-vectors encoding formats (default: 32.0)')
     parser.add_argument('--tile', action='store_true',
                        help='Enable tile-based processing: split frames into 1280x1280 square tiles (optimal for VideoFlow MOF model)')
     parser.add_argument('--sequence-length', type=int, default=5,
@@ -1142,7 +1241,8 @@ def main():
                                       kalman_min_track_length=args.kalman_min_track_length,
                                       flow_model=args.model, model_path=args.model_path, stage=args.stage,
                                       vf_dataset=args.vf_dataset, vf_architecture=args.vf_architecture, 
-                                      vf_variant=args.vf_variant, taa_emulate_compression=args.taa_emulate_compression)
+                                      vf_variant=args.vf_variant, taa_emulate_compression=args.taa_emulate_compression,
+                                      motion_vectors_clamp_range=args.motion_vectors_clamp_range)
         
         # Handle time-based parameters for frame extraction
         if args.start_time is not None or args.duration is not None:
@@ -1323,7 +1423,8 @@ def main():
                                           sequence_length=args.sequence_length, flow_smoothing=0.0,
                                           flow_model=args.model, model_path=args.model_path, stage=args.stage,
                                           vf_dataset=args.vf_dataset, vf_architecture=args.vf_architecture, 
-                                          vf_variant=args.vf_variant, taa_emulate_compression=False)
+                                          vf_variant=args.vf_variant, taa_emulate_compression=False,
+                                          motion_vectors_clamp_range=args.motion_vectors_clamp_range)
         
         print(f"\nTile grid analysis:")
         tile_width, tile_height, cols, rows, tiles_info = temp_processor.calculate_tile_grid(width, height)
@@ -1349,7 +1450,8 @@ def main():
                                   kalman_min_track_length=args.kalman_min_track_length,
                                   flow_model=args.model, model_path=args.model_path, stage=args.stage,
                                   vf_dataset=args.vf_dataset, vf_architecture=args.vf_architecture, 
-                                  vf_variant=args.vf_variant, taa_emulate_compression=args.taa_emulate_compression)
+                                  vf_variant=args.vf_variant, taa_emulate_compression=args.taa_emulate_compression,
+                                  motion_vectors_clamp_range=args.motion_vectors_clamp_range)
     
     try:
         # Create output filename with frame/time range if not specified

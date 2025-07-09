@@ -117,12 +117,72 @@ class GamedevFlowEncoder(FlowEncoder):
         return rgb_8bit.astype(np.uint8)
 
 
-class MotionVectorsFlowEncoder(FlowEncoder):
+class MotionVectorsRG8FlowEncoder(FlowEncoder):
     """
-    Motion Vectors flow encoder - clamped and normalized to 8-bit RG
-    - Clamp flow to [-64, +64] pixels
+    Motion Vectors RG8 flow encoder - clamped and normalized to 8-bit RG
+    - Clamp flow to [-clamp_range, +clamp_range] pixels
     - Map to [0, 255] (UNORM 8-bit)
     - Store in RG channels (R=horizontal, G=vertical)
+    """
+    
+    def __init__(self, clamp_range: float = 64.0):
+        self.clamp_range = clamp_range
+
+    def encode(self, flow: np.ndarray, width: int, height: int) -> np.ndarray:
+        """Encode optical flow in motion-vectors RG8 format"""
+
+        # print(f"[MotionVectorsRG8FlowEncoder] Encoding with clamp_range={self.clamp_range}")
+
+        # Clamp to [-clamp_range, +clamp_range] range
+        clamped = np.clip(flow, -self.clamp_range, self.clamp_range)
+        
+        # Map [-clamp_range, +clamp_range] to [0, 1]
+        encoded = (clamped + self.clamp_range) / (2 * self.clamp_range)
+        encoded = np.clip(encoded, 0, 1)
+        
+        # Create RGB image
+        h, w = flow.shape[:2]
+        rgb = np.zeros((h, w, 3), dtype=np.float32)
+        rgb[:, :, 0] = encoded[:, :, 0]  # R channel: horizontal flow
+        rgb[:, :, 1] = encoded[:, :, 1]  # G channel: vertical flow
+        rgb[:, :, 2] = 0.0               # B channel: unused
+        
+        # Convert to 8-bit, handle NaN and inf values
+        rgb_8bit = rgb * 255
+        rgb_8bit = np.nan_to_num(rgb_8bit, nan=0.0, posinf=255.0, neginf=0.0)
+        return rgb_8bit.astype(np.uint8)
+
+    def decode(self, encoded_flow: np.ndarray) -> np.ndarray:
+        """
+        Decode motion vectors RG8 format back to float32 flow vectors
+        
+        Args:
+            encoded_flow: Encoded flow as uint8 RGB image (only RG channels used)
+            
+        Returns:
+            Decoded flow as float32 array (H, W, 2)
+        """
+        # Convert from uint8 to float32 in [0, 1] range
+        normalized = encoded_flow.astype(np.float32) / 255.0
+        
+        # Extract RG channels (horizontal, vertical flow)
+        h, w = encoded_flow.shape[:2]
+        flow = np.zeros((h, w, 2), dtype=np.float32)
+        flow[:, :, 0] = normalized[:, :, 0]  # R channel: horizontal flow
+        flow[:, :, 1] = normalized[:, :, 1]  # G channel: vertical flow
+        
+        # Map [0, 1] back to [-clamp_range, +clamp_range]
+        decoded = (flow * 2 * self.clamp_range) - self.clamp_range
+        
+        return decoded
+
+
+class MotionVectorsRGB8FlowEncoder(FlowEncoder):
+    """
+    Motion Vectors RGB8 flow encoder - direction and magnitude in 8-bit RGB
+    - R channel: normalized direction X component (from [-1,1] to [0,255])
+    - G channel: normalized direction Y component (from [-1,1] to [0,255]) 
+    - B channel: magnitude (from [0,clamp_range] to [0,255])
     """
     
     def __init__(self, clamp_range: float = 32.0):
@@ -130,11 +190,11 @@ class MotionVectorsFlowEncoder(FlowEncoder):
 
     def encode(self, flow: np.ndarray, width: int, height: int) -> np.ndarray:
         """
-        Encode optical flow in motion-vectors format with direction and magnitude
-        - R channel: normalized direction X component (from [-1,1] to [0,255])
-        - G channel: normalized direction Y component (from [-1,1] to [0,255]) 
-        - B channel: magnitude (from [0,clamp_range] to [0,255])
+        Encode optical flow in motion-vectors RGB8 format with direction and magnitude
         """
+
+        # print(f"[MotionVectorsRGB8FlowEncoder] Encoding with clamp_range={self.clamp_range}")
+
         h, w = flow.shape[:2]
         flow_x = flow[:, :, 0]
         flow_y = flow[:, :, 1]
@@ -165,6 +225,20 @@ class MotionVectorsFlowEncoder(FlowEncoder):
         rgb[:, :, 1] = direction_y_norm  # G channel: normalized direction Y
         rgb[:, :, 2] = magnitude_norm    # B channel: normalized magnitude
         
+        # Преобразование из YCbCr в RGB, предполагая что в rgb:
+        # rgb[:, :, 0] = Cb, rgb[:, :, 1] = Cr, rgb[:, :, 2] = Y (Y в B-канале)
+        # Формулы:
+        # R = Y + 1.402 * (Cr - 0.5)
+        # G = Y - 0.344136 * (Cb - 0.5) - 0.714136 * (Cr - 0.5)
+        # B = Y + 1.772 * (Cb - 0.5)
+        Cb = rgb[:, :, 0]
+        Cr = rgb[:, :, 1]
+        Y  = rgb[:, :, 2]
+        R = Y + 1.402 * (Cr - 0.5)
+        G = Y - 0.344136 * (Cb - 0.5) - 0.714136 * (Cr - 0.5)
+        B = Y + 1.772 * (Cb - 0.5)
+        rgb = np.stack([R, G, B], axis=-1)
+
         # Convert to 8-bit, handle NaN and inf values
         rgb_8bit = rgb * 255
         rgb_8bit = np.nan_to_num(rgb_8bit, nan=0.0, posinf=255.0, neginf=0.0)
@@ -172,7 +246,7 @@ class MotionVectorsFlowEncoder(FlowEncoder):
 
     def decode(self, encoded_flow: np.ndarray) -> np.ndarray:
         """
-        Decode motion vectors format back to float32 flow vectors
+        Decode motion vectors RGB8 format back to float32 flow vectors
         
         Args:
             encoded_flow: Encoded flow as uint8 RGB image with direction and magnitude
@@ -183,6 +257,25 @@ class MotionVectorsFlowEncoder(FlowEncoder):
         # Convert from uint8 to float32 in [0, 1] range
         normalized = encoded_flow.astype(np.float32) / 255.0
         
+        # Преобразование из RGB в YCbCr, где Y будет записан в B компоненту normalized
+        R = normalized[:, :, 0]
+        G = normalized[:, :, 1]
+        B = normalized[:, :, 2]
+
+        # Формулы преобразования RGB -> YCbCr (YCbCr ITU-R BT.601)
+        # Y  = 0.299*R + 0.587*G + 0.114*B
+        # Cb = 0.5643*(B - Y) + 0.5
+        # Cr = 0.7132*(R - Y) + 0.5
+
+        Y  = 0.299 * R + 0.587 * G + 0.114 * B
+        Cb = 0.5643 * (B - Y) + 0.5
+        Cr = 0.7132 * (R - Y) + 0.5
+
+        # Записываем Y в B компоненту normalized, Cb в R, Cr в G
+        normalized[:, :, 0] = Cb
+        normalized[:, :, 1] = Cr
+        normalized[:, :, 2] = Y
+
         h, w = encoded_flow.shape[:2]
         
         # Extract normalized direction from RG channels
@@ -275,7 +368,8 @@ class FlowEncoderFactory:
         'hsv': HSVFlowEncoder,
         'gamedev': GamedevFlowEncoder,
         'torchvision': TorchvisionFlowEncoder,
-        'motion-vectors': MotionVectorsFlowEncoder
+        'motion-vectors-rg8': MotionVectorsRG8FlowEncoder,
+        'motion-vectors-rgb8': MotionVectorsRGB8FlowEncoder
     }
     
     @classmethod
@@ -339,33 +433,42 @@ def encode_flow(flow: np.ndarray, width: int, height: int, format_name: str = 'g
     return encoder.encode(flow, width, height) 
 
 
-def encode_motion_vectors(flow: np.ndarray, clamp_range: float = 64.0) -> np.ndarray:
+def encode_motion_vectors(flow: np.ndarray, clamp_range: float = 64.0, format_variant: str = 'rgb8') -> np.ndarray:
     """
-    Standalone function to encode optical flow to motion vectors format (uint8 RG)
+    Standalone function to encode optical flow to motion vectors format
     
     Args:
         flow: Optical flow array (H, W, 2) in float32
-        clamp_range: Range to clamp flow values to [-clamp_range, +clamp_range]
+        clamp_range: Range to clamp flow values
+        format_variant: 'rg8' for RG channels only, 'rgb8' for direction+magnitude
         
     Returns:
-        Encoded flow as uint8 RGB image (only RG channels used)
+        Encoded flow as uint8 RGB image
     """
-    encoder = MotionVectorsFlowEncoder(clamp_range=clamp_range)
-    # For encoding, width and height are not used in motion vectors format
+    if format_variant.lower() == 'rg8':
+        encoder = MotionVectorsRG8FlowEncoder(clamp_range=clamp_range)
+    else:  # Default to rgb8
+        encoder = MotionVectorsRGB8FlowEncoder(clamp_range=clamp_range)
+    
     h, w = flow.shape[:2]
     return encoder.encode(flow, w, h)
 
 
-def decode_motion_vectors(encoded_flow: np.ndarray, clamp_range: float = 64.0) -> np.ndarray:
+def decode_motion_vectors(encoded_flow: np.ndarray, clamp_range: float = 64.0, format_variant: str = 'rgb8') -> np.ndarray:
     """
     Standalone function to decode motion vectors format back to float32 flow vectors
     
     Args:
-        encoded_flow: Encoded flow as uint8 RGB image (only RG channels used)
+        encoded_flow: Encoded flow as uint8 RGB image
         clamp_range: Range used during encoding (must match encoding clamp_range)
+        format_variant: 'rg8' for RG channels only, 'rgb8' for direction+magnitude
         
     Returns:
         Decoded flow as float32 array (H, W, 2)
     """
-    encoder = MotionVectorsFlowEncoder(clamp_range=clamp_range)
+    if format_variant.lower() == 'rg8':
+        encoder = MotionVectorsRG8FlowEncoder(clamp_range=clamp_range)
+    else:  # Default to rgb8
+        encoder = MotionVectorsRGB8FlowEncoder(clamp_range=clamp_range)
+    
     return encoder.decode(encoded_flow) 

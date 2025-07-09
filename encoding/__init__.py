@@ -7,7 +7,8 @@ from .flow_encoders import (
     HSVFlowEncoder,
     GamedevFlowEncoder,
     TorchvisionFlowEncoder,
-    MotionVectorsFlowEncoder,
+    MotionVectorsRG8FlowEncoder,
+    MotionVectorsRGB8FlowEncoder,
     FlowEncoderFactory,
     encode_flow
 )
@@ -17,7 +18,8 @@ __all__ = [
     'HSVFlowEncoder',
     'GamedevFlowEncoder',
     'TorchvisionFlowEncoder',
-    'MotionVectorsFlowEncoder',
+    'MotionVectorsRG8FlowEncoder',
+    'MotionVectorsRGB8FlowEncoder',
     'FlowEncoderFactory',
     'encode_flow'
 ] 

@@ -307,28 +307,43 @@ class FlowRunnerApp(QWidget):
         # Flow format
         flow_layout.addWidget(BodyLabel("Flow format:"), 6, 0)
         self.flow_format_combo = ComboBox()
-        self.flow_format_combo.addItems(['gamedev', 'hsv', 'torchvision', 'motion-vectors'])
+        self.flow_format_combo.addItems(['gamedev', 'hsv', 'torchvision', 'motion-vectors-rg8', 'motion-vectors-rgb8'])
         self.flow_format_combo.setToolTip("Output format for optical flow visualization")
-        self.flow_format_combo.currentTextChanged.connect(self.on_setting_changed)
+        self.flow_format_combo.currentTextChanged.connect(self.on_flow_format_changed)
         flow_layout.addWidget(self.flow_format_combo, 6, 1)
         
+        # Motion vectors clamp range (initially hidden)
+        flow_layout.addWidget(BodyLabel("MV clamp range:"), 7, 0)
+        self.mv_clamp_range_spin = DoubleSpinBox()
+        self.mv_clamp_range_spin.setRange(1.0, 512.0)
+        self.mv_clamp_range_spin.setValue(32.0)
+        self.mv_clamp_range_spin.setSingleStep(1.0)
+        self.mv_clamp_range_spin.setDecimals(1)
+        self.mv_clamp_range_spin.setToolTip("Clamp range for motion vectors encoding formats")
+        self.mv_clamp_range_spin.valueChanged.connect(self.on_setting_changed)
+        flow_layout.addWidget(self.mv_clamp_range_spin, 7, 1)
+        
+        # Store the motion vectors clamp range label and spin for hiding/showing
+        self.mv_clamp_range_label = flow_layout.itemAtPosition(7, 0).widget()
+        self.update_mv_clamp_range_visibility()
+        
         # Save flow format
-        flow_layout.addWidget(BodyLabel("Save flow:"), 7, 0)
+        flow_layout.addWidget(BodyLabel("Save flow:"), 8, 0)
         self.save_flow_combo = ComboBox()
         self.save_flow_combo.addItems(['none', 'npz', 'flo', 'both'])
         self.save_flow_combo.setCurrentText('npz')
         self.save_flow_combo.setToolTip("Format for saving flow data: flo (Middlebury), npz (NumPy), both, none (don't save)")
         self.save_flow_combo.currentTextChanged.connect(self.on_setting_changed)
-        flow_layout.addWidget(self.save_flow_combo, 7, 1)
+        flow_layout.addWidget(self.save_flow_combo, 8, 1)
         
         # Sequence length
-        flow_layout.addWidget(BodyLabel("Sequence length:"), 8, 0)
+        flow_layout.addWidget(BodyLabel("Sequence length:"), 9, 0)
         self.sequence_length_spin = SpinBox()
         self.sequence_length_spin.setRange(3, 20)
         self.sequence_length_spin.setValue(5)
         self.sequence_length_spin.setToolTip("Number of frames in processing sequence")
         self.sequence_length_spin.valueChanged.connect(self.on_setting_changed)
-        flow_layout.addWidget(self.sequence_length_spin, 8, 1)
+        flow_layout.addWidget(self.sequence_length_spin, 9, 1)
         
         layout.addWidget(flow_card)
 
@@ -563,7 +578,8 @@ class FlowRunnerApp(QWidget):
                 (self.start_time_spin, 'start_time', 0.0),
                 (self.duration_spin, 'duration', 0.0),
                 (self.sequence_length_spin, 'sequence_length', 5),
-                (self.kalman_smooth_spin, 'kalman_smooth', 0.5)
+                (self.kalman_smooth_spin, 'kalman_smooth', 0.5),
+                (self.mv_clamp_range_spin, 'mv_clamp_range', 32.0)
             ]
             
             for widget, key, default in numeric_widgets:
@@ -581,7 +597,7 @@ class FlowRunnerApp(QWidget):
                 (self.vf_architecture_combo, 'vf_architecture', 'mof', ['mof', 'bof']),
                 (self.vf_variant_combo, 'vf_variant', 'standard', ['standard', 'noise']),
                 (self.device_combo, 'device', 'cuda', ['cpu', 'cuda']),
-                (self.flow_format_combo, 'flow_format', 'motion-vectors', ['gamedev', 'hsv', 'torchvision', 'motion-vectors']),
+                (self.flow_format_combo, 'flow_format', 'motion-vectors-rgb8', ['gamedev', 'hsv', 'torchvision', 'motion-vectors-rg8', 'motion-vectors-rgb8']),
                 (self.save_flow_combo, 'save_flow', 'npz', ['none', 'npz', 'flo', 'both']),
                 (self.time_control_combo, 'time_control', 'Control by frame', ['Control by frame', 'Control by time'])
             ]
@@ -604,6 +620,9 @@ class FlowRunnerApp(QWidget):
             else:  # memflow
                 self.vf_architecture_combo.setEnabled(False)
                 self.vf_variant_combo.setEnabled(False)
+            
+            # Apply motion vectors clamp range visibility
+            self.update_mv_clamp_range_visibility()
             
         finally:
             self.blockSignals(False)
@@ -636,6 +655,7 @@ class FlowRunnerApp(QWidget):
         self.settings.setValue('duration', self.duration_spin.value())
         self.settings.setValue('sequence_length', self.sequence_length_spin.value())
         self.settings.setValue('kalman_smooth', self.kalman_smooth_spin.value())
+        self.settings.setValue('mv_clamp_range', self.mv_clamp_range_spin.value())
         
         # Save combo settings
         self.settings.setValue('model', self.model_combo.currentText())
@@ -666,6 +686,19 @@ class FlowRunnerApp(QWidget):
         
         # Also trigger general setting change
         self.on_setting_changed()
+    
+    def on_flow_format_changed(self):
+        """Handle flow format changes to show/hide motion vectors clamp range"""
+        self.update_mv_clamp_range_visibility()
+        self.on_setting_changed()
+    
+    def update_mv_clamp_range_visibility(self):
+        """Show/hide motion vectors clamp range based on selected format"""
+        flow_format = self.flow_format_combo.currentText()
+        is_motion_vectors = flow_format.startswith('motion-vectors')
+        
+        self.mv_clamp_range_label.setVisible(is_motion_vectors)
+        self.mv_clamp_range_spin.setVisible(is_motion_vectors)
         
     def update_time_control_visibility(self):
         """Update time control visibility without triggering signals"""
@@ -1024,6 +1057,11 @@ class FlowRunnerApp(QWidget):
         # Flow format
         if self.flow_format_combo.currentText() != 'gamedev':
             cmd_parts.extend(["--flow-format", self.flow_format_combo.currentText()])
+        
+        # Motion vectors clamp range (only for motion-vectors formats)
+        flow_format = self.flow_format_combo.currentText()
+        if flow_format.startswith('motion-vectors') and self.mv_clamp_range_spin.value() != 32.0:
+            cmd_parts.extend(["--motion-vectors-clamp-range", f"{self.mv_clamp_range_spin.value():.1f}"])
         
         # Save flow format
         if self.save_flow_combo.currentText() != 'none':

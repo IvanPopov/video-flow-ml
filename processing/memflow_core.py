@@ -52,7 +52,7 @@ class MemFlowCore:
         self.cfg = None
         self.input_padder = None
         
-        print(f"MemFlow Core initialized:")
+        print(f"[MemFlow] Core engine initialized:")
         print(f"  Device: {self.device}")
         print(f"  Model: {model_path}")
         print(f"  Stage: {stage}")
@@ -84,7 +84,7 @@ class MemFlowCore:
         if not os.path.exists(self.model_path):
             raise FileNotFoundError(f"MemFlow model not found: {self.model_path}")
         
-        print(f"Loading MemFlow model from: {self.model_path}")
+        print(f"[Model] Loading MemFlow model from: {self.model_path}")
         
         # Use isolated loading to avoid import conflicts
         from .memflow_loader import load_memflow_model_isolated
@@ -112,8 +112,12 @@ class MemFlowCore:
             
             self.model = MemFlowModelProxy(self.cfg).to(self.device)
             
-            print(f"MemFlow model loaded successfully (stage: {self.stage})")
-            print(f"Model ready for inference via isolated process")
+            print(f"[Model] MemFlow model loaded successfully:")
+            print(f"  Path: {self.model_path}")
+            print(f"  Stage: {self.stage}")
+            print(f"  Device: {self.device}")
+            print(f"  Inference: Isolated process")
+            print(f"  Memory Management: {self.cfg.get('memory_optimization', 'standard') if self.cfg else 'standard'}")
             
         except Exception as e:
             raise RuntimeError(f"Failed to load MemFlow model: {e}")

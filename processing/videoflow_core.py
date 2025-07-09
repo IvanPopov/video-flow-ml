@@ -113,7 +113,17 @@ class VideoFlowCore:
         self.model.to(self.device)
         self.model.eval()
         
-        print(f"VideoFlow model loaded: {model_filename}")
+        print(f"[Model] VideoFlow model loaded successfully:")
+        print(f"  Path: {model_path}")
+        print(f"  Architecture: {arch_upper} ({self.architecture})")
+        print(f"  Dataset: {self.dataset}")
+        print(f"  Variant: {self.variant}")
+        print(f"  Device: {self.device}")
+        if self.fast_mode:
+            print(f"  Fast Mode: Enabled")
+            print(f"    - Decoder depth: {self.cfg.decoder_depth}")
+            print(f"    - Correlation levels: {self.cfg.corr_levels}")
+            print(f"    - Correlation radius: {self.cfg.corr_radius}")
         
         return model_path
     

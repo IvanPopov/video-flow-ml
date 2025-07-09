@@ -11,9 +11,9 @@ try:
     from encoding.flow_encoders import encode_motion_vectors, decode_motion_vectors
 except ImportError:
     # Fallback if encoding module is not available
-    def encode_motion_vectors(flow, clamp_range=64.0):
+    def encode_motion_vectors(flow, clamp_range=64.0, format_variant='rg8'):
         raise ImportError("Motion vectors encoding not available")
-    def decode_motion_vectors(encoded_flow, clamp_range=64.0):
+    def decode_motion_vectors(encoded_flow, clamp_range=64.0, format_variant='rg8'):
         raise ImportError("Motion vectors decoding not available")
 
 
@@ -110,11 +110,11 @@ class TAAProcessor:
             return flow_pixels
             
         try:
-            # Compress to uint8 RG format
-            compressed = encode_motion_vectors(flow_pixels, clamp_range=self.mv_clamp_range)
+            # Compress to uint8 RG format (gamedev motion vectors format)
+            compressed = encode_motion_vectors(flow_pixels, clamp_range=self.mv_clamp_range, format_variant='rg8')
             
             # Decompress back to float32
-            decompressed = decode_motion_vectors(compressed, clamp_range=self.mv_clamp_range)
+            decompressed = decode_motion_vectors(compressed, clamp_range=self.mv_clamp_range, format_variant='rg8')
             
             return decompressed
         except ImportError as e:
