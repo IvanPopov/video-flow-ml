@@ -125,24 +125,45 @@ class MotionVectorsFlowEncoder(FlowEncoder):
     - Store in RG channels (R=horizontal, G=vertical)
     """
     
-    def __init__(self, clamp_range: float = 16.0):
+    def __init__(self, clamp_range: float = 32.0):
         self.clamp_range = clamp_range
 
     def encode(self, flow: np.ndarray, width: int, height: int) -> np.ndarray:
-        """Encode optical flow in motion-vectors format"""
-        # Clamp to [-clamp_range, +clamp_range] range
-        clamped = np.clip(flow, -self.clamp_range, self.clamp_range)
+        """
+        Encode optical flow in motion-vectors format with direction and magnitude
+        - R channel: normalized direction X component (from [-1,1] to [0,255])
+        - G channel: normalized direction Y component (from [-1,1] to [0,255]) 
+        - B channel: magnitude (from [0,clamp_range] to [0,255])
+        """
+        h, w = flow.shape[:2]
+        flow_x = flow[:, :, 0]
+        flow_y = flow[:, :, 1]
         
-        # Map [-clamp_range, +clamp_range] to [0, 1]
-        encoded = (clamped + self.clamp_range) / (2 * self.clamp_range)
-        encoded = np.clip(encoded, 0, 1)
+        # Calculate magnitude and clamp it
+        magnitude = np.sqrt(flow_x**2 + flow_y**2)
+        magnitude_clamped = np.clip(magnitude, 0, self.clamp_range)
+        
+        # Calculate normalized direction
+        direction_x = np.zeros_like(flow_x)
+        direction_y = np.zeros_like(flow_y)
+        
+        # Only normalize where magnitude > 0 to avoid division by zero
+        nonzero_mask = magnitude > 1e-6
+        direction_x[nonzero_mask] = flow_x[nonzero_mask] / magnitude[nonzero_mask]
+        direction_y[nonzero_mask] = flow_y[nonzero_mask] / magnitude[nonzero_mask]
+        
+        # Clamp direction to [-1, 1] and map to [0, 1]
+        direction_x_norm = (np.clip(direction_x, -1, 1) + 1) / 2
+        direction_y_norm = (np.clip(direction_y, -1, 1) + 1) / 2
+        
+        # Map magnitude from [0, clamp_range] to [0, 1]
+        magnitude_norm = magnitude_clamped / self.clamp_range
         
         # Create RGB image
-        h, w = flow.shape[:2]
         rgb = np.zeros((h, w, 3), dtype=np.float32)
-        rgb[:, :, 0] = encoded[:, :, 0]  # R channel: horizontal flow
-        rgb[:, :, 1] = encoded[:, :, 1]  # G channel: vertical flow
-        rgb[:, :, 2] = 0.0               # B channel: unused
+        rgb[:, :, 0] = direction_x_norm  # R channel: normalized direction X
+        rgb[:, :, 1] = direction_y_norm  # G channel: normalized direction Y
+        rgb[:, :, 2] = magnitude_norm    # B channel: normalized magnitude
         
         # Convert to 8-bit, handle NaN and inf values
         rgb_8bit = rgb * 255
@@ -154,7 +175,7 @@ class MotionVectorsFlowEncoder(FlowEncoder):
         Decode motion vectors format back to float32 flow vectors
         
         Args:
-            encoded_flow: Encoded flow as uint8 RGB image (only RG channels used)
+            encoded_flow: Encoded flow as uint8 RGB image with direction and magnitude
             
         Returns:
             Decoded flow as float32 array (H, W, 2)
@@ -162,16 +183,26 @@ class MotionVectorsFlowEncoder(FlowEncoder):
         # Convert from uint8 to float32 in [0, 1] range
         normalized = encoded_flow.astype(np.float32) / 255.0
         
-        # Extract RG channels (horizontal, vertical flow)
         h, w = encoded_flow.shape[:2]
+        
+        # Extract normalized direction from RG channels
+        direction_x_norm = normalized[:, :, 0]  # R channel: normalized direction X
+        direction_y_norm = normalized[:, :, 1]  # G channel: normalized direction Y
+        magnitude_norm = normalized[:, :, 2]    # B channel: normalized magnitude
+        
+        # Map direction from [0, 1] back to [-1, 1]
+        direction_x = (direction_x_norm * 2) - 1
+        direction_y = (direction_y_norm * 2) - 1
+        
+        # Map magnitude from [0, 1] back to [0, clamp_range]
+        magnitude = magnitude_norm * self.clamp_range
+        
+        # Reconstruct flow vectors
         flow = np.zeros((h, w, 2), dtype=np.float32)
-        flow[:, :, 0] = normalized[:, :, 0]  # R channel: horizontal flow
-        flow[:, :, 1] = normalized[:, :, 1]  # G channel: vertical flow
+        flow[:, :, 0] = direction_x * magnitude  # X component
+        flow[:, :, 1] = direction_y * magnitude  # Y component
         
-        # Map [0, 1] back to [-clamp_range, +clamp_range]
-        decoded = (flow * 2 * self.clamp_range) - self.clamp_range
-        
-        return decoded
+        return flow
 
 
 class TorchvisionFlowEncoder(FlowEncoder):
