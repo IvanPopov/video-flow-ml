@@ -638,6 +638,26 @@ class VideoFlowProcessor:
 
                 print(error_message, file=sys.stderr)
                 sys.exit(1)
+        elif os.path.exists(output_path) and os.path.isdir(output_path):
+            # Check if output directory is an existing flow cache
+            cache_exists, cached_flow_format, missing_frames = self.check_flow_cache_exists(output_path, len(frames))
+            if cache_exists:
+                print(f"Detected existing flow cache at output path: {output_path}")
+                flow_cache_dir = output_path
+                use_cached_flow = True
+                # Generate new output path for video since output_path is now used as cache
+                output_dir = os.path.dirname(output_path)
+                cache_name = os.path.basename(output_path)
+                video_name = f"{cache_name}_taa_output.avi"
+                output_path = os.path.join(output_dir, video_name)
+                print(f"Video will be saved to: {output_path}")
+            else:
+                print(f"Output directory exists but is not a valid flow cache, generating new cache...")
+                # Generate automatic cache directory
+                flow_cache_dir = self.generate_flow_cache_path(
+                    input_path, start_frame, len(frames), self.sequence_length, 
+                    self.fast_mode, self.tile_mode
+                )
         else:
             # Generate automatic cache directory
             flow_cache_dir = self.generate_flow_cache_path(
@@ -1150,6 +1170,18 @@ def main():
         # Determine flow cache directory
         if args.use_flow_cache is not None:
             flow_cache_dir = args.use_flow_cache
+        elif os.path.exists(args.output) and os.path.isdir(args.output):
+            # Check if output directory is an existing flow cache
+            cache_exists, cached_flow_format, missing_frames = processor.check_flow_cache_exists(args.output, len(frames))
+            if cache_exists:
+                print(f"Detected existing flow cache at output path: {args.output}")
+                flow_cache_dir = args.output
+            else:
+                print(f"Output directory exists but is not a valid flow cache, generating new cache...")
+                flow_cache_dir = processor.generate_flow_cache_path(
+                    args.input, start_frame, len(frames), args.sequence_length, 
+                    args.fast, args.tile
+                )
         else:
             flow_cache_dir = processor.generate_flow_cache_path(
                 args.input, start_frame, len(frames), args.sequence_length, 

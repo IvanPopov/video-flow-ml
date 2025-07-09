@@ -2882,12 +2882,27 @@ class FlowVisualizer:
         using the corrected flow cache.
         """
         # 1. Check for corrected cache
-        corrected_flow_dir = Path(self.flow_dir).with_name(Path(self.flow_dir).name + "_corrected")
+        flow_dir_path = Path(self.flow_dir)
+        if flow_dir_path.name.endswith("_corrected"):
+            # Already using a corrected cache directory
+            corrected_flow_dir = flow_dir_path
+        else:
+            # Need to find/generate corrected cache directory
+            corrected_flow_dir = flow_dir_path.with_name(flow_dir_path.name + "_corrected")
+            
         if not corrected_flow_dir.exists():
-            messagebox.showwarning("Cache Not Found",
-                "The corrected flow cache directory does not exist.\n\n"
-                f"Please run 'Correct All Frames' first to generate it at:\n{corrected_flow_dir.resolve()}"
-            )
+            if flow_dir_path.name.endswith("_corrected"):
+                # The specified corrected cache directory doesn't exist
+                messagebox.showwarning("Cache Not Found",
+                    f"The corrected flow cache directory does not exist:\n{corrected_flow_dir.resolve()}\n\n"
+                    "Please check that the path is correct or run corrections to generate the cache."
+                )
+            else:
+                # Need to generate corrected cache first
+                messagebox.showwarning("Cache Not Found",
+                    "The corrected flow cache directory does not exist.\n\n"
+                    f"Please run 'Correct All Frames' first to generate it at:\n{corrected_flow_dir.resolve()}"
+                )
             return
 
         # 2. Get video parameters
