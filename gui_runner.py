@@ -21,11 +21,60 @@ from PyQt6.QtGui import QPixmap, QImage, QIcon, QFont
 
 from qfluentwidgets import (setTheme, Theme, TitleLabel, SubtitleLabel, LineEdit, PushButton,
                             InfoBar, InfoBarPosition, CheckBox, ComboBox, DoubleSpinBox, SpinBox,
-                            BodyLabel, CardWidget, HyperlinkButton, ProgressBar, TextEdit)
+                            BodyLabel, CardWidget, HyperlinkButton, ProgressBar, TextEdit, ToolButton)
 import qtawesome as qta
 
 # Do not import this at module level
 # from flow_processor import VideoFlowProcessor
+
+
+class CollapsibleCard(CardWidget):
+    """A collapsible card widget"""
+    def __init__(self, title, collapsed=False, parent=None):
+        super().__init__(parent)
+        self.layout = QVBoxLayout(self)
+        
+        # Header with toggle button
+        header_layout = QHBoxLayout()
+        self.toggle_btn = ToolButton()
+        self.toggle_btn.clicked.connect(self.toggle_content)
+        
+        self.title_label = BodyLabel(title)
+        header_layout.addWidget(self.title_label)
+        header_layout.addStretch()
+        header_layout.addWidget(self.toggle_btn)
+        
+        header_widget = QWidget()
+        header_widget.setLayout(header_layout)
+        self.layout.addWidget(header_widget)
+        
+        # Content area
+        self.content_widget = QWidget()
+        self.content_layout = QGridLayout(self.content_widget)
+        self.layout.addWidget(self.content_widget)
+        
+        # Set initial state
+        self.is_expanded = not collapsed
+        self.content_widget.setVisible(self.is_expanded)
+        
+        if self.is_expanded:
+            self.toggle_btn.setIcon(qta.icon('fa5s.chevron-down'))
+        else:
+            self.toggle_btn.setIcon(qta.icon('fa5s.chevron-right'))
+    
+    def toggle_content(self):
+        self.is_expanded = not self.is_expanded
+        self.content_widget.setVisible(self.is_expanded)
+        
+        if self.is_expanded:
+            self.toggle_btn.setIcon(qta.icon('fa5s.chevron-down'))
+        else:
+            self.toggle_btn.setIcon(qta.icon('fa5s.chevron-right'))
+    
+    def set_collapsed(self, collapsed=True):
+        if self.is_expanded == (not collapsed):
+            return  # Already in desired state
+        self.toggle_content()
 
 
 class VideoThread(QThread):
@@ -102,6 +151,10 @@ class FlowRunnerApp(QWidget):
         
         # Import and create instance only when needed
         self.flow_processor_instance = None
+        
+        # Variables to store previous values when flow_only is enabled
+        self._previous_taa_state = None
+        self._previous_flow_input_text = None
 
         # --- UI Initialization ---
         self._initialization_complete = False
@@ -184,6 +237,11 @@ class FlowRunnerApp(QWidget):
             checkbox.setText(label)
             checkbox.setToolTip(tooltip)
             checkbox.stateChanged.connect(self.on_setting_changed)
+            
+            # Add special handler for flow_only checkbox
+            if key == 'flow_only':
+                checkbox.stateChanged.connect(self.update_flow_only_dependent_controls)
+            
             self.flag_widgets[key] = checkbox
             flags_layout.addWidget(checkbox, row + i // 2, i % 2)
         
@@ -249,68 +307,19 @@ class FlowRunnerApp(QWidget):
         
         layout.addWidget(time_card)
 
-        # Flow parameters card
-        flow_card = CardWidget()
-        flow_layout = QGridLayout(flow_card)
-        
-        flow_title = BodyLabel("Flow Parameters")
-        flow_layout.addWidget(flow_title, 0, 0, 1, 2)
-        
-        # Model selection
-        flow_layout.addWidget(BodyLabel("Model:"), 1, 0)
-        self.model_combo = ComboBox()
-        self.model_combo.addItems(['videoflow', 'memflow'])
-        self.model_combo.setCurrentText('videoflow')
-        self.model_combo.setToolTip("Optical flow model: VideoFlow (MOF) or MemFlow")
-        self.model_combo.currentTextChanged.connect(self.on_model_changed)
-        flow_layout.addWidget(self.model_combo, 1, 1)
-        
-        # Dataset selection (for both models)
-        flow_layout.addWidget(BodyLabel("Dataset:"), 2, 0)
-        self.dataset_combo = ComboBox()
-        self.dataset_combo.addItems(['sintel', 'things', 'kitti'])
-        self.dataset_combo.setCurrentText('sintel')
-        self.dataset_combo.setToolTip("Training dataset for the model")
-        self.dataset_combo.currentTextChanged.connect(self.on_setting_changed)
-        flow_layout.addWidget(self.dataset_combo, 2, 1)
-        
-        # VideoFlow architecture selection (only for VideoFlow)
-        flow_layout.addWidget(BodyLabel("VF Architecture:"), 3, 0)
-        self.vf_architecture_combo = ComboBox()
-        self.vf_architecture_combo.addItems(['mof', 'bof'])
-        self.vf_architecture_combo.setCurrentText('mof')
-        self.vf_architecture_combo.setToolTip("VideoFlow architecture: MOF (MOFNet) or BOF (BOFNet)")
-        self.vf_architecture_combo.currentTextChanged.connect(self.on_setting_changed)
-        flow_layout.addWidget(self.vf_architecture_combo, 3, 1)
-        
-        # VideoFlow variant selection (only for VideoFlow)
-        flow_layout.addWidget(BodyLabel("VF Variant:"), 4, 0)
-        self.vf_variant_combo = ComboBox()
-        self.vf_variant_combo.addItems(['standard', 'noise'])
-        self.vf_variant_combo.setCurrentText('standard')
-        self.vf_variant_combo.setToolTip("VideoFlow variant: standard or noise (things_288960noise)")
-        self.vf_variant_combo.currentTextChanged.connect(self.on_setting_changed)
-        flow_layout.addWidget(self.vf_variant_combo, 4, 1)
-        
-        # Device
-        flow_layout.addWidget(BodyLabel("Device:"), 5, 0)
-        self.device_combo = ComboBox()
-        self.device_combo.addItems(['cuda', 'cpu'])
-        self.device_combo.setCurrentText('cuda')
-        self.device_combo.setToolTip("Processing device (CPU or CUDA GPU)")
-        self.device_combo.currentTextChanged.connect(self.on_setting_changed)
-        flow_layout.addWidget(self.device_combo, 5, 1)
+        # Flow Encoding card (collapsible, collapsed by default)
+        self.encoding_card = CollapsibleCard("Flow Encoding", collapsed=True)
         
         # Flow format
-        flow_layout.addWidget(BodyLabel("Flow format:"), 6, 0)
+        self.encoding_card.content_layout.addWidget(BodyLabel("Flow format:"), 0, 0)
         self.flow_format_combo = ComboBox()
         self.flow_format_combo.addItems(['gamedev', 'hsv', 'torchvision', 'motion-vectors-rg8', 'motion-vectors-rgb8'])
         self.flow_format_combo.setToolTip("Output format for optical flow visualization")
         self.flow_format_combo.currentTextChanged.connect(self.on_flow_format_changed)
-        flow_layout.addWidget(self.flow_format_combo, 6, 1)
+        self.encoding_card.content_layout.addWidget(self.flow_format_combo, 0, 1)
         
         # Motion vectors clamp range (initially hidden)
-        flow_layout.addWidget(BodyLabel("MV clamp range:"), 7, 0)
+        self.encoding_card.content_layout.addWidget(BodyLabel("MV clamp range:"), 1, 0)
         self.mv_clamp_range_spin = DoubleSpinBox()
         self.mv_clamp_range_spin.setRange(1.0, 512.0)
         self.mv_clamp_range_spin.setValue(32.0)
@@ -318,31 +327,86 @@ class FlowRunnerApp(QWidget):
         self.mv_clamp_range_spin.setDecimals(1)
         self.mv_clamp_range_spin.setToolTip("Clamp range for motion vectors encoding formats")
         self.mv_clamp_range_spin.valueChanged.connect(self.on_setting_changed)
-        flow_layout.addWidget(self.mv_clamp_range_spin, 7, 1)
+        self.encoding_card.content_layout.addWidget(self.mv_clamp_range_spin, 1, 1)
         
         # Store the motion vectors clamp range label and spin for hiding/showing
-        self.mv_clamp_range_label = flow_layout.itemAtPosition(7, 0).widget()
+        self.mv_clamp_range_label = self.encoding_card.content_layout.itemAtPosition(1, 0).widget()
         self.update_mv_clamp_range_visibility()
         
-        # Save flow format
-        flow_layout.addWidget(BodyLabel("Save flow:"), 8, 0)
-        self.save_flow_combo = ComboBox()
-        self.save_flow_combo.addItems(['none', 'npz', 'flo', 'both'])
-        self.save_flow_combo.setCurrentText('npz')
-        self.save_flow_combo.setToolTip("Format for saving flow data: flo (Middlebury), npz (NumPy), both, none (don't save)")
-        self.save_flow_combo.currentTextChanged.connect(self.on_setting_changed)
-        flow_layout.addWidget(self.save_flow_combo, 8, 1)
+        layout.addWidget(self.encoding_card)
+
+        # Model Parameters card (collapsible, collapsed by default)
+        self.model_card = CollapsibleCard("Model Parameters", collapsed=True)
+        
+        # Model selection
+        self.model_card.content_layout.addWidget(BodyLabel("Model:"), 0, 0)
+        self.model_combo = ComboBox()
+        self.model_combo.addItems(['videoflow', 'memflow'])
+        self.model_combo.setCurrentText('videoflow')
+        self.model_combo.setToolTip("Optical flow model: VideoFlow (MOF) or MemFlow")
+        self.model_combo.currentTextChanged.connect(self.on_model_changed)
+        self.model_card.content_layout.addWidget(self.model_combo, 0, 1)
+        
+        # Dataset selection (for both models)
+        self.model_card.content_layout.addWidget(BodyLabel("Dataset:"), 1, 0)
+        self.dataset_combo = ComboBox()
+        self.dataset_combo.addItems(['sintel', 'things', 'kitti'])
+        self.dataset_combo.setCurrentText('things')  # Default to things
+        self.dataset_combo.setToolTip("Training dataset for the model")
+        self.dataset_combo.currentTextChanged.connect(self.on_setting_changed)
+        self.model_card.content_layout.addWidget(self.dataset_combo, 1, 1)
+        
+        # VideoFlow architecture selection (only for VideoFlow)
+        self.model_card.content_layout.addWidget(BodyLabel("VF Architecture:"), 2, 0)
+        self.vf_architecture_combo = ComboBox()
+        self.vf_architecture_combo.addItems(['mof', 'bof'])
+        self.vf_architecture_combo.setCurrentText('mof')
+        self.vf_architecture_combo.setToolTip("VideoFlow architecture: MOF (MOFNet) or BOF (BOFNet)")
+        self.vf_architecture_combo.currentTextChanged.connect(self.on_setting_changed)
+        self.model_card.content_layout.addWidget(self.vf_architecture_combo, 2, 1)
+        
+        # VideoFlow variant selection (only for VideoFlow)
+        self.model_card.content_layout.addWidget(BodyLabel("VF Variant:"), 3, 0)
+        self.vf_variant_combo = ComboBox()
+        self.vf_variant_combo.addItems(['standard', 'noise'])
+        self.vf_variant_combo.setCurrentText('noise')  # Default to noise
+        self.vf_variant_combo.setToolTip("VideoFlow variant: standard or noise (things_288960noise)")
+        self.vf_variant_combo.currentTextChanged.connect(self.on_setting_changed)
+        self.model_card.content_layout.addWidget(self.vf_variant_combo, 3, 1)
+        
+        # Device
+        self.model_card.content_layout.addWidget(BodyLabel("Device:"), 4, 0)
+        self.device_combo = ComboBox()
+        self.device_combo.addItems(['cuda', 'cpu'])
+        self.device_combo.setCurrentText('cuda')
+        self.device_combo.setToolTip("Processing device (CPU or CUDA GPU)")
+        self.device_combo.currentTextChanged.connect(self.on_setting_changed)
+        self.model_card.content_layout.addWidget(self.device_combo, 4, 1)
         
         # Sequence length
-        flow_layout.addWidget(BodyLabel("Sequence length:"), 9, 0)
+        self.model_card.content_layout.addWidget(BodyLabel("Sequence length:"), 5, 0)
         self.sequence_length_spin = SpinBox()
         self.sequence_length_spin.setRange(3, 20)
         self.sequence_length_spin.setValue(5)
         self.sequence_length_spin.setToolTip("Number of frames in processing sequence")
         self.sequence_length_spin.valueChanged.connect(self.on_setting_changed)
-        flow_layout.addWidget(self.sequence_length_spin, 9, 1)
+        self.model_card.content_layout.addWidget(self.sequence_length_spin, 5, 1)
         
-        layout.addWidget(flow_card)
+        layout.addWidget(self.model_card)
+
+        # General Parameters card (collapsible, collapsed by default)
+        self.general_card = CollapsibleCard("General", collapsed=True)
+        
+        # Save flow format
+        self.general_card.content_layout.addWidget(BodyLabel("Save flow:"), 0, 0)
+        self.save_flow_combo = ComboBox()
+        self.save_flow_combo.addItems(['none', 'npz', 'flo', 'both'])
+        self.save_flow_combo.setCurrentText('npz')
+        self.save_flow_combo.setToolTip("Format for saving flow data: flo (Middlebury), npz (NumPy), both, none (don't save)")
+        self.save_flow_combo.currentTextChanged.connect(self.on_setting_changed)
+        self.general_card.content_layout.addWidget(self.save_flow_combo, 0, 1)
+        
+        layout.addWidget(self.general_card)
 
 
 
@@ -397,15 +461,16 @@ class FlowRunnerApp(QWidget):
         io_layout.addWidget(browse_cache_btn, 3, 2)
         
         # Flow input video (for TAA comparison)
-        io_layout.addWidget(BodyLabel("Flow input video:"), 4, 0)
+        self.flow_input_label = BodyLabel("Flow input video:")
+        io_layout.addWidget(self.flow_input_label, 4, 0)
         self.flow_input_edit = LineEdit()
         self.flow_input_edit.setToolTip("Path to video with encoded motion vectors in bottom half (for TAA comparison)")
         self.flow_input_edit.textChanged.connect(self.on_setting_changed)
         io_layout.addWidget(self.flow_input_edit, 4, 1)
         
-        browse_flow_input_btn = PushButton("Browse")
-        browse_flow_input_btn.clicked.connect(self.browse_flow_input)
-        io_layout.addWidget(browse_flow_input_btn, 4, 2)
+        self.browse_flow_input_btn = PushButton("Browse")
+        self.browse_flow_input_btn.clicked.connect(self.browse_flow_input)
+        io_layout.addWidget(self.browse_flow_input_btn, 4, 2)
         
         # Cache status
         self.flow_cache_status_label = BodyLabel("")
@@ -586,11 +651,11 @@ class FlowRunnerApp(QWidget):
             # Load combo settings
             combo_settings = [
                 (self.model_combo, 'model', 'videoflow', ['videoflow', 'memflow']),
-                (self.dataset_combo, 'dataset', 'sintel', ['sintel', 'things', 'kitti']),
+                (self.dataset_combo, 'dataset', 'things', ['sintel', 'things', 'kitti']),
                 (self.vf_architecture_combo, 'vf_architecture', 'mof', ['mof', 'bof']),
-                (self.vf_variant_combo, 'vf_variant', 'standard', ['standard', 'noise']),
+                (self.vf_variant_combo, 'vf_variant', 'noise', ['standard', 'noise']),
                 (self.device_combo, 'device', 'cuda', ['cpu', 'cuda']),
-                (self.flow_format_combo, 'flow_format', 'motion-vectors-rgb8', ['gamedev', 'hsv', 'torchvision', 'motion-vectors-rg8', 'motion-vectors-rgb8']),
+                (self.flow_format_combo, 'flow_format', 'gamedev', ['gamedev', 'hsv', 'torchvision', 'motion-vectors-rg8', 'motion-vectors-rgb8']),
                 (self.save_flow_combo, 'save_flow', 'npz', ['none', 'npz', 'flo', 'both']),
                 (self.time_control_combo, 'time_control', 'Control by frame', ['Control by frame', 'Control by time'])
             ]
@@ -616,6 +681,9 @@ class FlowRunnerApp(QWidget):
             
             # Apply motion vectors clamp range visibility
             self.update_mv_clamp_range_visibility()
+            
+            # Apply flow_only dependent controls state
+            self.update_flow_only_dependent_controls()
             
         finally:
             self.blockSignals(False)
@@ -692,6 +760,38 @@ class FlowRunnerApp(QWidget):
         
         self.mv_clamp_range_label.setVisible(is_motion_vectors)
         self.mv_clamp_range_spin.setVisible(is_motion_vectors)
+    
+    def update_flow_only_dependent_controls(self):
+        """Enable/disable TAA and Flow input video controls based on flow_only state"""
+        flow_only_enabled = self.flag_widgets['flow_only'].isChecked()
+        
+        if flow_only_enabled:
+            # Save current values before disabling (only during user interaction, not initialization)
+            if hasattr(self, '_initialization_complete') and self._initialization_complete:
+                self._previous_taa_state = self.flag_widgets['taa'].isChecked()
+                self._previous_flow_input_text = self.flow_input_edit.text()
+            
+            # Disable controls and clear values
+            self.flag_widgets['taa'].setEnabled(False)
+            self.flag_widgets['taa'].setChecked(False)
+            
+            self.flow_input_label.setEnabled(False)
+            self.flow_input_edit.setEnabled(False)
+            self.browse_flow_input_btn.setEnabled(False)
+            self.flow_input_edit.clear()
+        else:
+            # Enable controls
+            self.flag_widgets['taa'].setEnabled(True)
+            self.flow_input_label.setEnabled(True)
+            self.flow_input_edit.setEnabled(True)
+            self.browse_flow_input_btn.setEnabled(True)
+            
+            # Restore previous values if they were saved
+            if self._previous_taa_state is not None:
+                self.flag_widgets['taa'].setChecked(self._previous_taa_state)
+                
+            if self._previous_flow_input_text is not None:
+                self.flow_input_edit.setText(self._previous_flow_input_text)
         
     def update_time_control_visibility(self):
         """Update time control visibility without triggering signals"""
@@ -1009,13 +1109,14 @@ class FlowRunnerApp(QWidget):
         if self.flow_cache_edit.text():
             cmd_parts.extend(["--flow-cache", f'"{self.flow_cache_edit.text()}"'])
         
-        # Flow input video
-        if self.flow_input_edit.text():
+        # Flow input video (only if flow_only is not enabled and taa is enabled)
+        flow_only_enabled = self.flag_widgets['flow_only'].isChecked()
+        if not flow_only_enabled and self.flow_input_edit.text():
             cmd_parts.extend(["--flow-input", f'"{self.flow_input_edit.text()}"'])
         
         # Boolean flags
         for key, widget in self.flag_widgets.items():
-            if widget.isChecked():
+            if widget.isChecked() and widget.isEnabled():
                 cmd_parts.append(f"--{key.replace('_', '-')}")
         
         # Time control parameters based on selected type
