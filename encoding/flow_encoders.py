@@ -7,7 +7,7 @@ import cv2
 from abc import ABC, abstractmethod
 from typing import Optional
 
-
+method = 'rgb+'
 class FlowEncoder(ABC):
     """Abstract base class for flow encoders"""
     
@@ -199,20 +199,20 @@ class MotionVectorsRGB8FlowEncoder(FlowEncoder):
         flow_x = flow[:, :, 0]
         flow_y = flow[:, :, 1]
         
-        # Calculate magnitude and clamp it
-        magnitude = np.sqrt(flow_x**2 + flow_y**2)
-        magnitude_clamped = np.clip(magnitude, 0, self.clamp_range)
-        
-        # Calculate normalized direction
-        direction_x = np.zeros_like(flow_x)
-        direction_y = np.zeros_like(flow_y)
-        
-        # Only normalize where magnitude > 0 to avoid division by zero
-        nonzero_mask = magnitude > 1e-6
-        direction_x[nonzero_mask] = flow_x[nonzero_mask] / magnitude[nonzero_mask]
-        direction_y[nonzero_mask] = flow_y[nonzero_mask] / magnitude[nonzero_mask]
-        
-        if False:
+        if method == 'rgb-ycbcr':
+            # Calculate magnitude and clamp it
+            magnitude = np.sqrt(flow_x**2 + flow_y**2)
+            magnitude_clamped = np.clip(magnitude, 0, self.clamp_range)
+            
+            # Calculate normalized direction
+            direction_x = np.zeros_like(flow_x)
+            direction_y = np.zeros_like(flow_y)
+            
+            # Only normalize where magnitude > 0 to avoid division by zero
+            nonzero_mask = magnitude > 1e-6
+            direction_x[nonzero_mask] = flow_x[nonzero_mask] / magnitude[nonzero_mask]
+            direction_y[nonzero_mask] = flow_y[nonzero_mask] / magnitude[nonzero_mask]
+            
             # Clamp direction to [-1, 1] and map to [0, 1]
             direction_x_norm = np.clip(direction_x, -1, 1)
             direction_y_norm = np.clip(direction_y, -1, 1)
@@ -238,7 +238,41 @@ class MotionVectorsRGB8FlowEncoder(FlowEncoder):
             G = Y - 0.344136 * (Cb - 0.5) - 0.714136 * (Cr - 0.5)
             B = Y + 1.772 * (Cb - 0.5)
             rgb = np.stack([R, G, B], axis=-1)
+
+        elif method == 'rgb+':
+            direction_x = np.zeros_like(flow_x)
+            direction_y = np.zeros_like(flow_y)
+            
+            direction_x = flow_x / self.clamp_range
+            direction_y = flow_y / self.clamp_range
+
+            len = np.sqrt(direction_x ** 2 + direction_y ** 2)
+            clamp_mask = len > 1
+            direction_x[clamp_mask] = direction_x[clamp_mask] / len[clamp_mask]
+            direction_y[clamp_mask] = direction_y[clamp_mask] / len[clamp_mask]
+
+            corrector = np.sqrt(1 - direction_x ** 2 - direction_y ** 2)
+            direction_x_norm = (np.clip(direction_x, -1, 1) + 1) / 2
+            direction_y_norm = (np.clip(direction_y, -1, 1) + 1) / 2
+
+            rgb = np.zeros((h, w, 3), dtype=np.float32)
+            rgb[:, :, 0] = direction_x_norm
+            rgb[:, :, 1] = direction_y_norm
+            rgb[:, :, 2] = corrector
         else:
+            # Calculate magnitude and clamp it
+            magnitude = np.sqrt(flow_x**2 + flow_y**2)
+            magnitude_clamped = np.clip(magnitude, 0, self.clamp_range)
+            
+            # Calculate normalized direction
+            direction_x = np.zeros_like(flow_x)
+            direction_y = np.zeros_like(flow_y)
+            
+            # Only normalize where magnitude > 0 to avoid division by zero
+            nonzero_mask = magnitude > 1e-6
+            direction_x[nonzero_mask] = flow_x[nonzero_mask] / magnitude[nonzero_mask]
+            direction_y[nonzero_mask] = flow_y[nonzero_mask] / magnitude[nonzero_mask]
+        
             # Clamp direction to [-1, 1] and map to [0, 1]
             direction_x_norm = (np.clip(direction_x, -1, 1) + 1) / 2
             direction_y_norm = (np.clip(direction_y, -1, 1)+ 1) / 2
@@ -249,8 +283,8 @@ class MotionVectorsRGB8FlowEncoder(FlowEncoder):
             # Create RGB image
             rgb = np.zeros((h, w, 3), dtype=np.float32)
             rgb[:, :, 0] = direction_x_norm  # R channel: normalized direction X
-            rgb[:, :, 1] = direction_y_norm  # G channel: normalized direction Y
-            rgb[:, :, 2] = magnitude_norm    # B channel: normalized magnitude
+            rgb[:, :, 1] = magnitude_norm    # G channel: normalized magnitude
+            rgb[:, :, 2] = direction_y_norm  # B channel: normalized direction Y
 
 
         # Convert to 8-bit, handle NaN and inf values
@@ -271,7 +305,7 @@ class MotionVectorsRGB8FlowEncoder(FlowEncoder):
         # Convert from uint8 to float32 in [0, 1] range
         normalized = encoded_flow.astype(np.float32) / 255.0
         
-        if False:
+        if method == 'rgb-ycbcr':
             R = normalized[:, :, 0]
             G = normalized[:, :, 1]
             B = normalized[:, :, 2]
@@ -299,11 +333,19 @@ class MotionVectorsRGB8FlowEncoder(FlowEncoder):
             
             # Map magnitude from [0, 1] back to [0, clamp_range]
             magnitude = magnitude_norm * self.clamp_range
+        elif method == 'rgb+':
+            direction_x_norm = normalized[:, :, 0]
+            direction_y_norm = normalized[:, :, 1]
+            corrector = normalized[:, :, 2]
+            direction_x = (direction_x_norm * 2 - 1)
+            direction_y = (direction_y_norm * 2 - 1)
+            corrected_len = np.sqrt(direction_x ** 2 + direction_y ** 2 + corrector ** 2)
+            magnitude = 1 / corrected_len * self.clamp_range
         else:
             # Extract normalized direction from RG channels
             direction_x_norm = normalized[:, :, 0]  # R channel: normalized direction X
-            direction_y_norm = normalized[:, :, 1]  # G channel: normalized direction Y
-            magnitude_norm = normalized[:, :, 2]    # B channel: normalized magnitude
+            magnitude_norm = normalized[:, :, 1]    # G channel: normalized magnitude
+            direction_y_norm = normalized[:, :, 2]  # B channel: normalized direction Y
             
             # Map direction from [0, 1] back to [-1, 1]
             direction_x = (direction_x_norm * 2) - 1
