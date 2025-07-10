@@ -170,6 +170,9 @@ class FlowRunnerApp(QWidget):
         self.update_cache_preview()
         self.update_flow_input_preview()
         self.update_output_preview()  # Move to end to ensure all other previews are updated first
+        # Update status badges
+        self.update_output_status()
+        self.update_cache_status()
 
     def init_ui(self):
         setTheme(Theme.DARK)
@@ -440,25 +443,39 @@ class FlowRunnerApp(QWidget):
         self.input_video_edit.textChanged.connect(self.update_output_preview)
         self.input_video_edit.textChanged.connect(self.update_cache_preview)
         self.input_video_edit.textChanged.connect(self.update_flow_input_preview)
+        self.input_video_edit.textChanged.connect(self.update_output_status)
+        self.input_video_edit.textChanged.connect(self.update_cache_status)
         io_layout.addWidget(self.input_video_edit, 1, 1)
         
-        browse_input_btn = PushButton("Browse")
+        browse_input_btn = PushButton("...")
         browse_input_btn.clicked.connect(self.browse_input_video)
         io_layout.addWidget(browse_input_btn, 1, 2)
         
         # Output path
         io_layout.addWidget(BodyLabel("Output path:"), 2, 0)
         self.output_path_edit = LineEdit()
-        self.output_path_edit.setToolTip("Output directory path (leave empty to use 'results' directory)")
+        self.output_path_edit.setPlaceholderText("Leave empty for automatic naming")
+        self.output_path_edit.setToolTip("Output directory for processed video (leave empty for 'results' folder)")
         self.output_path_edit.textChanged.connect(self.on_setting_changed)
         self.output_path_edit.textChanged.connect(self.update_output_preview)
         self.output_path_edit.textChanged.connect(self.update_flow_input_preview)
+        self.output_path_edit.textChanged.connect(self.update_output_status)
         io_layout.addWidget(self.output_path_edit, 2, 1)
         
-        browse_output_btn = PushButton("Browse")
+        # Browse output button
+        browse_output_btn = PushButton("...")
+        browse_output_btn.setFixedWidth(40)
         browse_output_btn.clicked.connect(self.browse_output_path)
         io_layout.addWidget(browse_output_btn, 2, 2)
-        
+
+        # Output file status badge
+        self.output_status_label = QLabel()
+        self.output_status_label.setFixedSize(20, 20)
+        self.output_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.output_status_label.setStyleSheet("QLabel { border-radius: 10px; }")
+        self.update_output_status()
+        io_layout.addWidget(self.output_status_label, 2, 3)
+
         # Flow cache
         io_layout.addWidget(BodyLabel("Flow cache:"), 3, 0)
         self.flow_cache_edit = LineEdit()
@@ -466,9 +483,19 @@ class FlowRunnerApp(QWidget):
         self.flow_cache_edit.textChanged.connect(self.on_flow_cache_changed)
         io_layout.addWidget(self.flow_cache_edit, 3, 1)
         
-        browse_cache_btn = PushButton("Browse")
+        # Browse cache button
+        browse_cache_btn = PushButton("...")
+        browse_cache_btn.setFixedWidth(40)
         browse_cache_btn.clicked.connect(self.browse_flow_cache)
         io_layout.addWidget(browse_cache_btn, 3, 2)
+
+        # Flow cache status badge
+        self.cache_status_label = QLabel()
+        self.cache_status_label.setFixedSize(20, 20)
+        self.cache_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.cache_status_label.setStyleSheet("QLabel { border-radius: 10px; }")
+        self.update_cache_status()
+        io_layout.addWidget(self.cache_status_label, 3, 3)
         
         # Flow input video (for TAA comparison)
         self.flow_input_label = BodyLabel("Flow input video:")
@@ -478,7 +505,7 @@ class FlowRunnerApp(QWidget):
         self.flow_input_edit.textChanged.connect(self.on_setting_changed)
         io_layout.addWidget(self.flow_input_edit, 4, 1)
         
-        self.browse_flow_input_btn = PushButton("Browse")
+        self.browse_flow_input_btn = PushButton("...")
         self.browse_flow_input_btn.clicked.connect(self.browse_flow_input)
         io_layout.addWidget(self.browse_flow_input_btn, 4, 2)
         
@@ -743,11 +770,15 @@ class FlowRunnerApp(QWidget):
 
     def on_setting_changed(self):
         """Called when any setting changes"""
+        # Reset flow processor instance so it gets recreated with new settings
+        self.flow_processor_instance = None
         self.save_settings()
         self.command_timer.start(100)  # Update command after 100ms delay
         self.update_output_preview()  # Update filename preview
         self.update_cache_preview()  # Update cache preview
         self.update_flow_input_preview()  # Update flow input preview
+        self.update_output_status()  # Update output file status badge
+        self.update_cache_status()  # Update cache status badge
         
     def on_model_changed(self):
         """Handle model selection changes to show/hide model-specific options"""
@@ -760,6 +791,9 @@ class FlowRunnerApp(QWidget):
         else:  # memflow
             self.vf_architecture_combo.setEnabled(False)
             self.vf_variant_combo.setEnabled(False)
+        
+        # Reset flow processor instance due to model change
+        self.flow_processor_instance = None
         
         # Also trigger general setting change
         self.on_setting_changed()
@@ -857,12 +891,19 @@ class FlowRunnerApp(QWidget):
         self.command_timer.start(100)
         # Update cache preview when cache field changes
         self.update_cache_preview()
+        self.update_cache_status()  # Update cache status badge
 
 
 
     def browse_input_video(self):
+        # Try to use directory from current input or default to current directory
+        start_dir = ""
+        current_path = self.input_video_edit.text()
+        if current_path and os.path.exists(current_path):
+            start_dir = os.path.dirname(current_path)
+        
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Select Input Video", "", 
+            self, "Select Input Video", start_dir, 
             "Video Files (*.mp4 *.avi *.mov *.mkv *.webm *.flv);;All Files (*)"
         )
         if file_path:
@@ -870,18 +911,105 @@ class FlowRunnerApp(QWidget):
             self.load_video(file_path)
 
     def browse_output_path(self):
-        dir_path = QFileDialog.getExistingDirectory(self, "Select Output Directory")
+        # Try to use path from placeholder if it exists
+        start_dir = ""
+        placeholder = self.output_path_edit.placeholderText()
+        
+        if placeholder and placeholder != "Load video to see filename preview":
+            # Extract directory from the placeholder path
+            placeholder_dir = os.path.dirname(placeholder)
+            if os.path.exists(placeholder_dir):
+                start_dir = placeholder_dir
+            elif placeholder.startswith("results/") or "results" in placeholder:
+                # Default to results directory
+                results_dir = os.path.abspath("results")
+                if os.path.exists(results_dir):
+                    start_dir = results_dir
+        
+        # If no good default found, use current text or current directory
+        if not start_dir:
+            current_path = self.output_path_edit.text()
+            if current_path and os.path.exists(current_path):
+                start_dir = current_path
+        
+        dir_path = QFileDialog.getExistingDirectory(self, "Select Output Directory", start_dir)
         if dir_path:
             self.output_path_edit.setText(dir_path)
+            self.update_output_status()  # Update status after path change
 
     def browse_flow_cache(self):
-        dir_path = QFileDialog.getExistingDirectory(self, "Select Flow Cache Directory")
+        # Try to use path from placeholder if it exists
+        start_dir = ""
+        placeholder = self.flow_cache_edit.placeholderText()
+        
+        if placeholder and placeholder != "Load video to see cache preview":
+            # Check if placeholder path exists
+            if os.path.exists(placeholder):
+                if os.path.isdir(placeholder):
+                    start_dir = placeholder
+                else:
+                    start_dir = os.path.dirname(placeholder)
+            else:
+                # Try parent directory of placeholder
+                placeholder_parent = os.path.dirname(placeholder)
+                if os.path.exists(placeholder_parent):
+                    start_dir = placeholder_parent
+        
+        # If no good default found, use current text or input video directory
+        if not start_dir:
+            current_path = self.flow_cache_edit.text()
+            if current_path and os.path.exists(current_path):
+                start_dir = current_path
+            else:
+                # Default to input video directory
+                input_path = self.input_video_edit.text()
+                if input_path and os.path.exists(input_path):
+                    start_dir = os.path.dirname(input_path)
+        
+        dir_path = QFileDialog.getExistingDirectory(self, "Select Flow Cache Directory", start_dir)
         if dir_path:
             self.flow_cache_edit.setText(dir_path)
+            self.update_cache_status()  # Update status after path change
 
     def browse_flow_input(self):
+        # Try to use path from placeholder if it exists
+        start_dir = ""
+        placeholder = self.flow_input_edit.placeholderText()
+        
+        if placeholder and placeholder not in ["Flow input disabled in flow-only mode", "Load video to see expected flow input preview"]:
+            # Check if placeholder file exists
+            if os.path.exists(placeholder):
+                if os.path.isfile(placeholder):
+                    # If exact file exists, pre-select it
+                    file_path = placeholder
+                    self.flow_input_edit.setText(file_path)
+                    return
+                else:
+                    start_dir = placeholder
+            else:
+                # Try parent directory of placeholder
+                placeholder_parent = os.path.dirname(placeholder)
+                if os.path.exists(placeholder_parent):
+                    start_dir = placeholder_parent
+        
+        # If no good default found, use current text, output directory, or input video directory
+        if not start_dir:
+            current_path = self.flow_input_edit.text()
+            if current_path and os.path.exists(current_path):
+                start_dir = os.path.dirname(current_path)
+            else:
+                # Try output directory
+                output_dir = self.output_path_edit.text()
+                if output_dir and os.path.exists(output_dir):
+                    start_dir = output_dir
+                else:
+                    # Default to input video directory
+                    input_path = self.input_video_edit.text()
+                    if input_path and os.path.exists(input_path):
+                        start_dir = os.path.dirname(input_path)
+        
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Select Flow Input Video", "", 
+            self, "Select Flow Input Video", start_dir, 
             "Video Files (*.mp4 *.avi *.mov *.mkv *.webm *.flv);;All Files (*)"
         )
         if file_path:
@@ -902,20 +1030,73 @@ class FlowRunnerApp(QWidget):
 
 
     def check_flow_cache(self):
-        if not self.flow_cache_path or self.total_frames == 0:
+        if not self.video_path or self.total_frames == 0:
             self.flow_cache_status_label.setText("")
             return
 
         # Import VideoFlowProcessor only when needed
         if self.flow_processor_instance is None:
             from flow_processor import VideoFlowProcessor
-            self.flow_processor_instance = VideoFlowProcessor(device='cpu')
+            
+            # Get current GUI parameters
+            fast_mode = self.flag_widgets['fast'].isChecked()
+            tile_mode = self.flag_widgets['tile'].isChecked()
+            sequence_length = self.sequence_length_spin.value()
+            flow_model = self.model_combo.currentText()
+            
+            # Get model-specific parameters
+            if flow_model == 'videoflow':
+                vf_dataset = self.dataset_combo.currentText()
+                vf_architecture = self.vf_architecture_combo.currentText()
+                vf_variant = self.vf_variant_combo.currentText()
+                stage = 'sintel'  # Default for videoflow
+            else:  # memflow
+                vf_dataset = 'sintel'  # Default for memflow
+                vf_architecture = 'mof'  # Default for memflow
+                vf_variant = 'standard'  # Default for memflow
+                stage = self.dataset_combo.currentText() # Use dataset combo for memflow
+            
+            # Initialize processor with current GUI settings
+            self.flow_processor_instance = VideoFlowProcessor(
+                device='cpu',
+                fast_mode=fast_mode,
+                tile_mode=tile_mode,
+                sequence_length=sequence_length,
+                flow_model=flow_model,
+                stage=stage,
+                vf_dataset=vf_dataset,
+                vf_architecture=vf_architecture,
+                vf_variant=vf_variant
+            )
 
+        # Get processing parameters from GUI
+        start_frame = self.start_frame_spin.value()
+        max_frames = self.max_frames_spin.value()
+        
+        # Generate the proper cache path based on current GUI parameters
+        proper_cache_path = self.flow_processor_instance.generate_flow_cache_path(
+            self.video_path,
+            start_frame,
+            max_frames,
+            self.sequence_length_spin.value(),
+            self.flag_widgets['fast'].isChecked(),
+            self.flag_widgets['tile'].isChecked()
+        )
+        
+        # Check if user has set a custom cache path
+        custom_cache_path = self.flow_cache_edit.text().strip()
+        
+        # Use custom path if provided, otherwise use the generated path
+        cache_path_to_check = custom_cache_path if custom_cache_path else proper_cache_path
+        
+        # Calculate actual frames to process based on video length and GUI settings
+        actual_frames_to_process = min(max_frames, self.total_frames - start_frame) if max_frames > 0 else (self.total_frames - start_frame)
+        
         cache_exists, _, missing = self.flow_processor_instance.check_flow_cache_exists(
-            self.flow_cache_path, self.total_frames
+            cache_path_to_check, actual_frames_to_process
         )
         lods_exist = self.flow_processor_instance.check_flow_lods_exist(
-            self.flow_cache_path, self.total_frames
+            cache_path_to_check, actual_frames_to_process
         )
         
         status_text = []
@@ -929,6 +1110,10 @@ class FlowRunnerApp(QWidget):
         else:
             status_text.append("<font color='orange'>LODs not found</font>")
             
+        # Add info about cache path if using custom path
+        if custom_cache_path and custom_cache_path != proper_cache_path:
+            status_text.append("<font color='blue'>Using custom cache path</font>")
+        
         self.flow_cache_status_label.setText(", ".join(status_text))
 
 
@@ -974,6 +1159,9 @@ class FlowRunnerApp(QWidget):
         self.update_output_preview()
         self.update_cache_preview()
         self.update_flow_input_preview()
+        # Update status badges
+        self.update_output_status()
+        self.update_cache_status()
 
     def display_frame(self, frame):
         """Display frame in video label"""
@@ -1312,6 +1500,181 @@ class FlowRunnerApp(QWidget):
             self.flow_input_edit.setPlaceholderText("")
         else:
             self.flow_input_edit.setPlaceholderText("Load video to see expected flow input preview")
+
+    def update_output_status(self):
+        """Update output file status badge"""
+        if not hasattr(self, 'output_status_label'):
+            return
+            
+        input_path = self.input_video_edit.text()
+        output_dir = self.output_path_edit.text()
+        
+        # Check if we can determine the output file path
+        if input_path and hasattr(self, 'fps') and self.fps and self.fps > 0:
+            preview_filename = self.generate_output_filename_preview(input_path, output_dir, fps=self.fps)
+            
+            import os
+            if not output_dir or output_dir.strip() == "":
+                absolute_output_dir = os.path.abspath("results")
+            else:
+                absolute_output_dir = os.path.abspath(output_dir)
+            
+            output_filepath = os.path.join(absolute_output_dir, preview_filename)
+            
+            if os.path.exists(output_filepath):
+                # File exists - green checkmark
+                self.output_status_label.setText("✓")
+                self.output_status_label.setStyleSheet("""
+                    QLabel { 
+                        background-color: #28a745; 
+                        color: white; 
+                        border-radius: 10px; 
+                        font-weight: bold;
+                        font-size: 12px;
+                    }
+                """)
+                self.output_status_label.setToolTip(f"Output file exists:\n{output_filepath}")
+            else:
+                # File doesn't exist - orange circle
+                self.output_status_label.setText("○")
+                self.output_status_label.setStyleSheet("""
+                    QLabel { 
+                        background-color: #ffc107; 
+                        color: white; 
+                        border-radius: 10px; 
+                        font-weight: bold;
+                        font-size: 12px;
+                    }
+                """)
+                self.output_status_label.setToolTip(f"Output file will be created:\n{output_filepath}")
+        else:
+            # No video loaded or can't determine path - gray
+            self.output_status_label.setText("?")
+            self.output_status_label.setStyleSheet("""
+                QLabel { 
+                    background-color: #6c757d; 
+                    color: white; 
+                    border-radius: 10px; 
+                    font-weight: bold;
+                    font-size: 12px;
+                }
+            """)
+            self.output_status_label.setToolTip("Load video to check output file status")
+
+    def update_cache_status(self):
+        """Update cache status badge"""
+        if not hasattr(self, 'cache_status_label'):
+            return
+            
+        input_path = self.input_video_edit.text()
+        cache_path = self.flow_cache_edit.text()
+        
+        # If cache path is manually specified
+        if cache_path and cache_path.strip():
+            import os
+            if os.path.exists(cache_path) and os.path.isdir(cache_path):
+                # Check if cache contains any flow files
+                flow_files = [f for f in os.listdir(cache_path) if f.startswith('flow_frame_') and (f.endswith('.npz') or f.endswith('.flo'))]
+                if flow_files:
+                    # Cache exists with files - green checkmark
+                    self.cache_status_label.setText("✓")
+                    self.cache_status_label.setStyleSheet("""
+                        QLabel { 
+                            background-color: #28a745; 
+                            color: white; 
+                            border-radius: 10px; 
+                            font-weight: bold;
+                            font-size: 12px;
+                        }
+                    """)
+                    self.cache_status_label.setToolTip(f"Cache directory exists with {len(flow_files)} flow files:\n{cache_path}")
+                else:
+                    # Directory exists but empty - yellow
+                    self.cache_status_label.setText("!")
+                    self.cache_status_label.setStyleSheet("""
+                        QLabel { 
+                            background-color: #ffc107; 
+                            color: white; 
+                            border-radius: 10px; 
+                            font-weight: bold;
+                            font-size: 12px;
+                        }
+                    """)
+                    self.cache_status_label.setToolTip(f"Cache directory exists but is empty:\n{cache_path}")
+            else:
+                # Specified path doesn't exist - red X
+                self.cache_status_label.setText("✗")
+                self.cache_status_label.setStyleSheet("""
+                    QLabel { 
+                        background-color: #dc3545; 
+                        color: white; 
+                        border-radius: 10px; 
+                        font-weight: bold;
+                        font-size: 12px;
+                    }
+                """)
+                self.cache_status_label.setToolTip(f"Cache directory does not exist:\n{cache_path}")
+        # If no cache path specified, check auto-generated cache path
+        elif input_path and hasattr(self, 'fps') and self.fps and self.fps > 0:
+            preview_cache = self.generate_cache_directory_preview(input_path)
+            import os
+            absolute_cache_path = os.path.abspath(preview_cache)
+            
+            if os.path.exists(absolute_cache_path) and os.path.isdir(absolute_cache_path):
+                # Check if cache contains any flow files
+                flow_files = [f for f in os.listdir(absolute_cache_path) if f.startswith('flow_frame_') and (f.endswith('.npz') or f.endswith('.flo'))]
+                if flow_files:
+                    # Auto cache exists with files - green checkmark
+                    self.cache_status_label.setText("✓")
+                    self.cache_status_label.setStyleSheet("""
+                        QLabel { 
+                            background-color: #28a745; 
+                            color: white; 
+                            border-radius: 10px; 
+                            font-weight: bold;
+                            font-size: 12px;
+                        }
+                    """)
+                    self.cache_status_label.setToolTip(f"Auto cache exists with {len(flow_files)} flow files:\n{absolute_cache_path}")
+                else:
+                    # Directory exists but empty - yellow
+                    self.cache_status_label.setText("!")
+                    self.cache_status_label.setStyleSheet("""
+                        QLabel { 
+                            background-color: #ffc107; 
+                            color: white; 
+                            border-radius: 10px; 
+                            font-weight: bold;
+                            font-size: 12px;
+                        }
+                    """)
+                    self.cache_status_label.setToolTip(f"Auto cache directory exists but is empty:\n{absolute_cache_path}")
+            else:
+                # Auto cache doesn't exist - orange circle
+                self.cache_status_label.setText("○")
+                self.cache_status_label.setStyleSheet("""
+                    QLabel { 
+                        background-color: #ffc107; 
+                        color: white; 
+                        border-radius: 10px; 
+                        font-weight: bold;
+                        font-size: 12px;
+                    }
+                """)
+                self.cache_status_label.setToolTip(f"Auto cache will be created:\n{absolute_cache_path}")
+        else:
+            # No video loaded or can't determine cache path - gray
+            self.cache_status_label.setText("?")
+            self.cache_status_label.setStyleSheet("""
+                QLabel { 
+                    background-color: #6c757d; 
+                    color: white; 
+                    border-radius: 10px; 
+                    font-weight: bold;
+                    font-size: 12px;
+                }
+            """)
+            self.cache_status_label.setToolTip("Load video to check cache status")
 
     def generate_command(self, extra_flags=None):
         """Generate the flow_processor command based on current settings"""
