@@ -36,7 +36,7 @@ class VideoFlowProcessor:
     def __init__(self, device='auto', fast_mode=False, tile_mode=False, sequence_length=5,
                  flow_model='videoflow', model_path=None, stage='sintel', 
                  vf_dataset='sintel', vf_architecture='mof', vf_variant='standard',
-                 taa_emulate_compression=False, motion_vectors_clamp_range=32.0, flow_input=None):
+                 motion_vectors_clamp_range=32.0, flow_input=None):
         """Initialize optical flow processor with model selection support"""
         # Initialize device manager
         self.device_manager = DeviceManager()
@@ -83,7 +83,7 @@ class VideoFlowProcessor:
             raise ValueError(f"Unsupported flow model: {flow_model}. Choose 'videoflow' or 'memflow'")
         
         # TAA compression emulation setting
-        self.taa_emulate_compression = taa_emulate_compression
+
         
         # Motion vectors encoding parameters
         self.motion_vectors_clamp_range = motion_vectors_clamp_range
@@ -92,9 +92,9 @@ class VideoFlowProcessor:
         self.flow_input = flow_input
         
         # TAA processors for consistent state management
-        self.taa_flow_processor = TAAProcessor(alpha=0.1, emulate_compression=taa_emulate_compression)
+        self.taa_flow_processor = TAAProcessor(alpha=0.1)
         self.taa_simple_processor = TAAProcessor(alpha=0.1)
-        self.taa_external_processor = TAAProcessor(alpha=0.1, emulate_compression=taa_emulate_compression)
+        self.taa_external_processor = TAAProcessor(alpha=0.1)
         
         # Initialize storage manager
         self.cache_manager = FlowCacheManager()
@@ -755,11 +755,7 @@ class VideoFlowProcessor:
         if taa:
             print(f"\n[Configuration] TAA Processing:")
             print(f"  TAA Enabled: True")
-            print(f"  TAA Compression Emulation: {self.taa_emulate_compression}")
-            if self.taa_emulate_compression:
-                print(f"  TAA Encoder: Motion Vectors RG8 (uint8 compression/decompression)")
-            else:
-                print(f"  TAA Encoder: Native float32 precision")
+            print(f"  TAA Encoder: Native float32 precision")
         
 
         
@@ -1333,8 +1329,6 @@ def main():
                        help='Output only optical flow visualization (no original video)')
     parser.add_argument('--taa', action='store_true',
                        help='Add TAA (Temporal Anti-Aliasing) effect visualization using inverted optical flow from previous frame')
-    parser.add_argument('--taa-emulate-compression', action='store_true',
-                       help='Emulate motion vectors compression/decompression in TAA processing (uint8 RG format)')
     parser.add_argument('--flow-input', type=str, default=None,
                        help='Input video with encoded motion vectors in bottom half (for TAA comparison with external flow)')
     parser.add_argument('--flow-format', choices=['gamedev', 'hsv', 'torchvision', 'motion-vectors-rg8', 'motion-vectors-rgb8'], default='gamedev',
@@ -1440,7 +1434,7 @@ def main():
                                       sequence_length=args.sequence_length,
                                       flow_model=args.model, model_path=args.model_path, stage=args.stage,
                                       vf_dataset=args.vf_dataset, vf_architecture=args.vf_architecture, 
-                                      vf_variant=args.vf_variant, taa_emulate_compression=args.taa_emulate_compression,
+                                      vf_variant=args.vf_variant,
                                       motion_vectors_clamp_range=args.motion_vectors_clamp_range,
                                       flow_input=args.flow_input)
         
@@ -1623,7 +1617,7 @@ def main():
                                           sequence_length=args.sequence_length,
                                           flow_model=args.model, model_path=args.model_path, stage=args.stage,
                                           vf_dataset=args.vf_dataset, vf_architecture=args.vf_architecture, 
-                                          vf_variant=args.vf_variant, taa_emulate_compression=False,
+                                          vf_variant=args.vf_variant,
                                           motion_vectors_clamp_range=args.motion_vectors_clamp_range,
                                           flow_input=args.flow_input)
         
@@ -1645,7 +1639,7 @@ def main():
                                   sequence_length=args.sequence_length,
                                   flow_model=args.model, model_path=args.model_path, stage=args.stage,
                                   vf_dataset=args.vf_dataset, vf_architecture=args.vf_architecture, 
-                                  vf_variant=args.vf_variant, taa_emulate_compression=args.taa_emulate_compression,
+                                  vf_variant=args.vf_variant,
                                   motion_vectors_clamp_range=args.motion_vectors_clamp_range,
                                   flow_input=args.flow_input)
     

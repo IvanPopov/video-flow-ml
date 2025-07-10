@@ -1240,13 +1240,7 @@ class FlowVisualizer:
         )
         highlight_check.pack(side=tk.LEFT, padx=(10, 5))
 
-        self.taa_emulate_compression_var = tk.BooleanVar(value=False)
-        taa_compression_check = ttk.Checkbutton(
-            correction_other_frame,
-            text="TAA Emulate Compression",
-            variable=self.taa_emulate_compression_var,
-        )
-        taa_compression_check.pack(side=tk.LEFT, padx=(5, 0))
+
 
         # Fourth row - progress
         correction_progress_frame = ttk.Frame(correction_frame)
@@ -2936,8 +2930,7 @@ class FlowVisualizer:
         ]
         
         # Add TAA compression emulation flag if enabled
-        if self.taa_emulate_compression_var.get():
-            command.append("--taa-emulate-compression")
+
         
         # 4. Execute command
         try:
