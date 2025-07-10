@@ -99,9 +99,6 @@ python flow_processor.py --input video.mp4 --output result.mp4 --vertical
 # Use more frames for better accuracy (recommended for complex scenes)
 python flow_processor.py --input video.mp4 --output result.mp4 --sequence-length 7
 
-# Enable color-consistency flow stabilization (reduces jitter, optimized for TAA)
-python flow_processor.py --input video.mp4 --output result.mp4 --flow-smoothing 0.3
-
 # Save raw optical flow data for further processing
 python flow_processor.py --input video.mp4 --output result.mp4 --save-flow flo
 python flow_processor.py --input video.mp4 --output result.mp4 --save-flow npz
@@ -130,7 +127,6 @@ python flow_processor.py --input video.mp4 --interactive --duration 5 --start-ti
 - `--fast`: Enable fast mode (lower quality, faster processing)
 - `--tile`: Enable tile-based processing for better quality
 - `--sequence-length`: Number of frames in sequence (default: 5, recommended: 5-9)
-- `--flow-smoothing`: Color-consistency stabilization (0.0=off, 0.1-0.3=light, 0.4-0.7=medium, 0.8+=strong)
 - `--save-flow`: Save raw optical flow data without compression loss
   - `flo`: Middlebury .flo format (standard, widely supported)
   - `npz`: NumPy .npz format (compressed, includes metadata)
@@ -139,7 +135,6 @@ python flow_processor.py --input video.mp4 --interactive --duration 5 --start-ti
 - `--use-flow-cache PATH`: Use optical flow from specific cache directory instead of computing
 - `--interactive`: Launch interactive flow visualizer instead of creating video output
 - `--flow-only`: Output only optical flow visualization
-- `--vertical`: Stack videos vertically instead of horizontally
 
 ## Technical Details
 
@@ -149,14 +144,6 @@ The implementation uses VideoFlow MOF model which:
 - Analyzes configurable sequences of frames (default: 5, supports 3-9+)
 - Generates dense, high-quality optical flow
 - Supports multiple pre-trained models (Sintel, KITTI)
-
-### Color-Consistency Flow Stabilization
-
-The processor includes advanced stabilization to reduce vector jitter while preserving accuracy:
-- **Color validation**: Tests flow candidates by reprojecting colors from previous frame
-- **Multi-candidate selection**: Chooses between raw flow, smoothed flow, and temporal consistency
-- **TAA-optimized**: Ensures flow vectors work well for Temporal Anti-Aliasing
-- **Edge-preserving**: Uses bilateral filtering to maintain motion boundaries
 
 ### Automatic Flow Caching
 
@@ -170,16 +157,16 @@ The processor automatically caches computed optical flow to speed up repeated pr
 #### Cache Directory Structure
 ```
 video_flow_cache_seq5_start0_frames100_tile/
-├── flow_frame_000000.npz    # Frame 0 raw optical flow (before stabilization)
-├── flow_frame_000001.npz    # Frame 1 raw optical flow
+├── flow_frame_000000.npz    # Frame 0 optical flow
+├── flow_frame_000001.npz    # Frame 1 optical flow
 └── ...                      # Additional frames
 ```
 
 #### Cache Behavior
-- **First Run**: Computes and caches raw optical flow (before stabilization)
+- **First Run**: Computes and caches optical flow
 - **Subsequent Runs**: Automatically uses cached data if core parameters match
-- **Core Parameters**: sequence-length, start-frame, frames, fast, tile (affect raw flow computation)
-- **Non-Cache Parameters**: flow-smoothing, flow-format, taa, vertical (applied after loading cache)
+- **Core Parameters**: sequence-length, start-frame, frames, fast, tile (affect optical flow computation)
+- **Non-Cache Parameters**: flow-format, taa (applied after loading cache)
 - **Force Recompute**: `--force-recompute` flag bypasses cache
 
 #### Parameters Affecting Cache
@@ -190,9 +177,8 @@ video_flow_cache_seq5_start0_frames100_tile/
 - `--tile`: Changes processing method
 
 **Reuse same cache:**
-- `--flow-smoothing`: Applied after loading raw flow from cache
 - `--flow-format`: Only affects visualization encoding
-- `--taa` / `--vertical`: Only affects output layout
+- `--taa`: Only affects output layout
 
 ### Interactive Flow Visualizer
 

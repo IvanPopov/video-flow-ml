@@ -28,15 +28,12 @@ from encoding import FlowEncoderFactory, encode_flow
 from effects import TAAProcessor, apply_taa_effect
 from storage import FlowCacheManager
 from visualization import VideoComposer, create_side_by_side, add_text_overlay, create_video_grid
-from filtering import AdaptiveOpticalFlowKalmanFilter
 from processing.flow_inference import VideoFlowInference
 from processing.memflow_inference import MemFlowInference
 
 
 class VideoFlowProcessor:
-    def __init__(self, device='auto', fast_mode=False, tile_mode=False, sequence_length=5, flow_smoothing=0.0,
-                 kalman_process_noise=0.01, kalman_measurement_noise=0.1, kalman_prediction_confidence=0.7,
-                 kalman_motion_model='constant_acceleration', kalman_outlier_threshold=3.0, kalman_min_track_length=3,
+    def __init__(self, device='auto', fast_mode=False, tile_mode=False, sequence_length=5,
                  flow_model='videoflow', model_path=None, stage='sintel', 
                  vf_dataset='sintel', vf_architecture='mof', vf_variant='standard',
                  taa_emulate_compression=False, motion_vectors_clamp_range=32.0, flow_input=None):
@@ -48,7 +45,6 @@ class VideoFlowProcessor:
         self.fast_mode = fast_mode
         self.tile_mode = tile_mode
         self.sequence_length = sequence_length
-        self.flow_smoothing = flow_smoothing
         self.flow_model = flow_model.lower()
         self.stage = stage
         
@@ -56,8 +52,6 @@ class VideoFlowProcessor:
         self.vf_dataset = vf_dataset
         self.vf_architecture = vf_architecture
         self.vf_variant = vf_variant
-        
-        self.previous_smoothed_flow = None  # For temporal flow smoothing
         
         # Initialize inference engine based on selected model
         if self.flow_model == 'memflow':
@@ -88,18 +82,6 @@ class VideoFlowProcessor:
         else:
             raise ValueError(f"Unsupported flow model: {flow_model}. Choose 'videoflow' or 'memflow'")
         
-        # Kalman filter parameters
-        self.kalman_process_noise = kalman_process_noise
-        self.kalman_measurement_noise = kalman_measurement_noise
-        self.kalman_prediction_confidence = kalman_prediction_confidence
-        self.kalman_motion_model = kalman_motion_model
-        self.kalman_outlier_threshold = kalman_outlier_threshold
-        self.kalman_min_track_length = kalman_min_track_length
-        self.kalman_filter = None
-        
-        # TAA compare mode state
-        self.taa_compare_kalman_filters = {}
-        
         # TAA compression emulation setting
         self.taa_emulate_compression = taa_emulate_compression
         
@@ -129,8 +111,6 @@ class VideoFlowProcessor:
         else:
             print(f"Tile mode: Not used (MemFlow processes full frames)")
         print(f"Sequence length: {sequence_length} frames")
-        if flow_smoothing > 0:
-            print(f"Flow smoothing: {flow_smoothing:.2f} (color-consistency stabilization enabled)")
         
     def load_model(self):
         """Load optical flow model (VideoFlow or MemFlow)"""
@@ -180,41 +160,7 @@ class VideoFlowProcessor:
         """Compute optical flow using VideoFlow model"""
         return self.inference_engine.compute_optical_flow(frames, frame_idx)
     
-    def stabilize_optical_flow(self, current_flow, current_frame, previous_frame):
-        """
-        Apply adaptive Kalman filter based stabilization to optical flow
-        
-        Args:
-            current_flow: Current frame's optical flow (HWC numpy array)
-            current_frame: Current frame (HWC RGB, 0-255)
-            previous_frame: Previous frame (HWC RGB, 0-255)
-            
-        Returns:
-            Stabilized optical flow
-        """
-        if self.flow_smoothing <= 0.0:
-            # No stabilization - return original flow
-            return current_flow
-            
-        # Initialize Kalman filter if needed
-        if self.kalman_filter is None:
-            self.kalman_filter = AdaptiveOpticalFlowKalmanFilter(
-                process_noise=self.kalman_process_noise,
-                measurement_noise=self.kalman_measurement_noise,
-                prediction_confidence=self.kalman_prediction_confidence,
-                motion_model=self.kalman_motion_model,
-                outlier_threshold=self.kalman_outlier_threshold,
-                min_track_length=self.kalman_min_track_length
-            )
-            print(f"Initialized adaptive Kalman filter:")
-            print(f"  Model: {self.kalman_motion_model}")
-            print(f"  Process noise: {self.kalman_process_noise}")
-            print(f"  Measurement noise: {self.kalman_measurement_noise}")
-            print(f"  Prediction confidence: {self.kalman_prediction_confidence}")
-            print(f"  Outlier threshold: {self.kalman_outlier_threshold}")
-        
-        # Apply Kalman filtering
-        return self.kalman_filter.update(current_flow, self.kalman_filter.frame_count)
+
         
     def save_flow_flo(self, flow, filename):
         """Save optical flow in Middlebury .flo format (lossless)"""
@@ -649,16 +595,16 @@ class VideoFlowProcessor:
         """Add text overlay to frame"""
         return self.video_composer.add_text_overlay(frame, text, position, font_scale, color, thickness)
         
-    def create_side_by_side(self, original, flow_viz, vertical=False, flow_only=False, 
+    def create_side_by_side(self, original, flow_viz, flow_only=False, 
                            taa_frame=None, taa_simple_frame=None, model_name="VideoFlow", fast_mode=False, flow_format="gamedev"):
-        """Create side-by-side, top-bottom, flow-only, or TAA visualization with text overlays"""
+        """Create side-by-side, flow-only, or TAA visualization with text overlays"""
         return self.video_composer.create_side_by_side(
-            original, flow_viz, vertical, flow_only, 
+            original, flow_viz, flow_only, 
             taa_frame, taa_simple_frame, model_name, fast_mode, flow_format
         )
         
     def generate_output_filename(self, input_path, output_dir, start_time=None, duration=None, 
-                                start_frame=0, max_frames=1000, vertical=False, flow_only=False, taa=False, lossless=False, uncompressed=False, flow_format='gamedev', fps=30.0):
+                                start_frame=0, max_frames=1000, flow_only=False, taa=False, lossless=False, uncompressed=False, flow_format='gamedev', fps=30.0):
         """Generate automatic output filename based on parameters"""
         import os
         
@@ -707,8 +653,7 @@ class VideoFlowProcessor:
                 parts.append("gamedev")
         elif taa:
             parts.append("taa")
-        elif vertical:
-            parts.append("vert")
+
         
         # Add FPS information
         parts.append(f"{fps:.0f}fps")
@@ -731,9 +676,9 @@ class VideoFlowProcessor:
         return os.path.join(results_dir, filename)
     
     def process_video(self, input_path, output_path, max_frames=1000, start_frame=0, 
-                     start_time=None, duration=None, vertical=False, flow_only=False, taa=False, flow_format='gamedev', 
+                     start_time=None, duration=None, flow_only=False, taa=False, flow_format='gamedev', 
                      save_flow=None, force_recompute=False, use_flow_cache=None, auto_play=True,
-                     taa_compare=False, skip_lods=False, lossless=False, uncompressed=False, flow_input=None):
+                     skip_lods=False, lossless=False, uncompressed=False, flow_input=None):
         """Main processing function"""
         import os
         from video.frame_extractor import FrameExtractor
@@ -758,19 +703,7 @@ class VideoFlowProcessor:
             print(f"  Mode: TAA comparison with external flow")
             print()
         
-        # TAA Compare Mode Setup
-        if taa_compare:
-            if not taa or self.flow_smoothing <= 0:
-                print("Warning: --taa-compare requires --taa and --flow-smoothing to be enabled. Disabling compare mode.")
-                taa_compare = False
-            else:
-                print("TAA Compare Mode Enabled: Generating multiple stabilization strengths.")
-                self.taa_compare_kalman_filters = {
-                    'Original': None,  # No stabilization (original flow)
-                    'Weak': AdaptiveOpticalFlowKalmanFilter(process_noise=0.05, measurement_noise=0.2, prediction_confidence=0.5),
-                    'Medium': AdaptiveOpticalFlowKalmanFilter(process_noise=0.01, measurement_noise=0.1, prediction_confidence=0.7),
-                    'Strong': AdaptiveOpticalFlowKalmanFilter(process_noise=0.001, measurement_noise=0.05, prediction_confidence=0.9)
-                }
+
         
         # Handle time-based parameters
         fps = None
@@ -799,7 +732,7 @@ class VideoFlowProcessor:
         if os.path.isdir(output_path):
             output_path = self.generate_output_filename(
                 input_path, output_path, start_time, duration, 
-                start_frame, max_frames, vertical, flow_only, taa, lossless=lossless, uncompressed=uncompressed, flow_format=flow_format, fps=fps
+                start_frame, max_frames, flow_only, taa, lossless=lossless, uncompressed=uncompressed, flow_format=flow_format, fps=fps
             )
             print(f"Auto-generated output filename: {os.path.basename(output_path)}")
         
@@ -831,13 +764,7 @@ class VideoFlowProcessor:
             else:
                 print(f"  TAA Encoder: Native float32 precision")
         
-        if self.flow_smoothing > 0:
-            print(f"\n[Configuration] Flow Stabilization:")
-            print(f"  Kalman Filter Enabled: True")
-            print(f"  Process Noise: {self.kalman_process_noise}")
-            print(f"  Measurement Noise: {self.kalman_measurement_noise}")
-            print(f"  Prediction Confidence: {self.kalman_prediction_confidence}")
-            print(f"  Motion Model: {self.kalman_motion_model}")
+
         
         print()  # Add blank line for readability
         
@@ -1022,30 +949,15 @@ class VideoFlowProcessor:
             fourcc = cv2.VideoWriter_fourcc(*'MJPG')
             print("Using MJPG codec. Output will be .avi for compatibility.")
         
-        if taa_compare:
-            # For 6 videos (orig, flow, 4x TAA), use 2x3 grid (2 cols, 3 rows) for more square aspect
-            grid_cols = 2
-            grid_rows = 3
-            canvas_w = grid_cols * width
-            canvas_h = int(canvas_w / (4/3))  # Target 4:3 aspect ratio instead of 16:9
-            output_size = (canvas_w, canvas_h)
-        elif flow_only:
-            output_size = (width, height * 2)  # Vertical stack: Original on top, Flow on bottom
+        if flow_only:
+            output_size = (width, height * 2)  # Stack: Original on top, Flow on bottom
         elif taa:
             if flow_input is not None:
                 # Flow input mode: 6 videos in 2x3 grid
-                if vertical:
-                    output_size = (width, height * 6)  # Vertical: same width, 6x height
-                else:
-                    output_size = (width * 2, height * 3)  # 2x3 grid: double width, triple height
+                output_size = (width * 2, height * 3)  # 2x3 grid: double width, triple height
             else:
                 # Standard TAA mode: 4 videos
-                if vertical:
-                    output_size = (width, height * 4)  # Vertical: same width, quad height (Original + Flow + TAA+Flow + TAA Simple)
-                else:
-                    output_size = (width * 2, height * 2)  # 2x2 grid: double width, double height
-        elif vertical:
-            output_size = (width, height * 2)  # Vertical: same width, double height
+                output_size = (width * 2, height * 2)  # 2x2 grid: double width, double height
         else:
             output_size = (width * 2, height)  # Horizontal: double width, same height
         out = cv2.VideoWriter(output_path, fourcc, fps, output_size)
@@ -1063,8 +975,7 @@ class VideoFlowProcessor:
         self.taa_simple_processor.reset_history()
         previous_flow = None  # Store previous frame's optical flow for TAA
         
-        # TAA Compare state
-        taa_compare_frames = {name: None for name in self.taa_compare_kalman_filters.keys()}
+
 
         # Create progress bars for tile mode or single progress bar for normal mode
         if self.tile_mode:
@@ -1117,17 +1028,8 @@ class VideoFlowProcessor:
             if save_flow is not None and flow_base_filename is not None:
                 self.save_optical_flow_files(raw_flow, flow_base_filename, i, save_flow)
             
-            # Apply color-consistency based stabilization if enabled
-            if self.flow_smoothing > 0.0:
-                if i > 0:  # Need previous frame for stabilization
-                    flow = self.stabilize_optical_flow(raw_flow, frames[i], frames[i-1])
-                else:
-                    # First frame - just initialize and use raw flow
-                    self.previous_smoothed_flow = raw_flow.copy()
-                    flow = raw_flow
-            else:
-                # No stabilization - use raw flow
-                flow = raw_flow
+            # No stabilization - use raw flow
+            flow = raw_flow
             
             # Encode optical flow based on selected format
             if i == 0:  # Log encoder info only once
@@ -1163,20 +1065,7 @@ class VideoFlowProcessor:
             if taa:
                 # Use previous frame's flow with inverted direction for TAA
                 if previous_flow is not None:
-                    # TAA compare mode generates multiple versions
-                    if taa_compare:
-                        for name, kalman_filter in self.taa_compare_kalman_filters.items():
-                            if name == 'Original':
-                                # Use original unstabilized flow
-                                stabilized_flow = raw_flow
-                            else:
-                                # Stabilize flow with this filter's strength
-                                stabilized_flow = kalman_filter.update(raw_flow, kalman_filter.frame_count)
-                            
-                            # Apply TAA
-                            prev_taa = taa_compare_frames[name]
-                            taa_result = self.apply_taa_effect(frames[i], stabilized_flow, prev_taa, alpha=0.1, use_flow=True)
-                            taa_compare_frames[name] = taa_result.copy()
+
                     
                     # Normal TAA processing with current computed flow
                     taa_result = self.taa_flow_processor.apply_taa(
@@ -1228,9 +1117,6 @@ class VideoFlowProcessor:
                         sequence_id='flow_taa'
                     )
                     taa_frame = taa_result
-                    if taa_compare:
-                        for name in self.taa_compare_kalman_filters.keys():
-                            taa_compare_frames[name] = taa_result.copy()
                     
                     # Apply TAA with external flow if provided (first frame)
                     if flow_input is not None and i < len(decoded_flows):
@@ -1275,35 +1161,17 @@ class VideoFlowProcessor:
             previous_flow = flow.copy()
             
             # Create combined frame
-            if taa_compare:
-                frames_to_display = {
-                    'Original': frames[i],
-                    'Flow Viz': flow_viz
-                }
-                
-                # Add TAA versions with parameter labels
-                for name, kalman_filter in self.taa_compare_kalman_filters.items():
-                    if name == 'Original':
-                        label = f'TAA-{name}\n(No Stabilization)'
-                    else:
-                        pn = kalman_filter.base_process_noise
-                        mn = kalman_filter.base_measurement_noise  
-                        pc = kalman_filter.prediction_confidence
-                        label = f'TAA-{name}\n(PN:{pn} MN:{mn} PC:{pc})'
-                    frames_to_display[label] = taa_compare_frames[name].astype(np.uint8)
-                
-                combined = self.create_video_grid(frames_to_display, grid_shape=(3, 2), target_aspect=4/3)
-            elif flow_input is not None and taa_external_frame is not None and difference_overlay is not None:
+            if flow_input is not None and taa_external_frame is not None and difference_overlay is not None:
                 # Flow input mode: create 6-video grid
                 # Use external flow visualization if available, otherwise fall back to original flow
                 display_flow_viz = external_flow_viz if external_flow_viz is not None else flow_viz
                 combined = self.create_6_video_grid(
                     frames[i], display_flow_viz, taa_frame, taa_simple_frame, 
-                    taa_external_frame, difference_overlay, vertical=vertical
+                    taa_external_frame, difference_overlay
                 )
             else:
                 model_name = "MOF_sintel" if hasattr(self, 'model') else "VideoFlow"
-                combined = self.create_side_by_side(frames[i], flow_viz, vertical=vertical, flow_only=flow_only, 
+                combined = self.create_side_by_side(frames[i], flow_viz, flow_only=flow_only, 
                                                   taa_frame=taa_frame, taa_simple_frame=taa_simple_frame,
                                                   model_name=model_name, fast_mode=self.fast_mode, flow_format=flow_format)
             
@@ -1397,7 +1265,7 @@ class VideoFlowProcessor:
         return self.video_composer.create_video_grid(frames_dict, grid_shape, target_aspect)
     
     def create_6_video_grid(self, original_frame, flow_viz, taa_frame, taa_simple_frame, 
-                           taa_external_frame, difference_overlay, vertical=False):
+                           taa_external_frame, difference_overlay):
         """
         Create 6-video grid layout for flow input mode
         
@@ -1408,7 +1276,6 @@ class VideoFlowProcessor:
             taa_simple_frame: TAA without flow (RGB, may be float)
             taa_external_frame: TAA with external flow (RGB, may be float)
             difference_overlay: Difference overlay between flows (RGB)
-            vertical: Whether to stack vertically
             
         Returns:
             Combined frame with 6 videos (BGR for video output)
@@ -1425,46 +1292,28 @@ class VideoFlowProcessor:
         taa_external_bgr = cv2.cvtColor(np.clip(taa_external_frame, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
         diff_bgr = cv2.cvtColor(difference_overlay, cv2.COLOR_RGB2BGR)
         
-        if vertical:
-            # Stack vertically: 6 videos in single column
-            combined = np.zeros((h * 6, w, 3), dtype=np.uint8)
-            combined[0:h, :, :] = orig_bgr
-            combined[h:2*h, :, :] = flow_bgr
-            combined[2*h:3*h, :, :] = taa_bgr
-            combined[3*h:4*h, :, :] = taa_simple_bgr
-            combined[4*h:5*h, :, :] = taa_external_bgr
-            combined[5*h:6*h, :, :] = diff_bgr
-            
-            # Add text labels
-            combined = self.add_text_overlay(combined, "Original", (10, 10))
-            combined = self.add_text_overlay(combined, "External Flow", (10, h + 10))
-            combined = self.add_text_overlay(combined, "TAA + Original Flow", (10, 2*h + 10))
-            combined = self.add_text_overlay(combined, "TAA Simple", (10, 3*h + 10))
-            combined = self.add_text_overlay(combined, "TAA + External Flow", (10, 4*h + 10))
-            combined = self.add_text_overlay(combined, "Flow Difference", (10, 5*h + 10))
-        else:
-            # 2x3 grid: 2 columns, 3 rows
-            combined = np.zeros((h * 3, w * 2, 3), dtype=np.uint8)
-            
-            # Top row
-            combined[0:h, 0:w, :] = orig_bgr
-            combined[0:h, w:2*w, :] = flow_bgr
-            
-            # Middle row
-            combined[h:2*h, 0:w, :] = taa_bgr
-            combined[h:2*h, w:2*w, :] = taa_simple_bgr
-            
-            # Bottom row
-            combined[2*h:3*h, 0:w, :] = taa_external_bgr
-            combined[2*h:3*h, w:2*w, :] = diff_bgr
-            
-            # Add text labels
-            combined = self.add_text_overlay(combined, "Original", (10, 10))
-            combined = self.add_text_overlay(combined, "External Flow", (w + 10, 10))
-            combined = self.add_text_overlay(combined, "TAA + Original Flow", (10, h + 10))
-            combined = self.add_text_overlay(combined, "TAA Simple", (w + 10, h + 10))
-            combined = self.add_text_overlay(combined, "TAA + External Flow", (10, 2*h + 10))
-            combined = self.add_text_overlay(combined, "Flow Difference", (w + 10, 2*h + 10))
+        # 2x3 grid: 2 columns, 3 rows
+        combined = np.zeros((h * 3, w * 2, 3), dtype=np.uint8)
+        
+        # Top row
+        combined[0:h, 0:w, :] = orig_bgr
+        combined[0:h, w:2*w, :] = flow_bgr
+        
+        # Middle row
+        combined[h:2*h, 0:w, :] = taa_bgr
+        combined[h:2*h, w:2*w, :] = taa_simple_bgr
+        
+        # Bottom row
+        combined[2*h:3*h, 0:w, :] = taa_external_bgr
+        combined[2*h:3*h, w:2*w, :] = diff_bgr
+        
+        # Add text labels
+        combined = self.add_text_overlay(combined, "Original", (10, 10))
+        combined = self.add_text_overlay(combined, "External Flow", (w + 10, 10))
+        combined = self.add_text_overlay(combined, "TAA + Original Flow", (10, h + 10))
+        combined = self.add_text_overlay(combined, "TAA Simple", (w + 10, h + 10))
+        combined = self.add_text_overlay(combined, "TAA + External Flow", (10, 2*h + 10))
+        combined = self.add_text_overlay(combined, "Flow Difference", (w + 10, 2*h + 10))
         
         return combined
 
@@ -1486,8 +1335,6 @@ def main():
                        help='Duration in seconds (overrides --frames)')
     parser.add_argument('--fast', action='store_true',
                        help='Enable fast mode (lower resolution, fewer iterations for faster processing)')
-    parser.add_argument('--vertical', action='store_true',
-                       help='Stack videos vertically (top-bottom) instead of horizontally (side-by-side)')
     parser.add_argument('--flow-only', action='store_true',
                        help='Output only optical flow visualization (no original video)')
     parser.add_argument('--taa', action='store_true',
@@ -1504,20 +1351,6 @@ def main():
                        help='Enable tile-based processing: split frames into 1280x1280 square tiles (optimal for VideoFlow MOF model)')
     parser.add_argument('--sequence-length', type=int, default=5,
                        help='Number of frames to use in sequence for VideoFlow processing (default: 5, recommended: 5-9)')
-    parser.add_argument('--flow-smoothing', type=float, default=0.0,
-                       help='Enable Kalman filter flow stabilization (0.0=disabled, 0.1-0.9=enabled with increasing strength)')
-    parser.add_argument('--kalman-process-noise', type=float, default=0.01,
-                       help='Kalman filter process noise (0.001-0.1, default: 0.01)')
-    parser.add_argument('--kalman-measurement-noise', type=float, default=0.1,
-                       help='Kalman filter measurement noise (0.01-1.0, default: 0.1)')
-    parser.add_argument('--kalman-prediction-confidence', type=float, default=0.7,
-                       help='Kalman filter prediction confidence (0.1-0.9, default: 0.7)')
-    parser.add_argument('--kalman-motion-model', choices=['constant_velocity', 'constant_acceleration'], default='constant_acceleration',
-                       help='Kalman filter motion model (default: constant_acceleration)')
-    parser.add_argument('--kalman-outlier-threshold', type=float, default=3.0,
-                       help='Kalman filter outlier detection threshold in std deviations (1.0-5.0, default: 3.0)')
-    parser.add_argument('--kalman-min-track-length', type=int, default=3,
-                       help='Minimum track length before applying Kalman filtering (2-10, default: 3)')
     parser.add_argument('--save-flow', choices=['flo', 'npz', 'both'], default=None,
                        help='Save raw optical flow data: flo (Middlebury format), npz (NumPy format), both')
     parser.add_argument('--force-recompute', action='store_true',
@@ -1530,8 +1363,6 @@ def main():
                        help='Only show tile grid calculation without processing video')
     parser.add_argument('--no-autoplay', action='store_true',
                        help='Disable automatic video playback after processing')
-    parser.add_argument('--taa-compare', action='store_true',
-                       help='Enable TAA comparison mode with multiple stabilization strengths')
     parser.add_argument('--skip-lods', action='store_true',
                        help='Skip LOD (Level-of-Detail) pyramid generation/loading for faster processing')
     parser.add_argument('--lossless', action='store_true',
@@ -1614,13 +1445,7 @@ def main():
         
         # Create processor to compute or find flow cache
         processor = VideoFlowProcessor(device=args.device, fast_mode=args.fast, tile_mode=args.tile, 
-                                      sequence_length=args.sequence_length, flow_smoothing=0.0,
-                                      kalman_process_noise=args.kalman_process_noise,
-                                      kalman_measurement_noise=args.kalman_measurement_noise,
-                                      kalman_prediction_confidence=args.kalman_prediction_confidence,
-                                      kalman_motion_model=args.kalman_motion_model,
-                                      kalman_outlier_threshold=args.kalman_outlier_threshold,
-                                      kalman_min_track_length=args.kalman_min_track_length,
+                                      sequence_length=args.sequence_length,
                                       flow_model=args.model, model_path=args.model_path, stage=args.stage,
                                       vf_dataset=args.vf_dataset, vf_architecture=args.vf_architecture, 
                                       vf_variant=args.vf_variant, taa_emulate_compression=args.taa_emulate_compression,
@@ -1803,7 +1628,7 @@ def main():
         
         # Create temporary processor just for tile calculation
         temp_processor = VideoFlowProcessor(device='cpu', fast_mode=False, tile_mode=True, 
-                                          sequence_length=args.sequence_length, flow_smoothing=0.0,
+                                          sequence_length=args.sequence_length,
                                           flow_model=args.model, model_path=args.model_path, stage=args.stage,
                                           vf_dataset=args.vf_dataset, vf_architecture=args.vf_architecture, 
                                           vf_variant=args.vf_variant, taa_emulate_compression=False,
@@ -1825,13 +1650,7 @@ def main():
         return
     
     processor = VideoFlowProcessor(device=args.device, fast_mode=args.fast, tile_mode=args.tile, 
-                                  sequence_length=args.sequence_length, flow_smoothing=args.flow_smoothing,
-                                  kalman_process_noise=args.kalman_process_noise,
-                                  kalman_measurement_noise=args.kalman_measurement_noise,
-                                  kalman_prediction_confidence=args.kalman_prediction_confidence,
-                                  kalman_motion_model=args.kalman_motion_model,
-                                  kalman_outlier_threshold=args.kalman_outlier_threshold,
-                                  kalman_min_track_length=args.kalman_min_track_length,
+                                  sequence_length=args.sequence_length,
                                   flow_model=args.model, model_path=args.model_path, stage=args.stage,
                                   vf_dataset=args.vf_dataset, vf_architecture=args.vf_architecture, 
                                   vf_variant=args.vf_variant, taa_emulate_compression=args.taa_emulate_compression,
@@ -1847,8 +1666,7 @@ def main():
                 mode += "_fast"
             if args.tile:
                 mode += "_tile"
-            if args.vertical:
-                mode += "_vertical"
+
             if args.flow_only:
                 mode += "_flow_only"
             if args.taa:
@@ -1870,15 +1688,15 @@ def main():
                 args.output = f"videoflow_{args.start_frame:06d}_{end_frame:06d}{mode}.avi"
         
         processor.process_video(args.input, args.output, max_frames=args.frames, start_frame=args.start_frame,
-                              start_time=args.start_time, duration=args.duration, vertical=args.vertical, 
+                              start_time=args.start_time, duration=args.duration, 
                               flow_only=args.flow_only, taa=args.taa, flow_format=args.flow_format, save_flow=args.save_flow,
                               force_recompute=args.force_recompute, use_flow_cache=args.use_flow_cache, 
                               auto_play=not args.no_autoplay,
-                              taa_compare=args.taa_compare, skip_lods=args.skip_lods,
+                              skip_lods=args.skip_lods,
                               lossless=args.lossless, uncompressed=args.uncompressed, flow_input=args.flow_input)
         
         model_name = args.model.upper()
-        if not args.no_autoplay and not args.taa_compare:
+        if not args.no_autoplay:
             print(f"\n✓ {model_name} processing completed successfully! Video should open automatically.")
         else:
             print(f"\n✓ {model_name} processing completed successfully!")

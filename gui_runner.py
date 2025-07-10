@@ -170,7 +170,6 @@ class FlowRunnerApp(QWidget):
         flag_configs = [
             ('fast', False, 'Fast mode', 'Use fast processing mode with reduced quality'),
             ('tile', True, 'Tile mode', 'Enable tile-based processing for large videos'),
-            ('vertical', False, 'Vertical', 'Process video in vertical orientation'),
             ('flow_only', False, 'Flow only', 'Output only optical flow without video composition'),
             ('taa', True, 'TAA', 'Apply Temporal Anti-Aliasing for smoother results'),
             ('taa_emulate_compression', False, 'TAA Emulate Compression', 'Emulate motion vectors compression/decompression in TAA processing'),
@@ -347,24 +346,7 @@ class FlowRunnerApp(QWidget):
         
         layout.addWidget(flow_card)
 
-        # Kalman filter card
-        kalman_card = CardWidget()
-        kalman_layout = QGridLayout(kalman_card)
-        
-        kalman_title = BodyLabel("Kalman Filter")
-        kalman_layout.addWidget(kalman_title, 0, 0, 1, 2)
-        
-        kalman_layout.addWidget(BodyLabel("Smoothing:"), 1, 0)
-        self.kalman_smooth_spin = DoubleSpinBox()
-        self.kalman_smooth_spin.setRange(0.0, 1.0)
-        self.kalman_smooth_spin.setValue(0.5)
-        self.kalman_smooth_spin.setSingleStep(0.1)
-        self.kalman_smooth_spin.setDecimals(2)
-        self.kalman_smooth_spin.setToolTip("Kalman filter smoothing parameter (0.0-1.0)")
-        self.kalman_smooth_spin.valueChanged.connect(self.on_setting_changed)
-        kalman_layout.addWidget(self.kalman_smooth_spin, 1, 1)
-        
-        layout.addWidget(kalman_card)
+
 
         layout.addStretch()
         
@@ -592,7 +574,6 @@ class FlowRunnerApp(QWidget):
                 (self.start_time_spin, 'start_time', 0.0),
                 (self.duration_spin, 'duration', 0.0),
                 (self.sequence_length_spin, 'sequence_length', 5),
-                (self.kalman_smooth_spin, 'kalman_smooth', 0.5),
                 (self.mv_clamp_range_spin, 'mv_clamp_range', 32.0)
             ]
             
@@ -669,7 +650,6 @@ class FlowRunnerApp(QWidget):
         self.settings.setValue('start_time', self.start_time_spin.value())
         self.settings.setValue('duration', self.duration_spin.value())
         self.settings.setValue('sequence_length', self.sequence_length_spin.value())
-        self.settings.setValue('kalman_smooth', self.kalman_smooth_spin.value())
         self.settings.setValue('mv_clamp_range', self.mv_clamp_range_spin.value())
         
         # Save combo settings
@@ -1098,9 +1078,7 @@ class FlowRunnerApp(QWidget):
         if self.sequence_length_spin.value() != 5:
             cmd_parts.extend(["--sequence-length", str(self.sequence_length_spin.value())])
         
-        # Kalman smoothing
-        if self.kalman_smooth_spin.value() != 0.5:
-            cmd_parts.extend(["--kalman-smooth", f"{self.kalman_smooth_spin.value():.2f}"])
+
         
         # Add extra flags if provided
         if extra_flags:

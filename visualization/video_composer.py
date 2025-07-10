@@ -65,12 +65,12 @@ class VideoComposer:
         return frame_with_text
     
     def create_side_by_side(self, original: np.ndarray, flow_viz: np.ndarray, 
-                          vertical: bool = False, flow_only: bool = False,
+                          flow_only: bool = False,
                           taa_frame: Optional[np.ndarray] = None, 
                           taa_simple_frame: Optional[np.ndarray] = None,
                           model_name: str = "VideoFlow", fast_mode: bool = False, 
                           flow_format: str = "gamedev") -> np.ndarray:
-        """Create side-by-side, top-bottom, flow-only, or TAA visualization with text overlays"""
+        """Create side-by-side, flow-only, or TAA visualization with text overlays"""
         # Ensure same dimensions
         h, w = original.shape[:2]
         if flow_viz.shape[:2] != (h, w):
@@ -102,36 +102,24 @@ class VideoComposer:
             taa_simple_bgr = self.add_text_overlay(taa_simple_bgr, "TAA Simple", 'top-left')
             taa_simple_bgr = self.add_text_overlay(taa_simple_bgr, "Alpha: 0.1", 'bottom-left')
             
-            if vertical:
-                # Stack vertically: Original | Flow | TAA+Flow | TAA Simple
-                return np.concatenate([orig_bgr, flow_bgr, taa_bgr, taa_simple_bgr], axis=0)
-            else:
-                # Create 2x2 grid layout
-                # Top row: Original | Flow
-                top_row = np.concatenate([orig_bgr, flow_bgr], axis=1)
-                # Bottom row: TAA+Flow | TAA Simple
-                bottom_row = np.concatenate([taa_bgr, taa_simple_bgr], axis=1)
-                # Stack rows vertically
-                return np.concatenate([top_row, bottom_row], axis=0)
+            # Create 2x2 grid layout
+            # Top row: Original | Flow
+            top_row = np.concatenate([orig_bgr, flow_bgr], axis=1)
+            # Bottom row: TAA+Flow | TAA Simple
+            bottom_row = np.concatenate([taa_bgr, taa_simple_bgr], axis=1)
+            # Stack rows
+            return np.concatenate([top_row, bottom_row], axis=0)
         elif taa_frame is not None:
             # Single TAA mode (backward compatibility)
             taa_bgr = cv2.cvtColor(np.clip(taa_frame, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
             taa_bgr = self.add_text_overlay(taa_bgr, "TAA + Inv.Flow", 'top-left')
             taa_bgr = self.add_text_overlay(taa_bgr, "Alpha: 0.1", 'bottom-left')
             
-            if vertical:
-                # Stack vertically: Original | Flow | TAA
-                return np.concatenate([orig_bgr, flow_bgr, taa_bgr], axis=0)
-            else:
-                # Stack horizontally: Original | Flow | TAA
-                return np.concatenate([orig_bgr, flow_bgr, taa_bgr], axis=1)
+            # Stack horizontally: Original | Flow | TAA
+            return np.concatenate([orig_bgr, flow_bgr, taa_bgr], axis=1)
         else:
-            if vertical:
-                # Concatenate vertically (top-bottom)
-                return np.concatenate([orig_bgr, flow_bgr], axis=0)
-            else:
-                # Concatenate horizontally (side-by-side)
-                return np.concatenate([orig_bgr, flow_bgr], axis=1)
+            # Concatenate horizontally (side-by-side)
+            return np.concatenate([orig_bgr, flow_bgr], axis=1)
     
     def create_video_grid(self, frames_dict: Dict[str, np.ndarray], 
                          grid_shape: Tuple[int, int], target_aspect: float = 16/9) -> np.ndarray:
@@ -248,14 +236,14 @@ def add_text_overlay(frame: np.ndarray, text: str, position: Union[str, Tuple[in
 
 
 def create_side_by_side(original: np.ndarray, flow_viz: np.ndarray, 
-                       vertical: bool = False, flow_only: bool = False,
+                       flow_only: bool = False,
                        taa_frame: Optional[np.ndarray] = None, 
                        taa_simple_frame: Optional[np.ndarray] = None,
                        model_name: str = "VideoFlow", fast_mode: bool = False, 
                        flow_format: str = "gamedev") -> np.ndarray:
     """Create side-by-side composition"""
     composer = VideoComposer()
-    return composer.create_side_by_side(original, flow_viz, vertical, flow_only, 
+    return composer.create_side_by_side(original, flow_viz, flow_only, 
                                       taa_frame, taa_simple_frame, model_name, 
                                       fast_mode, flow_format)
 
