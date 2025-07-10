@@ -260,6 +260,7 @@ class FlowRunnerApp(QWidget):
         self.time_control_combo.addItems(['Control by frame', 'Control by time'])
         self.time_control_combo.setToolTip("Choose whether to control by frame numbers or time")
         self.time_control_combo.currentTextChanged.connect(self.on_time_control_changed)
+        self.time_control_combo.currentTextChanged.connect(self.update_output_preview)
         time_layout.addWidget(self.time_control_combo, 1, 1)
         
         # Frame controls (visible by default)
@@ -432,6 +433,7 @@ class FlowRunnerApp(QWidget):
         self.input_video_edit = LineEdit()
         self.input_video_edit.setToolTip("Path to input video file")
         self.input_video_edit.textChanged.connect(self.on_setting_changed)
+        self.input_video_edit.textChanged.connect(self.update_output_preview)
         io_layout.addWidget(self.input_video_edit, 1, 1)
         
         browse_input_btn = PushButton("Browse")
@@ -441,8 +443,9 @@ class FlowRunnerApp(QWidget):
         # Output path
         io_layout.addWidget(BodyLabel("Output path:"), 2, 0)
         self.output_path_edit = LineEdit()
-        self.output_path_edit.setToolTip("Output directory path")
+        self.output_path_edit.setToolTip("Output directory path (leave empty to use 'results' directory)")
         self.output_path_edit.textChanged.connect(self.on_setting_changed)
+        self.output_path_edit.textChanged.connect(self.update_output_preview)
         io_layout.addWidget(self.output_path_edit, 2, 1)
         
         browse_output_btn = PushButton("Browse")
@@ -614,7 +617,7 @@ class FlowRunnerApp(QWidget):
             self.flow_input_edit.blockSignals(True)
             
             self.input_video_edit.setText(self.settings.value('input_video', ''))
-            self.output_path_edit.setText(self.settings.value('output_path', ''))
+            self.output_path_edit.setText(self.settings.value('output_path', 'results'))
             self.flow_cache_edit.setText(self.settings.value('flow_cache', ''))
             self.flow_input_edit.setText(self.settings.value('flow_input', ''))
             
@@ -693,6 +696,9 @@ class FlowRunnerApp(QWidget):
         if video_path and os.path.exists(video_path):
             # Use QTimer to load video after UI is fully initialized
             QTimer.singleShot(100, lambda: self.load_video(video_path))
+        
+        # Update output filename preview
+        self.update_output_preview()
 
     def save_settings(self):
         """Save current settings"""
@@ -732,6 +738,7 @@ class FlowRunnerApp(QWidget):
         """Called when any setting changes"""
         self.save_settings()
         self.command_timer.start(100)  # Update command after 100ms delay
+        self.update_output_preview()  # Update filename preview
         
     def on_model_changed(self):
         """Handle model selection changes to show/hide model-specific options"""
@@ -946,6 +953,9 @@ class FlowRunnerApp(QWidget):
         
         # Check flow cache
         self.check_flow_cache()
+        
+        # Update output filename preview
+        self.update_output_preview()
 
     def display_frame(self, frame):
         """Display frame in video label"""
@@ -1091,6 +1101,67 @@ class FlowRunnerApp(QWidget):
         except Exception as e:
             print(f"Error loading frame {frame_number}: {e}")
 
+    def generate_output_filename_preview(self, input_path, output_dir):
+        """Generate preview of output filename based on current GUI settings"""
+        if not input_path:
+            return "no_video_selected.avi"
+        
+        from storage.filename_generator import generate_output_filename
+        
+        # Use results directory if output_dir is empty or not specified
+        if not output_dir or output_dir.strip() == "":
+            output_dir = "results"
+        
+        # Get parameters from GUI
+        control_type = self.time_control_combo.currentText()
+        
+        if control_type == 'Control by frame':
+            start_frame = self.start_frame_spin.value()
+            max_frames = self.max_frames_spin.value()
+            start_time = None
+            duration = None
+        else:  # Control by time
+            start_time = self.start_time_spin.value() if self.start_time_spin.value() > 0 else None
+            duration = self.duration_spin.value() if self.duration_spin.value() > 0 else None
+            start_frame = 0
+            max_frames = 1000
+        
+        return generate_output_filename(
+            input_path=input_path,
+            start_time=start_time,
+            duration=duration,
+            start_frame=start_frame,
+            max_frames=max_frames,
+            flow_only=self.flag_widgets['flow_only'].isChecked(),
+            taa=self.flag_widgets['taa'].isChecked(),
+            fast_mode=self.flag_widgets['fast'].isChecked(),
+            tile_mode=self.flag_widgets['tile'].isChecked(),
+            uncompressed=self.flag_widgets['uncompressed'].isChecked(),
+            flow_format=self.flow_format_combo.currentText(),
+            motion_vectors_clamp_range=self.mv_clamp_range_spin.value(),
+            fps=30.0  # Assume 30fps for preview
+        )
+
+    def update_output_preview(self):
+        """Update output path placeholder with preview filename"""
+        if not hasattr(self, '_initialization_complete') or not self._initialization_complete:
+            return
+            
+        input_path = self.input_video_edit.text()
+        output_dir = self.output_path_edit.text()
+        
+        if input_path:
+            preview_filename = self.generate_output_filename_preview(input_path, output_dir)
+            
+            if not output_dir or output_dir.strip() == "":
+                placeholder_text = f"results/{preview_filename}"
+            else:
+                placeholder_text = f"{preview_filename}"
+            
+            self.output_path_edit.setPlaceholderText(placeholder_text)
+        else:
+            self.output_path_edit.setPlaceholderText("Select video to see filename preview")
+
     def generate_command(self, extra_flags=None):
         """Generate the flow_processor command based on current settings"""
         if not self.input_video_edit.text():
@@ -1102,8 +1173,10 @@ class FlowRunnerApp(QWidget):
         cmd_parts.extend(["--input", f'"{self.input_video_edit.text()}"'])
         
         # Output path
-        if self.output_path_edit.text():
-            cmd_parts.extend(["--output", f'"{self.output_path_edit.text()}"'])
+        output_path = self.output_path_edit.text().strip()
+        if not output_path:
+            output_path = "results"  # Default directory
+        cmd_parts.extend(["--output", f'"{output_path}"'])
         
         # Flow cache
         if self.flow_cache_edit.text():

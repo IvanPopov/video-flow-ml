@@ -606,71 +606,24 @@ class VideoFlowProcessor:
     def generate_output_filename(self, input_path, output_dir, start_time=None, duration=None, 
                                 start_frame=0, max_frames=1000, flow_only=False, taa=False, uncompressed=False, flow_format='gamedev', fps=30.0):
         """Generate automatic output filename based on parameters"""
-        import os
+        from storage.filename_generator import generate_output_filepath
         
-        # Always use results directory
-        results_dir = os.path.join(output_dir, "results") if output_dir != "results" else "results"
-        
-        # Create results directory if it doesn't exist
-        if not os.path.exists(results_dir):
-            os.makedirs(results_dir)
-        
-        # Get base name without extension
-        base_name = os.path.splitext(os.path.basename(input_path))[0]
-        
-        # Build filename parts
-        parts = [base_name]
-        
-        # Add time/frame info
-        if start_time is not None:
-            parts.append(f"{start_time}s")
-        elif start_frame > 0:
-            parts.append(f"f{start_frame}")
-            
-        if duration is not None:
-            parts.append(f"{duration}s")
-        elif max_frames != 1000:
-            parts.append(f"{max_frames}f")
-        
-        # Add mode info
-        if self.fast_mode:
-            parts.append("fast")
-        
-        if self.tile_mode:
-            parts.append("tile")
-        
-        if flow_only:
-            # Add format information for flow-only mode (avoid repeating "flow")
-            if flow_format != 'gamedev':
-                # Clean up format name: replace dashes with underscores, remove redundant "flow"
-                clean_format = flow_format.replace('-', '_').replace('_flow', '').replace('flow_', '')
-                if flow_format.startswith('motion-vectors'):
-                    # Add motion vectors format with clamp range
-                    parts.append(f"{clean_format}_{int(self.motion_vectors_clamp_range)}")
-                else:
-                    parts.append(clean_format)
-            else:
-                parts.append("gamedev")
-        elif taa:
-            parts.append("taa")
-
-        
-        # Add FPS information
-        parts.append(f"{fps:.0f}fps")
-        
-        # Add codec information
-        if uncompressed:
-            parts.append("uncompressed_I420")  # Raw I420 codec
-            codec_name = "I420"
-        else:
-            parts.append("MJPG")  # Default MJPEG
-            codec_name = "MJPG"
-        
-        # Join parts and add extension
-        # MJPG codec requires AVI container, MP4 container doesn't support it
-        extension = ".avi"  # Use AVI for MJPG compatibility
-        filename = "_".join(parts) + extension
-        return os.path.join(results_dir, filename)
+        return generate_output_filepath(
+            input_path=input_path,
+            output_dir=output_dir,
+            start_time=start_time,
+            duration=duration,
+            start_frame=start_frame,
+            max_frames=max_frames,
+            flow_only=flow_only,
+            taa=taa,
+            fast_mode=self.fast_mode,
+            tile_mode=self.tile_mode,
+            uncompressed=uncompressed,
+            flow_format=flow_format,
+            motion_vectors_clamp_range=self.motion_vectors_clamp_range,
+            fps=fps
+        )
     
     def process_video(self, input_path, output_path, max_frames=1000, start_frame=0, 
                      start_time=None, duration=None, flow_only=False, taa=False, flow_format='gamedev', 
