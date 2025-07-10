@@ -604,7 +604,7 @@ class VideoFlowProcessor:
         )
         
     def generate_output_filename(self, input_path, output_dir, start_time=None, duration=None, 
-                                start_frame=0, max_frames=1000, flow_only=False, taa=False, lossless=False, uncompressed=False, flow_format='gamedev', fps=30.0):
+                                start_frame=0, max_frames=1000, flow_only=False, taa=False, uncompressed=False, flow_format='gamedev', fps=30.0):
         """Generate automatic output filename based on parameters"""
         import os
         
@@ -662,9 +662,6 @@ class VideoFlowProcessor:
         if uncompressed:
             parts.append("uncompressed_I420")  # Raw I420 codec
             codec_name = "I420"
-        elif lossless:
-            parts.append("lossless_FFV1")  # FFV1 lossless codec
-            codec_name = "FFV1"
         else:
             parts.append("MJPG")  # Default MJPEG
             codec_name = "MJPG"
@@ -678,7 +675,7 @@ class VideoFlowProcessor:
     def process_video(self, input_path, output_path, max_frames=1000, start_frame=0, 
                      start_time=None, duration=None, flow_only=False, taa=False, flow_format='gamedev', 
                      save_flow=None, force_recompute=False, use_flow_cache=None, auto_play=True,
-                     skip_lods=False, lossless=False, uncompressed=False, flow_input=None):
+                     skip_lods=False, uncompressed=False, flow_input=None):
         """Main processing function"""
         import os
         from video.frame_extractor import FrameExtractor
@@ -732,7 +729,7 @@ class VideoFlowProcessor:
         if os.path.isdir(output_path):
             output_path = self.generate_output_filename(
                 input_path, output_path, start_time, duration, 
-                start_frame, max_frames, flow_only, taa, lossless=lossless, uncompressed=uncompressed, flow_format=flow_format, fps=fps
+                start_frame, max_frames, flow_only, taa, uncompressed=uncompressed, flow_format=flow_format, fps=fps
             )
             print(f"Auto-generated output filename: {os.path.basename(output_path)}")
         
@@ -942,9 +939,6 @@ class VideoFlowProcessor:
         if uncompressed:
             fourcc = 0
             print("Using uncompressed video codec. Output will be .avi and file size will be very large.")
-        elif lossless:
-            fourcc = cv2.VideoWriter_fourcc(*'FFV1')
-            print("Using lossless FFV1 codec (ensure you have ffmpeg installed). Output will be .avi")
         else:
             fourcc = cv2.VideoWriter_fourcc(*'MJPG')
             print("Using MJPG codec. Output will be .avi for compatibility.")
@@ -1365,8 +1359,6 @@ def main():
                        help='Disable automatic video playback after processing')
     parser.add_argument('--skip-lods', action='store_true',
                        help='Skip LOD (Level-of-Detail) pyramid generation/loading for faster processing')
-    parser.add_argument('--lossless', action='store_true',
-                        help='Save the output video using a lossless codec (FFV1 in .avi container)')
     parser.add_argument('--uncompressed', action='store_true',
                         help='Save the output video completely uncompressed (raw frames in .avi container)')
     parser.add_argument('--model', choices=['videoflow', 'memflow'], default='videoflow',
@@ -1693,7 +1685,7 @@ def main():
                               force_recompute=args.force_recompute, use_flow_cache=args.use_flow_cache, 
                               auto_play=not args.no_autoplay,
                               skip_lods=args.skip_lods,
-                              lossless=args.lossless, uncompressed=args.uncompressed, flow_input=args.flow_input)
+                              uncompressed=args.uncompressed, flow_input=args.flow_input)
         
         model_name = args.model.upper()
         if not args.no_autoplay:

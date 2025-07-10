@@ -173,7 +173,6 @@ class FlowRunnerApp(QWidget):
             ('flow_only', False, 'Flow only', 'Output only optical flow without video composition'),
             ('taa', True, 'TAA', 'Apply Temporal Anti-Aliasing for smoother results'),
             ('taa_emulate_compression', False, 'TAA Emulate Compression', 'Emulate motion vectors compression/decompression in TAA processing'),
-            ('lossless', False, 'Lossless', 'Use lossless compression (FFV1)'),
             ('uncompressed', False, 'Uncompressed', 'Save without any compression (raw format)'),
             ('skip_lods', False, 'Skip LODs', 'Skip Level of Detail (LOD) generation for faster processing'),
             ('force_recompute', False, 'Force recompute', 'Delete existing cache and force recomputation of optical flow')
