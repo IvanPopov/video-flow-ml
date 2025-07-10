@@ -164,9 +164,12 @@ class FlowRunnerApp(QWidget):
         # Mark initialization as complete
         self._initialization_complete = True
         
-        # Update command preview and cache preview now that initialization is complete
+        # Update command preview and previews now that initialization is complete
+        # Note: preview functions will check if video is loaded before showing previews
         self.update_command_preview()
         self.update_cache_preview()
+        self.update_flow_input_preview()
+        self.update_output_preview()  # Move to end to ensure all other previews are updated first
 
     def init_ui(self):
         setTheme(Theme.DARK)
@@ -436,6 +439,7 @@ class FlowRunnerApp(QWidget):
         self.input_video_edit.textChanged.connect(self.on_setting_changed)
         self.input_video_edit.textChanged.connect(self.update_output_preview)
         self.input_video_edit.textChanged.connect(self.update_cache_preview)
+        self.input_video_edit.textChanged.connect(self.update_flow_input_preview)
         io_layout.addWidget(self.input_video_edit, 1, 1)
         
         browse_input_btn = PushButton("Browse")
@@ -448,6 +452,7 @@ class FlowRunnerApp(QWidget):
         self.output_path_edit.setToolTip("Output directory path (leave empty to use 'results' directory)")
         self.output_path_edit.textChanged.connect(self.on_setting_changed)
         self.output_path_edit.textChanged.connect(self.update_output_preview)
+        self.output_path_edit.textChanged.connect(self.update_flow_input_preview)
         io_layout.addWidget(self.output_path_edit, 2, 1)
         
         browse_output_btn = PushButton("Browse")
@@ -742,6 +747,7 @@ class FlowRunnerApp(QWidget):
         self.command_timer.start(100)  # Update command after 100ms delay
         self.update_output_preview()  # Update filename preview
         self.update_cache_preview()  # Update cache preview
+        self.update_flow_input_preview()  # Update flow input preview
         
     def on_model_changed(self):
         """Handle model selection changes to show/hide model-specific options"""
@@ -803,6 +809,9 @@ class FlowRunnerApp(QWidget):
             if self._previous_flow_input_text is not None:
                 self.flow_input_edit.setText(self._previous_flow_input_text)
         
+        # Update flow input preview when flow_only state changes
+        self.update_flow_input_preview()
+
     def update_time_control_visibility(self):
         """Update time control visibility without triggering signals"""
         control_type = self.time_control_combo.currentText()
@@ -964,6 +973,7 @@ class FlowRunnerApp(QWidget):
         # Update output filename preview and cache preview
         self.update_output_preview()
         self.update_cache_preview()
+        self.update_flow_input_preview()
 
     def display_frame(self, frame):
         """Display frame in video label"""
@@ -1109,7 +1119,7 @@ class FlowRunnerApp(QWidget):
         except Exception as e:
             print(f"Error loading frame {frame_number}: {e}")
 
-    def generate_output_filename_preview(self, input_path, output_dir):
+    def generate_output_filename_preview(self, input_path, output_dir, fps=30.0):
         """Generate preview of output filename based on current GUI settings"""
         if not input_path:
             return "no_video_selected.avi"
@@ -1147,7 +1157,7 @@ class FlowRunnerApp(QWidget):
             uncompressed=self.flag_widgets['uncompressed'].isChecked(),
             flow_format=self.flow_format_combo.currentText(),
             motion_vectors_clamp_range=self.mv_clamp_range_spin.value(),
-            fps=30.0  # Assume 30fps for preview
+            fps=fps  # Use provided fps instead of hardcoded 30.0
         )
 
     def generate_cache_directory_preview(self, input_path):
@@ -1186,6 +1196,47 @@ class FlowRunnerApp(QWidget):
             variant=variant
         )
 
+    def generate_flow_input_preview(self, input_path, output_dir, fps=30.0):
+        """Generate preview of expected flow input filename based on current GUI settings with flow_only enabled"""
+        if not input_path:
+            return "no_video_selected_flow_only.avi"
+        
+        from storage.filename_generator import generate_output_filename
+        
+        # Use results directory if output_dir is empty or not specified
+        if not output_dir or output_dir.strip() == "":
+            output_dir = "results"
+        
+        # Get parameters from GUI (same as current settings but force flow_only=True)
+        control_type = self.time_control_combo.currentText()
+        
+        if control_type == 'Control by frame':
+            start_frame = self.start_frame_spin.value()
+            max_frames = self.max_frames_spin.value()
+            start_time = None
+            duration = None
+        else:  # Control by time
+            start_time = self.start_time_spin.value() if self.start_time_spin.value() > 0 else None
+            duration = self.duration_spin.value() if self.duration_spin.value() > 0 else None
+            start_frame = 0
+            max_frames = 1000
+        
+        return generate_output_filename(
+            input_path=input_path,
+            start_time=start_time,
+            duration=duration,
+            start_frame=start_frame,
+            max_frames=max_frames,
+            flow_only=True,  # Force flow_only for flow input preview
+            taa=False,  # TAA is not applicable with flow_only
+            fast_mode=self.flag_widgets['fast'].isChecked(),
+            tile_mode=self.flag_widgets['tile'].isChecked(),
+            uncompressed=self.flag_widgets['uncompressed'].isChecked(),
+            flow_format=self.flow_format_combo.currentText(),
+            motion_vectors_clamp_range=self.mv_clamp_range_spin.value(),
+            fps=fps  # Use provided fps instead of hardcoded 30.0
+        )
+
     def update_output_preview(self):
         """Update output path placeholder with preview filename"""
         if not hasattr(self, '_initialization_complete') or not self._initialization_complete:
@@ -1194,8 +1245,9 @@ class FlowRunnerApp(QWidget):
         input_path = self.input_video_edit.text()
         output_dir = self.output_path_edit.text()
         
-        if input_path:
-            preview_filename = self.generate_output_filename_preview(input_path, output_dir)
+        # Only show preview if video is loaded and has fps information
+        if input_path and hasattr(self, 'fps') and self.fps and self.fps > 0:
+            preview_filename = self.generate_output_filename_preview(input_path, output_dir, fps=self.fps)
             
             # Generate absolute path
             import os
@@ -1209,7 +1261,7 @@ class FlowRunnerApp(QWidget):
             absolute_filepath = os.path.join(absolute_output_dir, preview_filename)
             self.output_path_edit.setPlaceholderText(absolute_filepath)
         else:
-            self.output_path_edit.setPlaceholderText("Select video to see filename preview")
+            self.output_path_edit.setPlaceholderText("Load video to see filename preview")
 
     def update_cache_preview(self):
         """Update flow cache placeholder with preview directory name"""
@@ -1218,16 +1270,48 @@ class FlowRunnerApp(QWidget):
             
         input_path = self.input_video_edit.text()
         
-        if input_path and not self.flow_cache_edit.text():
+        # Only show preview if video is loaded and has fps information
+        if input_path and hasattr(self, 'fps') and self.fps and self.fps > 0 and not self.flow_cache_edit.text():
             preview_cache = self.generate_cache_directory_preview(input_path)
             # Show absolute path to cache directory
             import os
             absolute_cache_path = os.path.abspath(preview_cache)
             self.flow_cache_edit.setPlaceholderText(absolute_cache_path)
-        elif not input_path:
-            self.flow_cache_edit.setPlaceholderText("Select video to see cache preview")
         elif self.flow_cache_edit.text(): # If cache is manually set, clear placeholder
             self.flow_cache_edit.setPlaceholderText("")
+        else:
+            self.flow_cache_edit.setPlaceholderText("Load video to see cache preview")
+
+    def update_flow_input_preview(self):
+        """Update flow input placeholder with preview filename"""
+        if not hasattr(self, '_initialization_complete') or not self._initialization_complete:
+            return
+            
+        input_path = self.input_video_edit.text()
+        output_dir = self.output_path_edit.text()
+        
+        # Only show preview if flow input is enabled and video is loaded with fps information
+        if (input_path and hasattr(self, 'fps') and self.fps and self.fps > 0 and 
+            self.flow_input_edit.isEnabled() and not self.flow_input_edit.text()):
+            preview_filename = self.generate_flow_input_preview(input_path, output_dir, fps=self.fps)
+            
+            # Generate absolute path
+            import os
+            if not output_dir or output_dir.strip() == "":
+                # Use default "results" directory relative to current working directory
+                absolute_output_dir = os.path.abspath("results")
+            else:
+                # Use specified directory (convert to absolute if relative)
+                absolute_output_dir = os.path.abspath(output_dir)
+            
+            absolute_filepath = os.path.join(absolute_output_dir, preview_filename)
+            self.flow_input_edit.setPlaceholderText(absolute_filepath)
+        elif not self.flow_input_edit.isEnabled():
+            self.flow_input_edit.setPlaceholderText("Flow input disabled in flow-only mode")
+        elif self.flow_input_edit.text(): # If flow input is manually set, clear placeholder
+            self.flow_input_edit.setPlaceholderText("")
+        else:
+            self.flow_input_edit.setPlaceholderText("Load video to see expected flow input preview")
 
     def generate_command(self, extra_flags=None):
         """Generate the flow_processor command based on current settings"""
