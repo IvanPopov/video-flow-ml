@@ -145,4 +145,69 @@ def generate_output_filepath(input_path: str,
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     
-    return os.path.join(output_dir, filename) 
+    return os.path.join(output_dir, filename)
+
+
+def generate_cache_directory(input_path: str, 
+                           start_frame: int = 0,
+                           max_frames: int = 1000,
+                           sequence_length: int = 5,
+                           fast_mode: bool = False,
+                           tile_mode: bool = False,
+                           model: str = 'videoflow',
+                           dataset: str = 'things',
+                           architecture: str = 'mof',
+                           variant: str = 'noise') -> str:
+    """
+    Generate cache directory path based on video processing parameters and model configuration.
+    
+    Args:
+        input_path: Path to input video file
+        start_frame: Starting frame number
+        max_frames: Maximum number of frames to process
+        sequence_length: Sequence length for models
+        fast_mode: Whether fast mode is enabled
+        tile_mode: Whether tile mode is enabled
+        model: Model type ('videoflow' or 'memflow')
+        dataset: Dataset for model
+        architecture: Architecture for VideoFlow models ('mof' or 'bof')
+        variant: Variant type ('standard', 'noise', etc.)
+        
+    Returns:
+        Generated cache directory path
+    """
+    import os
+    from pathlib import Path
+    
+    video_name = Path(input_path).stem
+    
+    # Model configuration parameters - include all parameters for uniqueness
+    model_params = [model]
+    if model == 'videoflow':
+        # Always include all VideoFlow parameters to ensure unique cache paths
+        model_params.append(architecture)
+        model_params.append(dataset)
+        model_params.append(variant)
+    elif model == 'memflow':
+        # Always include dataset for MemFlow
+        model_params.append(dataset)
+    
+    # Processing parameters
+    cache_params = [
+        f"seq{sequence_length}",
+        f"start{start_frame}",
+        f"frames{max_frames}"
+    ]
+    
+    if fast_mode:
+        cache_params.append("fast")
+    if tile_mode:
+        cache_params.append("tile")
+    
+    # Combine model and processing parameters
+    model_id = "_".join(model_params)
+    cache_id = "_".join(cache_params)
+    cache_dir_name = f"{video_name}_flow_cache_{model_id}_{cache_id}"
+    
+    cache_path = Path(input_path).parent / cache_dir_name
+    return str(cache_path) 

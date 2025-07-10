@@ -171,41 +171,23 @@ class FlowCacheManager:
     
     def generate_cache_path(self, input_path: str, start_frame: int, max_frames: int, 
                           sequence_length: int, fast_mode: bool, tile_mode: bool,
-                          model: str = 'videoflow', dataset: str = 'sintel', 
-                          architecture: str = 'mof', variant: str = 'standard') -> str:
+                          model: str = 'videoflow', dataset: str = 'things', 
+                          architecture: str = 'mof', variant: str = 'noise') -> str:
         """Generate cache directory path based on video processing parameters and model configuration"""
-        video_name = Path(input_path).stem
+        from .filename_generator import generate_cache_directory
         
-        # Model configuration parameters - include all parameters for uniqueness
-        model_params = [model]
-        if model == 'videoflow':
-            # Always include all VideoFlow parameters to ensure unique cache paths
-            model_params.append(architecture)
-            model_params.append(dataset)
-            model_params.append(variant)
-        elif model == 'memflow':
-            # Always include dataset for MemFlow
-            model_params.append(dataset)
-        
-        # Processing parameters
-        cache_params = [
-            f"seq{sequence_length}",
-            f"start{start_frame}",
-            f"frames{max_frames}"
-        ]
-        
-        if fast_mode:
-            cache_params.append("fast")
-        if tile_mode:
-            cache_params.append("tile")
-        
-        # Combine model and processing parameters
-        model_id = "_".join(model_params)
-        cache_id = "_".join(cache_params)
-        cache_dir_name = f"{video_name}_flow_cache_{model_id}_{cache_id}"
-        
-        cache_path = Path(input_path).parent / cache_dir_name
-        return str(cache_path)
+        return generate_cache_directory(
+            input_path=input_path,
+            start_frame=start_frame,
+            max_frames=max_frames,
+            sequence_length=sequence_length,
+            fast_mode=fast_mode,
+            tile_mode=tile_mode,
+            model=model,
+            dataset=dataset,
+            architecture=architecture,
+            variant=variant
+        )
     
     def check_cache_exists(self, cache_dir: str, max_frames: int) -> Tuple[bool, Optional[str], List[int]]:
         """

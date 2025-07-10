@@ -164,8 +164,9 @@ class FlowRunnerApp(QWidget):
         # Mark initialization as complete
         self._initialization_complete = True
         
-        # Update command preview now that initialization is complete
+        # Update command preview and cache preview now that initialization is complete
         self.update_command_preview()
+        self.update_cache_preview()
 
     def init_ui(self):
         setTheme(Theme.DARK)
@@ -434,6 +435,7 @@ class FlowRunnerApp(QWidget):
         self.input_video_edit.setToolTip("Path to input video file")
         self.input_video_edit.textChanged.connect(self.on_setting_changed)
         self.input_video_edit.textChanged.connect(self.update_output_preview)
+        self.input_video_edit.textChanged.connect(self.update_cache_preview)
         io_layout.addWidget(self.input_video_edit, 1, 1)
         
         browse_input_btn = PushButton("Browse")
@@ -739,6 +741,7 @@ class FlowRunnerApp(QWidget):
         self.save_settings()
         self.command_timer.start(100)  # Update command after 100ms delay
         self.update_output_preview()  # Update filename preview
+        self.update_cache_preview()  # Update cache preview
         
     def on_model_changed(self):
         """Handle model selection changes to show/hide model-specific options"""
@@ -834,6 +837,8 @@ class FlowRunnerApp(QWidget):
         self.update_time_control_visibility()
         self.save_settings()
         self.command_timer.start(100)
+        # Update previews when time control changes
+        self.on_setting_changed()
         
     def on_flow_cache_changed(self):
         """Called when flow cache path changes"""
@@ -841,6 +846,8 @@ class FlowRunnerApp(QWidget):
         self.save_settings()
         self.check_flow_cache()
         self.command_timer.start(100)
+        # Update cache preview when cache field changes
+        self.update_cache_preview()
 
 
 
@@ -954,8 +961,9 @@ class FlowRunnerApp(QWidget):
         # Check flow cache
         self.check_flow_cache()
         
-        # Update output filename preview
+        # Update output filename preview and cache preview
         self.update_output_preview()
+        self.update_cache_preview()
 
     def display_frame(self, frame):
         """Display frame in video label"""
@@ -1142,6 +1150,42 @@ class FlowRunnerApp(QWidget):
             fps=30.0  # Assume 30fps for preview
         )
 
+    def generate_cache_directory_preview(self, input_path):
+        """Generate preview of cache directory based on current GUI settings"""
+        if not input_path:
+            return "no_video_selected_flow_cache"
+        
+        from storage.filename_generator import generate_cache_directory
+        
+        # Get parameters from GUI
+        control_type = self.time_control_combo.currentText()
+        
+        if control_type == 'Control by frame':
+            start_frame = self.start_frame_spin.value()
+            max_frames = self.max_frames_spin.value()
+        else:  # Control by time
+            start_frame = 0  # For cache purposes, time-based uses frame 0 start
+            max_frames = 1000  # Default for time-based
+        
+        # GUI already contains correct values, no mapping needed
+        model = self.model_combo.currentText()  # 'videoflow' or 'memflow'
+        dataset = self.dataset_combo.currentText()  # 'things', 'sintel', 'kitti'
+        architecture = self.vf_architecture_combo.currentText()  # 'mof' or 'bof'
+        variant = self.vf_variant_combo.currentText()  # 'standard' or 'noise'
+        
+        return generate_cache_directory(
+            input_path=input_path,
+            start_frame=start_frame,
+            max_frames=max_frames,
+            sequence_length=self.sequence_length_spin.value(),
+            fast_mode=self.flag_widgets['fast'].isChecked(),
+            tile_mode=self.flag_widgets['tile'].isChecked(),
+            model=model,
+            dataset=dataset,
+            architecture=architecture,
+            variant=variant
+        )
+
     def update_output_preview(self):
         """Update output path placeholder with preview filename"""
         if not hasattr(self, '_initialization_complete') or not self._initialization_complete:
@@ -1153,14 +1197,37 @@ class FlowRunnerApp(QWidget):
         if input_path:
             preview_filename = self.generate_output_filename_preview(input_path, output_dir)
             
+            # Generate absolute path
+            import os
             if not output_dir or output_dir.strip() == "":
-                placeholder_text = f"results/{preview_filename}"
+                # Use default "results" directory relative to current working directory
+                absolute_output_dir = os.path.abspath("results")
             else:
-                placeholder_text = f"{preview_filename}"
+                # Use specified directory (convert to absolute if relative)
+                absolute_output_dir = os.path.abspath(output_dir)
             
-            self.output_path_edit.setPlaceholderText(placeholder_text)
+            absolute_filepath = os.path.join(absolute_output_dir, preview_filename)
+            self.output_path_edit.setPlaceholderText(absolute_filepath)
         else:
             self.output_path_edit.setPlaceholderText("Select video to see filename preview")
+
+    def update_cache_preview(self):
+        """Update flow cache placeholder with preview directory name"""
+        if not hasattr(self, '_initialization_complete') or not self._initialization_complete:
+            return
+            
+        input_path = self.input_video_edit.text()
+        
+        if input_path and not self.flow_cache_edit.text():
+            preview_cache = self.generate_cache_directory_preview(input_path)
+            # Show absolute path to cache directory
+            import os
+            absolute_cache_path = os.path.abspath(preview_cache)
+            self.flow_cache_edit.setPlaceholderText(absolute_cache_path)
+        elif not input_path:
+            self.flow_cache_edit.setPlaceholderText("Select video to see cache preview")
+        elif self.flow_cache_edit.text(): # If cache is manually set, clear placeholder
+            self.flow_cache_edit.setPlaceholderText("")
 
     def generate_command(self, extra_flags=None):
         """Generate the flow_processor command based on current settings"""
