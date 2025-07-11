@@ -49,7 +49,11 @@ Thumbs.db
 venv/
 env/
 .env
+.venv/
 venv_video_flow/
+
+# Portable distribution
+FlowRunner_Portable/
 
 # Jupyter Notebook
 .ipynb_checkpoints
