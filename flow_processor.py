@@ -925,8 +925,6 @@ class VideoFlowProcessor:
         self.taa_flow_processor.reset_history()
         self.taa_simple_processor.reset_history()
         previous_flow = None  # Store previous frame's optical flow for TAA
-        
-
 
         # Create progress bars for tile mode or single progress bar for normal mode
         if self.tile_mode:
@@ -981,6 +979,8 @@ class VideoFlowProcessor:
             
             # No stabilization - use raw flow
             flow = raw_flow
+            if previous_flow is None:
+                previous_flow = flow # use the first frame's flow as previous flow
             
             # Encode optical flow based on selected format
             if i == 0:  # Log encoder info only once
@@ -995,16 +995,17 @@ class VideoFlowProcessor:
                 else:
                     print(f"[Encoder] Using GameDev RG channel encoder")
             
+            # always use previous flow for visualization as it is used for TAA
             if flow_format == 'hsv':
-                flow_viz = self.encode_hsv_format(flow, width, height)
+                flow_viz = self.encode_hsv_format(previous_flow, width, height)
             elif flow_format == 'torchvision':
-                flow_viz = self.encode_torchvision_format(flow, width, height)
+                flow_viz = self.encode_torchvision_format(previous_flow, width, height)
             elif flow_format == 'motion-vectors-rg8':
-                flow_viz = self.encode_motion_vectors_rg8_format(flow, width, height)
+                flow_viz = self.encode_motion_vectors_rg8_format(previous_flow, width, height)
             elif flow_format == 'motion-vectors-rgb8':
-                flow_viz = self.encode_motion_vectors_rgb8_format(flow, width, height)
+                flow_viz = self.encode_motion_vectors_rgb8_format(previous_flow, width, height)
             else:
-                flow_viz = self.encode_gamedev_format(flow, width, height)
+                flow_viz = self.encode_gamedev_format(previous_flow, width, height)
             
             # Apply TAA effects if requested
             taa_frame = None
@@ -1014,88 +1015,44 @@ class VideoFlowProcessor:
             external_flow_viz = None  # External flow visualization
 
             if taa:
-                # Use previous frame's flow with inverted direction for TAA
-                if previous_flow is not None:
-
-                    
-                    # Normal TAA processing with current computed flow
-                    taa_result = self.taa_flow_processor.apply_taa(
+                # Normal TAA processing with current computed flow
+                taa_result = self.taa_flow_processor.apply_taa(
+                    current_frame=frames[i],
+                    flow_pixels=previous_flow,
+                    previous_taa_frame=None,
+                    alpha=0.1,
+                    use_flow=True,
+                    sequence_id='flow_taa'
+                )
+                taa_frame = taa_result
+                
+                # Apply TAA with external flow if provided
+                if flow_input is not None and i < len(decoded_flows):
+                    external_flow = decoded_flows[i] # decoded flow already includes previous flow
+                    taa_external_result = self.taa_external_processor.apply_taa(
                         current_frame=frames[i],
-                        flow_pixels=previous_flow,
+                        flow_pixels=external_flow,
                         previous_taa_frame=None,
                         alpha=0.1,
                         use_flow=True,
-                        sequence_id='flow_taa'
+                        sequence_id='external_taa'
                     )
-                    taa_frame = taa_result
+                    taa_external_frame = taa_external_result
                     
-                    # Apply TAA with external flow if provided
-                    if flow_input is not None and i < len(decoded_flows):
-                        external_flow = decoded_flows[i]
-                        taa_external_result = self.taa_external_processor.apply_taa(
-                            current_frame=frames[i],
-                            flow_pixels=external_flow,
-                            previous_taa_frame=None,
-                            alpha=0.1,
-                            use_flow=True,
-                            sequence_id='external_taa'
-                        )
-                        taa_external_frame = taa_external_result
-                        
-                        # Create visualization of external flow (using same format as original flow)
-                        if flow_format == 'hsv':
-                            external_flow_viz = self.encode_hsv_format(external_flow, width, height)
-                        elif flow_format == 'torchvision':
-                            external_flow_viz = self.encode_torchvision_format(external_flow, width, height)
-                        elif flow_format == 'motion-vectors-rg8':
-                            external_flow_viz = self.encode_motion_vectors_rg8_format(external_flow, width, height)
-                        elif flow_format == 'motion-vectors-rgb8':
-                            external_flow_viz = self.encode_motion_vectors_rgb8_format(external_flow, width, height)
-                        else:
-                            external_flow_viz = self.encode_gamedev_format(external_flow, width, height)
-                        
-                        # Create difference overlay between original and external flow
-                        difference_overlay = self.create_difference_overlay(flow, external_flow, magnitude_threshold=0.5)
-                        
-                else:
-                    # First frame or no previous flow - apply TAA without flow
-                    taa_result = self.taa_flow_processor.apply_taa(
-                        current_frame=frames[i],
-                        flow_pixels=None,
-                        previous_taa_frame=None,
-                        alpha=0.1,
-                        use_flow=True,
-                        sequence_id='flow_taa'
-                    )
-                    taa_frame = taa_result
+                    # Create visualization of external flow (using same format as original flow)
+                    if flow_format == 'hsv':
+                        external_flow_viz = self.encode_hsv_format(external_flow, width, height)
+                    elif flow_format == 'torchvision':
+                        external_flow_viz = self.encode_torchvision_format(external_flow, width, height)
+                    elif flow_format == 'motion-vectors-rg8':
+                        external_flow_viz = self.encode_motion_vectors_rg8_format(external_flow, width, height)
+                    elif flow_format == 'motion-vectors-rgb8':
+                        external_flow_viz = self.encode_motion_vectors_rgb8_format(external_flow, width, height)
+                    else:
+                        external_flow_viz = self.encode_gamedev_format(external_flow, width, height)
                     
-                    # Apply TAA with external flow if provided (first frame)
-                    if flow_input is not None and i < len(decoded_flows):
-                        external_flow = decoded_flows[i]
-                        taa_external_result = self.taa_external_processor.apply_taa(
-                            current_frame=frames[i],
-                            flow_pixels=external_flow,
-                            previous_taa_frame=None,
-                            alpha=0.1,
-                            use_flow=True,
-                            sequence_id='external_taa'
-                        )
-                        taa_external_frame = taa_external_result
-                        
-                        # Create visualization of external flow (using same format as original flow)
-                        if flow_format == 'hsv':
-                            external_flow_viz = self.encode_hsv_format(external_flow, width, height)
-                        elif flow_format == 'torchvision':
-                            external_flow_viz = self.encode_torchvision_format(external_flow, width, height)
-                        elif flow_format == 'motion-vectors-rg8':
-                            external_flow_viz = self.encode_motion_vectors_rg8_format(external_flow, width, height)
-                        elif flow_format == 'motion-vectors-rgb8':
-                            external_flow_viz = self.encode_motion_vectors_rgb8_format(external_flow, width, height)
-                        else:
-                            external_flow_viz = self.encode_gamedev_format(external_flow, width, height)
-                        
-                        # Create difference overlay between original and external flow
-                        difference_overlay = self.create_difference_overlay(flow, external_flow, magnitude_threshold=0.5)
+                    # Create difference overlay between original and external flow
+                    difference_overlay = self.create_difference_overlay(previous_flow, external_flow, magnitude_threshold=0.5)
 
                 # Apply simple TAA (no flow) with alpha=0.1
                 taa_simple_result = self.taa_simple_processor.apply_taa(
@@ -1121,7 +1078,11 @@ class VideoFlowProcessor:
                     taa_external_frame, difference_overlay
                 )
             else:
-                model_name = "MOF_sintel" if hasattr(self, 'model') else "VideoFlow"
+                if self.flow_model == 'memflow':
+                    model_name = f"MemFlow ({self.stage})"
+                else:  # videoflow
+                    variant_str = f"/{self.vf_variant}" if self.vf_variant == 'noise' and self.vf_dataset == 'things' else ""
+                    model_name = f"{self.vf_architecture.upper()} ({self.vf_dataset}{variant_str})"
                 combined = self.create_side_by_side(frames[i], flow_viz, flow_only=flow_only, 
                                                   taa_frame=taa_frame, taa_simple_frame=taa_simple_frame,
                                                   model_name=model_name, fast_mode=self.fast_mode, flow_format=flow_format)
