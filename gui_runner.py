@@ -1,10 +1,17 @@
 import sys
+import os
+
+# Path fix for portable execution: Add the script's directory to sys.path
+# This is necessary because the portable Python environment may not include the CWD.
+script_dir = os.path.dirname(os.path.abspath(__file__))
+if script_dir not in sys.path:
+    sys.path.insert(0, script_dir)
+
 from PyQt6.QtWidgets import QApplication
 
 # Create the application instance first to avoid initialization errors
 app = QApplication(sys.argv)
 
-import os
 import cv2
 import subprocess
 import json

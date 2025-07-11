@@ -8,6 +8,13 @@ Processes only first 1000 frames of the video.
 
 import os
 import sys
+
+# Path fix for portable execution: Add the script's directory to sys.path
+# This is necessary because the portable Python environment may not include the CWD.
+script_dir = os.path.dirname(os.path.abspath(__file__))
+if script_dir not in sys.path:
+    sys.path.insert(0, script_dir)
+
 import argparse
 import cv2
 import numpy as np
@@ -719,10 +726,11 @@ class VideoFlowProcessor:
         if flow_input is not None:
             print(f"[Flow Input] Extracting flow from external video...")
             
-            # Get info about flow input video
-            flow_extractor = FrameExtractor(flow_input, fast_mode=self.fast_mode)
-            flow_info_frames, _, _, _, _ = flow_extractor.extract_frames(max_frames=10000, start_frame=0)
-            flow_input_total_frames = len(flow_info_frames)
+            # Get info about flow input video using VideoInfo (no frame extraction)
+            from video.video_info import VideoInfo
+            flow_video_info = VideoInfo(flow_input)
+            flow_info = flow_video_info.get_info()
+            flow_input_total_frames = flow_info['total_frames']
             
             # We need exactly len(frames) flow frames
             frames_needed = len(frames)
