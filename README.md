@@ -95,61 +95,6 @@ python flow_processor.py --input your_video.mp4 --output result.mp4
 python gui_runner.py
 ```
 
-### Advanced Options
-
-```bash
-# Fast processing mode
-python flow_processor.py --input video.mp4 --output result.mp4 --fast
-
-# Tile-based processing for better quality
-python flow_processor.py --input video.mp4 --output result.mp4 --tile
-
-# Flow visualization only
-python flow_processor.py --input video.mp4 --output result.mp4 --flow-only
-
-# Vertical layout
-python flow_processor.py --input video.mp4 --output result.mp4 --vertical
-
-# Use more frames for better accuracy (recommended for complex scenes)
-python flow_processor.py --input video.mp4 --output result.mp4 --sequence-length 7
-
-# Save raw optical flow data for further processing
-python flow_processor.py --input video.mp4 --output result.mp4 --save-flow flo
-python flow_processor.py --input video.mp4 --output result.mp4 --save-flow npz
-python flow_processor.py --input video.mp4 --output result.mp4 --save-flow both
-
-# Optical flow caching (automatic - speeds up repeated processing)
-python flow_processor.py --input video.mp4 --output result1.mp4 --flow-format gamedev
-python flow_processor.py --input video.mp4 --output result2.mp4 --flow-format hsv  # Uses cached flow
-
-# Force recompute flow cache
-python flow_processor.py --input video.mp4 --output result.mp4 --force-recompute
-
-# Use specific flow cache directory
-python flow_processor.py --input video.mp4 --output result.mp4 --use-flow-cache /path/to/cache
-
-# Interactive flow analysis (GUI with mouse-over arrows)
-python flow_processor.py --input video.mp4 --interactive --duration 5 --start-time 10
-```
-
-### Parameters
-
-- `--input`: Input video file path
-- `--output`: Output video file path (default: videoflow_result.mp4)
-- `--device`: Processing device (auto, cuda, cpu)
-- `--frames`: Maximum frames to process (default: 1000)
-- `--fast`: Enable fast mode (lower quality, faster processing)
-- `--tile`: Enable tile-based processing for better quality
-- `--sequence-length`: Number of frames in sequence (default: 5, recommended: 5-9)
-- `--save-flow`: Save raw optical flow data without compression loss
-  - `flo`: Middlebury .flo format (standard, widely supported)
-  - `npz`: NumPy .npz format (compressed, includes metadata)
-  - `both`: Save in both formats
-- `--force-recompute`: Force recomputation of optical flow even if cached data exists
-- `--use-flow-cache PATH`: Use optical flow from specific cache directory instead of computing
-- `--interactive`: Launch interactive flow visualizer instead of creating video output
-- `--flow-only`: Output only optical flow visualization
-
 ## Technical Details
 
 ### VideoFlow Multi-frame Optical Flow (MOF)
