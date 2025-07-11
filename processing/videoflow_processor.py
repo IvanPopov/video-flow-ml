@@ -70,7 +70,8 @@ class VideoFlowProcessor:
         model_path = self.core.load_model()
         print(f"VideoFlow model loaded successfully from: {model_path}")
     
-    def calculate_tile_grid(self, width, height, tile_size=1280):
+    @staticmethod
+    def calculate_tile_grid(width, height, tile_size=1280):
         """
         Calculate tile grid for fixed square tiles (optimized for VideoFlow MOF model)
         
@@ -81,6 +82,8 @@ class VideoFlowProcessor:
         Returns:
             (tile_width, tile_height, cols, rows, tiles_info)
         """
+        import numpy as np
+        
         # Use fixed square tiles
         tile_width = tile_size
         tile_height = tile_size
@@ -249,7 +252,7 @@ class VideoFlowProcessor:
         height, width = current_frame.shape[:2]
         
         # Calculate tile grid
-        tile_width, tile_height, cols, rows, tiles_info = self.calculate_tile_grid(width, height)
+        tile_width, tile_height, cols, rows, tiles_info = VideoFlowProcessor.calculate_tile_grid(width, height)
         
         # Initialize full flow map
         full_flow = np.zeros((height, width, 2), dtype=np.float32)

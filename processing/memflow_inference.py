@@ -80,8 +80,8 @@ class MemFlowInference:
         return self.processor.compute_optical_flow_with_progress(frames, frame_idx, tile_pbar)
     
     def calculate_tile_grid(self, width: int, height: int, tile_size: int = 1280) -> Tuple:
-        """Calculate tile grid (compatibility - MemFlow doesn't use tiles)"""
-        return self.processor.calculate_tile_grid(width, height, tile_size)
+        """Calculate tile grid (delegates to MemFlowProcessor)"""
+        return MemFlowProcessor.calculate_tile_grid(width, height, tile_size)
     
     def extract_tile(self, frame: np.ndarray, tile_info: Dict[str, int]) -> np.ndarray:
         """Extract tile from frame (compatibility - returns full frame)"""

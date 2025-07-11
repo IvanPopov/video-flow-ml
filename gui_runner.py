@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (QWidget, QLabel, QLineEdit,
                              QPushButton, QFileDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
                              QCheckBox, QComboBox, QDoubleSpinBox, QSpinBox, QFrame,
                              QScrollArea, QSizePolicy, QProgressBar, QTextEdit, QSlider)
-from PyQt6.QtGui import QPixmap, QImage, QIcon, QFont
+from PyQt6.QtGui import QPixmap, QImage, QIcon, QFont, QPainter, QPen, QColor
 
 from qfluentwidgets import (setTheme, Theme, TitleLabel, SubtitleLabel, LineEdit, PushButton,
                             InfoBar, InfoBarPosition, CheckBox, ComboBox, DoubleSpinBox, SpinBox,
@@ -255,6 +255,10 @@ class FlowRunnerApp(QWidget):
             # Add special handler for flow_only checkbox
             if key == 'flow_only':
                 checkbox.stateChanged.connect(self.update_flow_only_dependent_controls)
+            
+            # Add special handler for tile checkbox to update video display
+            if key == 'tile':
+                checkbox.stateChanged.connect(self.update_tile_mode_display)
             
             self.flag_widgets[key] = checkbox
             flags_layout.addWidget(checkbox, row + i // 2, i % 2)
@@ -802,6 +806,9 @@ class FlowRunnerApp(QWidget):
         # Reset flow processor instance due to model change
         self.flow_processor_instance = None
         
+        # Update tile display since different models have different tile behaviors
+        self.update_tile_mode_display()
+        
         # Also trigger general setting change
         self.on_setting_changed()
     
@@ -819,39 +826,68 @@ class FlowRunnerApp(QWidget):
         self.mv_clamp_range_spin.setVisible(is_motion_vectors)
     
     def update_flow_only_dependent_controls(self):
-        """Enable/disable TAA and Flow input video controls based on flow_only state"""
-        flow_only_enabled = self.flag_widgets['flow_only'].isChecked()
+        """Update controls that depend on the flow_only flag"""
+        if not self._initialization_complete:
+            return
         
-        if flow_only_enabled:
-            # Save current values before disabling (only during user interaction, not initialization)
-            if hasattr(self, '_initialization_complete') and self._initialization_complete:
-                self._previous_taa_state = self.flag_widgets['taa'].isChecked()
-                self._previous_flow_input_text = self.flow_input_edit.text()
+        flow_only = self.flag_widgets['flow_only'].isChecked()
+        
+        if flow_only:
+            # Store previous state before disabling
+            self._previous_taa_state = self.flag_widgets['taa'].isChecked()
+            self._previous_flow_input_text = self.flow_input_edit.text()
             
-            # Disable controls and clear values
-            self.flag_widgets['taa'].setEnabled(False)
+            # Disable TAA when flow_only is enabled
             self.flag_widgets['taa'].setChecked(False)
+            self.flag_widgets['taa'].setEnabled(False)
             
-            self.flow_input_label.setEnabled(False)
-            self.flow_input_edit.setEnabled(False)
-            self.browse_flow_input_btn.setEnabled(False)
+            # Disable flow input when flow_only is enabled
             self.flow_input_edit.clear()
+            self.flow_input_edit.setEnabled(False)
+            self.flow_input_label.setEnabled(False)
+            self.browse_flow_input_btn.setEnabled(False)
         else:
-            # Enable controls
+            # Re-enable TAA when flow_only is disabled
             self.flag_widgets['taa'].setEnabled(True)
-            self.flow_input_label.setEnabled(True)
+            
+            # Re-enable flow input when flow_only is disabled
             self.flow_input_edit.setEnabled(True)
+            self.flow_input_label.setEnabled(True)
             self.browse_flow_input_btn.setEnabled(True)
             
-            # Restore previous values if they were saved
+            # Restore previous state if available
             if self._previous_taa_state is not None:
                 self.flag_widgets['taa'].setChecked(self._previous_taa_state)
-                
+                self._previous_taa_state = None
+            
             if self._previous_flow_input_text is not None:
                 self.flow_input_edit.setText(self._previous_flow_input_text)
+                self._previous_flow_input_text = None
         
-        # Update flow input preview when flow_only state changes
+        # Update related UI elements
+        self.update_output_preview()
+        self.update_cache_preview()
         self.update_flow_input_preview()
+        self.update_output_status()
+        self.update_cache_status()
+
+    def update_tile_mode_display(self):
+        """Update video display when tile mode is toggled"""
+        if not self._initialization_complete:
+            return
+        
+        # If there's a current frame loaded, redisplay it to show/hide tile grid
+        # Also check that flag_widgets is initialized to avoid errors during startup
+        if (hasattr(self, 'current_frame') and self.current_frame is not None and 
+            hasattr(self, 'flag_widgets') and 'tile' in self.flag_widgets):
+            self.display_frame(self.current_frame)
+        
+        # Also update command preview and other related displays
+        self.update_command_preview()
+        self.update_output_preview()
+        self.update_cache_preview()
+        self.update_output_status()
+        self.update_cache_status()
 
     def update_time_control_visibility(self):
         """Update time control visibility without triggering signals"""
@@ -1175,6 +1211,9 @@ class FlowRunnerApp(QWidget):
         if frame is None:
             return
             
+        # Store current frame for tile mode updates
+        self.current_frame = frame
+        
         height, width, channel = frame.shape
         bytes_per_line = 3 * width
         q_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
@@ -1186,6 +1225,10 @@ class FlowRunnerApp(QWidget):
             Qt.AspectRatioMode.KeepAspectRatio, 
             Qt.TransformationMode.SmoothTransformation
         )
+        
+        # Apply tile grid overlay if tile mode is enabled
+        if self.flag_widgets['tile'].isChecked():
+            scaled_pixmap = self.draw_tile_grid_overlay(scaled_pixmap, width, height)
         
         self.video_label.setPixmap(scaled_pixmap)
         self.update_video_layout()
@@ -1313,6 +1356,96 @@ class FlowRunnerApp(QWidget):
             cap.release()
         except Exception as e:
             print(f"Error loading frame {frame_number}: {e}")
+
+    def get_tile_grid_info(self, width, height):
+        """
+        Get tile grid information using the same logic as the selected model processor.
+        This ensures consistency between GUI visualization and actual processing.
+        
+        Args:
+            width, height: Original frame dimensions
+            
+        Returns:
+            (tile_width, tile_height, cols, rows, tiles_info) or None if tile mode is disabled
+        """
+        if not self.flag_widgets['tile'].isChecked():
+            return None
+        
+        # Get the selected model
+        selected_model = self.model_combo.currentText()
+        
+        # Use the appropriate processor based on selected model
+        try:
+            if selected_model == 'memflow':
+                from processing.memflow_processor import MemFlowProcessor
+                return MemFlowProcessor.calculate_tile_grid(width, height)
+            else:  # videoflow
+                from processing.videoflow_processor import VideoFlowProcessor
+                return VideoFlowProcessor.calculate_tile_grid(width, height)
+        except Exception as e:
+            print(f"Error calculating tile grid for {selected_model}: {e}")
+            return None
+
+    def draw_tile_grid_overlay(self, pixmap, original_width, original_height):
+        """
+        Draw tile grid overlay on the pixmap.
+        
+        Args:
+            pixmap: QPixmap to draw on
+            original_width, original_height: Original frame dimensions
+            
+        Returns:
+            QPixmap with tile grid overlay
+        """
+        if not self.flag_widgets['tile'].isChecked():
+            return pixmap
+            
+        # Get tile grid information
+        tile_grid_info = self.get_tile_grid_info(original_width, original_height)
+        if tile_grid_info is None:
+            return pixmap
+            
+        tile_width, tile_height, cols, rows, tiles_info = tile_grid_info
+        
+        # Create a copy of the pixmap to draw on
+        overlay_pixmap = pixmap.copy()
+        
+        # Initialize painter
+        painter = QPainter(overlay_pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Calculate scaling factors between original frame and displayed pixmap
+        pixmap_width = overlay_pixmap.width()
+        pixmap_height = overlay_pixmap.height()
+        
+        scale_x = pixmap_width / original_width
+        scale_y = pixmap_height / original_height
+        
+        # Set up pen for drawing grid lines
+        pen = QPen(Qt.GlobalColor.cyan, 2)
+        pen.setStyle(Qt.PenStyle.SolidLine)
+        painter.setPen(pen)
+        
+        # Draw tile boundaries
+        for tile_info in tiles_info:
+            # Scale tile coordinates to pixmap coordinates
+            x = int(tile_info['x'] * scale_x)
+            y = int(tile_info['y'] * scale_y)
+            width = int(tile_info['width'] * scale_x)
+            height = int(tile_info['height'] * scale_y)
+            
+            # Draw tile rectangle
+            painter.drawRect(x, y, width, height)
+            
+
+            
+            # Reset pen for next tile rectangle
+            painter.setPen(pen)
+        
+
+        
+        painter.end()
+        return overlay_pixmap
 
     def generate_output_filename_preview(self, input_path, output_dir, fps=30.0):
         """Generate preview of output filename based on current GUI settings"""

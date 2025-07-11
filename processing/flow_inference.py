@@ -82,7 +82,7 @@ class VideoFlowInference:
         Returns:
             (tile_width, tile_height, cols, rows, tiles_info)
         """
-        return self._processor.calculate_tile_grid(width, height, tile_size)
+        return VideoFlowProcessor.calculate_tile_grid(width, height, tile_size)
     
     def extract_tile(self, frame, tile_info):
         """Extract a tile from the frame without padding"""

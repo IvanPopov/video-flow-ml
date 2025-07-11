@@ -180,7 +180,9 @@ class MemFlowProcessor:
         
         return self.compute_optical_flow(frames, frame_idx)
     
-    def calculate_tile_grid(self, width: int, height: int, tile_size: int = 1280) -> Tuple:
+    @staticmethod
+    def calculate_tile_grid(width: int, height: int, tile_size: int = 1280) -> Tuple:
+
         """
         Calculate tile grid (compatibility method - MemFlow doesn't use tiles).
         
