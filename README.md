@@ -2,12 +2,6 @@
 
 VideoFlow implementation for generating optical flow from video with gamedev format encoding.
 
-## Description
-
-This project processes video files to generate optical flow visualization using the VideoFlow neural network:
-- **Left side**: Original video frames
-- **Right side**: Optical flow in gamedev format
-
 ## Installation
 
 ### Prerequisites
@@ -161,30 +155,6 @@ python flow_processor.py --input video.mp4 --interactive --start-time 30 --durat
 # Interactive with tile mode for better quality
 python flow_processor.py --input video.mp4 --interactive --tile --sequence-length 7
 ```
-
-#### Interface
-- **Top Frame**: Current frame (hover to see flow arrows)
-- **Bottom Frame**: Next frame (shows where pixels move to)
-- **Red Arrow**: Flow vector from hovered pixel to target location
-- **Frame Slider**: Navigate through all frame pairs
-- **Zoom Controls**: Mouse wheel to zoom in/out, buttons for precise control
-- **Status Bar**: Shows pixel coordinates, flow values, target position, and zoom level
-
-#### Controls
-- **Mouse Wheel**: Zoom in/out (10% steps, range 10%-500%)
-- **Middle Mouse Button**: Hold and drag to pan zoomed frames
-- **Double-Click**: Reset zoom and position to default
-- **Zoom Buttons**: +/- buttons for precise zoom control
-- **Center Button**: Reset pan position to center
-- **Hover**: Move mouse over top frame to see flow vectors as arrows
-- **Slider**: Navigate through frame pairs
-- **Window Resize**: Frames automatically scale to fit window width
-
-#### Frame Information
-- **Corner Numbers**: Yellow numbers show absolute frame numbers from video
-- **Pair Labels**: Cyan labels show relative pair numbers
-- **Statistics Bar**: Shows video name, cache directory, frame range, and counts
-- **Time Synchronization**: Displays exact frames from specified time range
 
 ### Raw Flow Data Saving
 
