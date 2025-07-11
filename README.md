@@ -8,16 +8,6 @@ This project processes video files to generate optical flow visualization using 
 - **Left side**: Original video frames
 - **Right side**: Optical flow in gamedev format
 
-## Gamedev Format Encoding
-
-Optical flow is encoded into RG channels:
-- Flow vectors are normalized relative to image resolution
-- Values are clamped to range [-20, +20]
-- Encoded as: 0 = -20, 1 = +20
-- R channel: horizontal flow
-- G channel: vertical flow
-- B channel: unused (0)
-
 ## Installation
 
 ### Prerequisites
@@ -41,15 +31,24 @@ setup.bat
 This will:
 - Check for Python and NVIDIA GPU
 - Initialize and update git submodules
-- Create virtual environment
-- Install PyTorch with CUDA support
+- Create virtual environment in `.venv` folder
+- Install PyTorch with CUDA support (if GPU detected)
 - Install all dependencies
 - Test the installation
 
-3. **Activate the environment:**
+3. **Activate the environment (required for each session):**
+
+**Option 1 - Automatic activation script:**
 ```bash
-venv_video_flow\Scripts\activate
+activate.bat
 ```
+
+**Option 2 - Manual activation:**
+```bash
+.venv\Scripts\activate
+```
+
+**Note:** You need to activate the virtual environment every time you start a new terminal session before using the project.
 
 ### Repository Structure
 
@@ -60,14 +59,23 @@ video-flow-ml/
 │   ├── MOF_sintel.pth           # Multi-frame model for Sintel
 │   ├── MOF_kitti.pth            # Multi-frame model for KITTI
 │   └── BOF_sintel.pth           # Bi-directional model
+├── .venv/                       # Virtual environment (created by setup.bat)
 ├── flow_processor.py            # Main processing script
+├── gui_runner.py                # GUI application
+├── check_cuda.py                # CUDA verification script
 ├── setup.bat                    # Installation script
+├── activate.bat                 # Environment activation script
 ├── requirements.txt             # Python dependencies
 ├── .gitmodules                  # Git submodule configuration
 └── README.md                    # This file
 ```
 
 ## Usage
+
+**Important:** Before running any commands, make sure to activate the virtual environment:
+```bash
+activate.bat
+```
 
 ### Verify Installation
 
@@ -77,8 +85,14 @@ python check_cuda.py
 
 ### Basic Usage
 
+**Command Line Interface (CLI):**
 ```bash
 python flow_processor.py --input your_video.mp4 --output result.mp4
+```
+
+**Graphical User Interface (GUI):**
+```bash
+python gui_runner.py
 ```
 
 ### Advanced Options
@@ -269,26 +283,6 @@ python flow_processor.py --input video.mp4 --output hsv.mp4 --flow-format hsv
 python flow_processor.py --input video.mp4 --output result.mp4 --save-flow flo
 ```
 
-### Gamedev Encoding
-
-```python
-# Normalize relative to image size
-normalized_flow[:, :, 0] /= image_width   # Horizontal component
-normalized_flow[:, :, 1] /= image_height  # Vertical component
-
-# Scale and clamp to [-20, +20]
-scaled_flow = normalized_flow * 200
-clamped_flow = np.clip(scaled_flow, -20, 20)
-
-# Encode to [0, 1]: 0 = -20, 1 = +20
-encoded_flow = (clamped_flow + 20) / 40
-
-# Store in RG channels
-rgb_image[:, :, 0] = encoded_flow[:, :, 0]  # R: horizontal flow
-rgb_image[:, :, 1] = encoded_flow[:, :, 1]  # G: vertical flow
-rgb_image[:, :, 2] = 0.0                    # B: unused
-```
-
 ## System Requirements
 
 - Python 3.8+
@@ -323,16 +317,6 @@ video_directory/
         ├── flow_frame_000000.npz                # Frame 0 flow (if --save-flow npz)
         └── ...
 ```
-
-## Output Examples
-
-The output video contains:
-- **Left panel**: Original video frames
-- **Right panel**: Optical flow visualization:
-  - Black pixels = no movement
-  - Red tones = rightward movement
-  - Green tones = downward movement
-  - Yellow tones = diagonal movement
 
 ## Troubleshooting
 

@@ -21,14 +21,14 @@ if errorlevel 1 (
 )
 
 echo.
-echo Creating virtual environment...
-if not exist "venv_video_flow" (
-    python -m venv venv_video_flow
+echo Creating virtual environment in .venv...
+if not exist ".venv" (
+    python -m venv .venv
 )
 
 echo.
 echo Activating virtual environment...
-call venv_video_flow\Scripts\activate.bat
+call .venv\Scripts\activate.bat
 
 echo.
 echo Updating submodules...
@@ -54,7 +54,7 @@ python -c "import torch, torchvision, numpy, cv2; print('Dependencies OK'); prin
 
 echo.
 echo Setup complete! To activate the environment, run:
-echo call venv_video_flow\Scripts\activate.bat
+echo call .venv\Scripts\activate.bat
 echo.
 echo To process a video, run:
 echo python flow_processor.py input_video.mp4
