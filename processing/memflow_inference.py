@@ -38,7 +38,8 @@ class MemFlowInference(BaseFlowInference):
     """
     
     def __init__(self, device: str = 'cuda', fast_mode: bool = False, tile_mode: bool = False, 
-                 sequence_length: int = 3, stage: str = 'sintel', model_path: str = None):
+                 sequence_length: int = 3, stage: str = 'sintel', model_path: str = None,
+                 enable_long_term: bool = False):
         """
         Initialize MemFlow inference engine
         
@@ -49,17 +50,19 @@ class MemFlowInference(BaseFlowInference):
             sequence_length: Number of frames to use in sequence for inference
             stage: Training stage/dataset ('sintel', 'things', 'kitti')
             model_path: Custom path to model weights
+            enable_long_term: Enable long-term memory (default: False)
         """
         super().__init__(device, fast_mode, tile_mode, sequence_length, 
                          stage=stage, model_path=model_path)
         
         # Delegate to MemFlowProcessor
         self._processor = MemFlowProcessor(device, fast_mode, tile_mode, sequence_length, 
-                                          stage, model_path)
+                                          stage, model_path, enable_long_term)
         
         # Store parameters for compatibility
         self.stage = stage
         self.model_path = model_path
+        self.enable_long_term = enable_long_term
         
         # Show tile mode warning if enabled
         if tile_mode:
@@ -144,6 +147,7 @@ class MemFlowInference(BaseFlowInference):
             "framework": "MemFlow",
             "architecture": "MemFlowNet",
             "stage": self.stage,
+            "enable_long_term": self.enable_long_term,
             "supports_tile_mode": False,
             "recommended_sequence_length": self.get_recommended_sequence_length(),
             "fast_mode_available": False,

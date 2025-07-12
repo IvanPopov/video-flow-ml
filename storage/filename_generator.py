@@ -27,7 +27,8 @@ def generate_output_filename(input_path: str,
                            stage: str = 'sintel',
                            vf_dataset: str = 'sintel',
                            vf_architecture: str = 'mof',
-                           vf_variant: str = 'standard') -> str:
+                           vf_variant: str = 'standard',
+                           extra_params: Optional[dict] = None) -> str:
     """
     Generate automatic output filename based on processing parameters.
     
@@ -70,6 +71,9 @@ def generate_output_filename(input_path: str,
     elif model == 'memflow':
         # MemFlow model: stage
         model_part = f"MF_{stage}"
+        # Add long-term memory info if available
+        if extra_params and 'long_term' in extra_params:
+            model_part += f"_{extra_params['long_term']}"
     else:
         # Fallback
         model_part = model.upper()
@@ -144,7 +148,8 @@ def generate_output_filepath(input_path: str,
                            stage: str = 'sintel',
                            vf_dataset: str = 'sintel',
                            vf_architecture: str = 'mof',
-                           vf_variant: str = 'standard') -> str:
+                           vf_variant: str = 'standard',
+                           extra_params: Optional[dict] = None) -> str:
     """
     Generate complete output filepath (directory + filename).
     
@@ -174,7 +179,8 @@ def generate_output_filepath(input_path: str,
         stage=stage,
         vf_dataset=vf_dataset,
         vf_architecture=vf_architecture,
-        vf_variant=vf_variant
+        vf_variant=vf_variant,
+        extra_params=extra_params
     )
     
     # Create output directory if it doesn't exist
@@ -193,7 +199,8 @@ def generate_cache_directory(input_path: str,
                            model: str = 'videoflow',
                            dataset: str = 'things',
                            architecture: str = 'mof',
-                           variant: str = 'noise') -> str:
+                           variant: str = 'noise',
+                           extra_params: Optional[dict] = None) -> str:
     """
     Generate cache directory path based on video processing parameters and model configuration.
     
@@ -227,6 +234,9 @@ def generate_cache_directory(input_path: str,
     elif model == 'memflow':
         # Always include dataset for MemFlow
         model_params.append(dataset)
+        # Add long-term memory info if available
+        if extra_params and 'long_term' in extra_params:
+            model_params.append(extra_params['long_term'])
     
     # Processing parameters
     cache_params = [

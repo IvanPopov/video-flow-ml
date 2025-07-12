@@ -45,7 +45,7 @@ class MemFlowCore(BaseFlowCore):
     """
     
     def __init__(self, device: str, fast_mode: bool = False, stage: str = 'sintel', 
-                 model_path: str = None, **kwargs):
+                 model_path: str = None, enable_long_term: bool = False, **kwargs):
         """
         Initialize MemFlow core engine
         
@@ -54,12 +54,14 @@ class MemFlowCore(BaseFlowCore):
             fast_mode: Enable fast mode (currently not implemented for MemFlow)
             stage: Training stage/dataset ('sintel', 'things', 'kitti')
             model_path: Custom path to model weights
+            enable_long_term: Enable long-term memory (default: False)
             **kwargs: Additional configuration parameters
         """
         super().__init__(device, fast_mode, **kwargs)
         
         self.stage = stage
         self.model_path = model_path
+        self.enable_long_term = enable_long_term
         self.processor = None
         self.InputPadder = None
         
@@ -95,6 +97,31 @@ class MemFlowCore(BaseFlowCore):
         # Change working directory to MemFlow temporarily for relative imports
         old_cwd = os.getcwd()
         os.chdir(memflow_root)
+        
+        # Monkey patch the assertion if long-term memory is enabled
+        # This must happen BEFORE any MemFlow modules are imported
+        if self.enable_long_term:
+            # Temporarily modify the memory manager file to disable the assertion
+            memory_manager_path = os.path.join(memflow_root, 'inference', 'memory_manager_skflow.py')
+            if os.path.exists(memory_manager_path):
+                # Read the file
+                with open(memory_manager_path, 'r') as f:
+                    content = f.read()
+                
+                # Store original content
+                self._original_memory_manager_content = content
+                
+                # Comment out the assertion line
+                modified_content = content.replace(
+                    'assert self.enable_long_term == False',
+                    '# assert self.enable_long_term == False  # Temporarily disabled for long-term memory'
+                )
+                
+                # Write back the modified content
+                with open(memory_manager_path, 'w') as f:
+                    f.write(modified_content)
+                
+                print("[MemFlow Core] Temporarily disabled long-term memory assertion")
         
         try:
             # Create complete module structure for MemFlow
@@ -183,6 +210,14 @@ class MemFlowCore(BaseFlowCore):
             # Enable warm start for better sequential processing
             self.cfg.warm_start = True
             
+            # Enable long-term memory if requested
+            if self.enable_long_term:
+                self.cfg.enable_long_term = True
+                print(f"[MemFlow Core] Long-term memory enabled")
+            else:
+                self.cfg.enable_long_term = False
+                print(f"[MemFlow Core] Long-term memory disabled (default)")
+            
             # Adjust decoder depth for better speed/accuracy trade-off
             # Reduce from 15 to 8 for faster inference while maintaining quality
             self.cfg.val_decoder_depth = 8
@@ -209,6 +244,7 @@ class MemFlowCore(BaseFlowCore):
             print(f"  Path: {self.model_path}")
             print(f"  Stage: {self.stage}")
             print(f"  Device: {self.device}")
+            print(f"  Long-term memory: {'Enabled' if self.enable_long_term else 'Disabled'}")
             if self.fast_mode:
                 print(f"  Fast Mode: Enabled (note: not implemented for MemFlow)")
             
@@ -217,6 +253,14 @@ class MemFlowCore(BaseFlowCore):
         finally:
             # Restore original working directory
             os.chdir(old_cwd)
+            
+            # Restore original memory manager file if it was modified
+            if hasattr(self, '_original_memory_manager_content'):
+                memory_manager_path = os.path.join(memflow_root, 'inference', 'memory_manager_skflow.py')
+                if os.path.exists(memory_manager_path):
+                    with open(memory_manager_path, 'w') as f:
+                        f.write(self._original_memory_manager_content)
+                    print("[MemFlow Core] Restored original memory manager file")
     
     def compute_flow_from_tensor(self, frame_batch_tensor: torch.Tensor) -> torch.Tensor:
         """
@@ -341,6 +385,7 @@ class MemFlowCore(BaseFlowCore):
                 "stage": self.stage,
                 "model_path": self.model_path,
                 "architecture": "MemFlow",
-                "framework": "MemFlow"
+                "framework": "MemFlow",
+                "enable_long_term": self.enable_long_term
             })
         return info 

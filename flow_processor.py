@@ -42,7 +42,7 @@ class VideoFlowProcessor:
     def __init__(self, device='auto', fast_mode=False, tile_mode=False, sequence_length=5,
                  flow_model='videoflow', model_path=None, stage='sintel', 
                  vf_dataset='sintel', vf_architecture='mof', vf_variant='standard',
-                 motion_vectors_clamp_range=32.0, flow_input=None):
+                 motion_vectors_clamp_range=32.0, flow_input=None, enable_long_term=False):
         """Initialize optical flow processor with model selection support"""
         # Initialize device manager
         self.device_manager = DeviceManager()
@@ -69,10 +69,15 @@ class VideoFlowProcessor:
                 tile_mode=tile_mode,
                 sequence_length=sequence_length,
                 stage=stage,
-                model_path=model_path
+                model_path=model_path,
+                enable_long_term=enable_long_term
             )
             model_path_display = model_path or f'MemFlow_ckpt/MemFlowNet_{stage}.pth'
             print(f"Using MemFlow model: {model_path_display}")
+            if enable_long_term:
+                print(f"Long-term memory: ENABLED")
+            else:
+                print(f"Long-term memory: DISABLED (default)")
         elif self.flow_model == 'videoflow':
             # VideoFlow parameters
             self.inference_engine = FlowProcessorFactory.create_inference(
@@ -99,6 +104,9 @@ class VideoFlowProcessor:
         # Flow input video path (for TAA comparison with external flow)
         self.flow_input = flow_input
         
+        # Store enable_long_term for cache path generation
+        self.enable_long_term = enable_long_term
+        
         # TAA processors for consistent state management
         self.taa_flow_processor = TAAProcessor(alpha=0.1)
         self.taa_simple_processor = TAAProcessor(alpha=0.1)
@@ -119,6 +127,8 @@ class VideoFlowProcessor:
         else:
             print(f"Tile mode: Not used (MemFlow processes full frames)")
         print(f"Sequence length: {sequence_length} frames")
+        if self.flow_model == 'memflow':
+            print(f"Long-term memory: {'Enabled' if enable_long_term else 'Disabled'}")
         
     def load_model(self):
         """Load optical flow model (VideoFlow or MemFlow)"""
@@ -192,11 +202,17 @@ class VideoFlowProcessor:
     
     def generate_flow_cache_path(self, input_path, start_frame, max_frames, sequence_length, fast_mode, tile_mode):
         """Generate cache directory path based on video processing parameters and model configuration"""
+        # Add long-term memory info for MemFlow
+        extra_params = {}
+        if self.flow_model == 'memflow':
+            extra_params['long_term'] = 'lt' if self.enable_long_term else 'st'
+        
         return self.cache_manager.generate_cache_path(
             input_path, start_frame, max_frames, sequence_length, fast_mode, tile_mode,
             model=self.flow_model, dataset=self.vf_dataset if self.flow_model == 'videoflow' else self.stage,
             architecture=self.vf_architecture if self.flow_model == 'videoflow' else 'none',
-            variant=self.vf_variant if self.flow_model == 'videoflow' else 'none'
+            variant=self.vf_variant if self.flow_model == 'videoflow' else 'none',
+            extra_params=extra_params
         )
     
     def check_flow_cache_exists(self, cache_dir, max_frames):
@@ -617,6 +633,11 @@ class VideoFlowProcessor:
         """Generate automatic output filename based on parameters"""
         from storage.filename_generator import generate_output_filepath
         
+        # Add long-term memory info for MemFlow
+        extra_params = {}
+        if self.flow_model == 'memflow' and self.enable_long_term:
+            extra_params['long_term'] = 'lt'
+        
         return generate_output_filepath(
             input_path=input_path,
             output_dir=output_dir,
@@ -636,7 +657,8 @@ class VideoFlowProcessor:
             stage=self.stage,
             vf_dataset=self.vf_dataset,
             vf_architecture=self.vf_architecture,
-            vf_variant=self.vf_variant
+            vf_variant=self.vf_variant,
+            extra_params=extra_params
         )
     
     def process_video(self, input_path, output_path, max_frames=1000, start_frame=0, 
@@ -1285,6 +1307,8 @@ def main():
                         help='Custom path to model weights (only for MemFlow)')
     parser.add_argument('--stage', choices=['sintel', 'things', 'kitti'], default='sintel',
                         help='Training stage/dataset (default: sintel, affects model selection for MemFlow)')
+    parser.add_argument('--enable-long-term', action='store_true',
+                        help='Enable long-term memory for MemFlow (only affects MemFlow model)')
     
     # VideoFlow specific options
     parser.add_argument('--vf-dataset', choices=['sintel', 'things', 'kitti'], default='sintel',
@@ -1360,7 +1384,8 @@ def main():
                                       vf_dataset=args.vf_dataset, vf_architecture=args.vf_architecture, 
                                       vf_variant=args.vf_variant,
                                       motion_vectors_clamp_range=args.motion_vectors_clamp_range,
-                                      flow_input=args.flow_input)
+                                      flow_input=args.flow_input,
+                                      enable_long_term=args.enable_long_term)
         
         # Handle time-based parameters for frame extraction
         if args.start_time is not None or args.duration is not None:
@@ -1543,7 +1568,8 @@ def main():
                                           vf_dataset=args.vf_dataset, vf_architecture=args.vf_architecture, 
                                           vf_variant=args.vf_variant,
                                           motion_vectors_clamp_range=args.motion_vectors_clamp_range,
-                                          flow_input=args.flow_input)
+                                          flow_input=args.flow_input,
+                                          enable_long_term=args.enable_long_term)
         
         print(f"\nTile grid analysis:")
         tile_width, tile_height, cols, rows, tiles_info = temp_processor.calculate_tile_grid(width, height)
@@ -1565,7 +1591,8 @@ def main():
                                   vf_dataset=args.vf_dataset, vf_architecture=args.vf_architecture, 
                                   vf_variant=args.vf_variant,
                                   motion_vectors_clamp_range=args.motion_vectors_clamp_range,
-                                  flow_input=args.flow_input)
+                                  flow_input=args.flow_input,
+                                  enable_long_term=args.enable_long_term)
     
     try:
         # Create output filename with frame/time range if not specified

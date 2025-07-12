@@ -410,6 +410,13 @@ class FlowRunnerApp(QWidget):
         self.sequence_length_spin.valueChanged.connect(self.on_setting_changed)
         self.model_card.content_layout.addWidget(self.sequence_length_spin, 5, 1)
         
+        # Long-term memory (only for MemFlow)
+        self.model_card.content_layout.addWidget(BodyLabel("Long-term memory:"), 6, 0)
+        self.enable_long_term_checkbox = CheckBox()
+        self.enable_long_term_checkbox.setToolTip("Enable long-term memory for MemFlow (only affects MemFlow model)")
+        self.enable_long_term_checkbox.stateChanged.connect(self.on_setting_changed)
+        self.model_card.content_layout.addWidget(self.enable_long_term_checkbox, 6, 1)
+        
         layout.addWidget(self.model_card)
 
         # General Parameters card (collapsible, collapsed by default)
@@ -722,9 +729,17 @@ class FlowRunnerApp(QWidget):
             if current_model == 'videoflow':
                 self.vf_architecture_combo.setEnabled(True)
                 self.vf_variant_combo.setEnabled(True)
+                self.enable_long_term_checkbox.setEnabled(False)
             else:  # memflow
                 self.vf_architecture_combo.setEnabled(False)
                 self.vf_variant_combo.setEnabled(False)
+                self.enable_long_term_checkbox.setEnabled(True)
+            
+            # Load long-term memory setting
+            self.enable_long_term_checkbox.blockSignals(True)
+            value = self.settings.value('enable_long_term', False)
+            self.enable_long_term_checkbox.setChecked(value if isinstance(value, bool) else value == 'true')
+            self.enable_long_term_checkbox.blockSignals(False)
             
             # Apply motion vectors clamp range visibility
             self.update_mv_clamp_range_visibility()
@@ -777,6 +792,9 @@ class FlowRunnerApp(QWidget):
         self.settings.setValue('flow_format', self.flow_format_combo.currentText())
         self.settings.setValue('save_flow', self.save_flow_combo.currentText())
         self.settings.setValue('time_control', self.time_control_combo.currentText())
+        
+        # Save long-term memory setting
+        self.settings.setValue('enable_long_term', self.enable_long_term_checkbox.isChecked())
 
     def on_setting_changed(self):
         """Called when any setting changes"""
@@ -798,9 +816,14 @@ class FlowRunnerApp(QWidget):
         if current_model == 'videoflow':
             self.vf_architecture_combo.setEnabled(True)
             self.vf_variant_combo.setEnabled(True)
+            # Disable long-term memory for VideoFlow
+            self.enable_long_term_checkbox.setEnabled(False)
+            self.enable_long_term_checkbox.setChecked(False)
         else:  # memflow
             self.vf_architecture_combo.setEnabled(False)
             self.vf_variant_combo.setEnabled(False)
+            # Enable long-term memory for MemFlow
+            self.enable_long_term_checkbox.setEnabled(True)
         
         # Reset flow processor instance due to model change
         self.flow_processor_instance = None
@@ -1108,7 +1131,8 @@ class FlowRunnerApp(QWidget):
                 stage=stage,
                 vf_dataset=vf_dataset,
                 vf_architecture=vf_architecture,
-                vf_variant=vf_variant
+                vf_variant=vf_variant,
+                enable_long_term=self.enable_long_term_checkbox.isChecked()
             )
 
         # Get processing parameters from GUI
@@ -1471,6 +1495,11 @@ class FlowRunnerApp(QWidget):
             start_frame = 0
             max_frames = 1000
         
+        # Add long-term memory info for MemFlow
+        extra_params = {}
+        if self.model_combo.currentText() == 'memflow':
+            extra_params['long_term'] = 'lt' if self.enable_long_term_checkbox.isChecked() else 'st'
+        
         return generate_output_filename(
             input_path=input_path,
             start_time=start_time,
@@ -1489,7 +1518,8 @@ class FlowRunnerApp(QWidget):
             stage=self.dataset_combo.currentText(),  # For MemFlow, stage is same as dataset
             vf_dataset=self.dataset_combo.currentText(),  # For VideoFlow
             vf_architecture=self.vf_architecture_combo.currentText(),
-            vf_variant=self.vf_variant_combo.currentText()
+            vf_variant=self.vf_variant_combo.currentText(),
+            extra_params=extra_params
         )
 
     def generate_cache_directory_preview(self, input_path):
@@ -1515,6 +1545,11 @@ class FlowRunnerApp(QWidget):
         architecture = self.vf_architecture_combo.currentText()  # 'mof' or 'bof'
         variant = self.vf_variant_combo.currentText()  # 'standard' or 'noise'
         
+        # Add long-term memory info for MemFlow
+        extra_params = {}
+        if self.model_combo.currentText() == 'memflow':
+            extra_params['long_term'] = 'lt' if self.enable_long_term_checkbox.isChecked() else 'st'
+        
         return generate_cache_directory(
             input_path=input_path,
             start_frame=start_frame,
@@ -1525,7 +1560,8 @@ class FlowRunnerApp(QWidget):
             model=model,
             dataset=dataset,
             architecture=architecture,
-            variant=variant
+            variant=variant,
+            extra_params=extra_params
         )
 
     def generate_flow_input_preview(self, input_path, output_dir, fps=30.0):
@@ -1553,6 +1589,11 @@ class FlowRunnerApp(QWidget):
             start_frame = 0
             max_frames = 1000
         
+        # Add long-term memory info for MemFlow
+        extra_params = {}
+        if self.model_combo.currentText() == 'memflow':
+            extra_params['long_term'] = 'lt' if self.enable_long_term_checkbox.isChecked() else 'st'
+        
         return generate_output_filename(
             input_path=input_path,
             start_time=start_time,
@@ -1571,7 +1612,8 @@ class FlowRunnerApp(QWidget):
             stage=self.dataset_combo.currentText(),  # For MemFlow, stage is same as dataset
             vf_dataset=self.dataset_combo.currentText(),  # For VideoFlow
             vf_architecture=self.vf_architecture_combo.currentText(),
-            vf_variant=self.vf_variant_combo.currentText()
+            vf_variant=self.vf_variant_combo.currentText(),
+            extra_params=extra_params
         )
 
     def update_output_preview(self):
@@ -1913,7 +1955,9 @@ class FlowRunnerApp(QWidget):
         if self.sequence_length_spin.value() != 5:
             cmd_parts.extend(["--sequence-length", str(self.sequence_length_spin.value())])
         
-
+        # Long-term memory (only for MemFlow)
+        if self.model_combo.currentText() == 'memflow' and self.enable_long_term_checkbox.isChecked():
+            cmd_parts.append("--enable-long-term")
         
         # Add extra flags if provided
         if extra_flags:

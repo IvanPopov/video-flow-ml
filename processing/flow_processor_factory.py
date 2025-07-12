@@ -117,6 +117,7 @@ class FlowProcessorFactory:
             # MemFlow-specific parameters
             stage = kwargs.get('stage', 'sintel')
             model_path = kwargs.get('model_path', None)
+            enable_long_term = kwargs.get('enable_long_term', False)
             
             # Validate MemFlow parameters
             if stage not in model_config['datasets']:
@@ -124,7 +125,7 @@ class FlowProcessorFactory:
                                f"Supported: {model_config['datasets']}")
             
             return processor_class(device, fast_mode, tile_mode, sequence_length,
-                                 stage, model_path)
+                                 stage, model_path, enable_long_term)
         
         else:
             raise ValueError(f"Internal error: Unknown model type: {model}")
@@ -200,6 +201,7 @@ class FlowProcessorFactory:
             # MemFlow-specific parameters
             stage = kwargs.get('stage', 'sintel')
             model_path = kwargs.get('model_path', None)
+            enable_long_term = kwargs.get('enable_long_term', False)
             
             # Validate MemFlow parameters
             if stage not in model_config['datasets']:
@@ -207,7 +209,7 @@ class FlowProcessorFactory:
                                f"Supported: {model_config['datasets']}")
             
             return inference_class(device, fast_mode, tile_mode, sequence_length,
-                                 stage, model_path)
+                                 stage, model_path, enable_long_term)
         
         else:
             raise ValueError(f"Internal error: Unknown model type: {model}")

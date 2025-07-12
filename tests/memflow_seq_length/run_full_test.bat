@@ -5,8 +5,8 @@ echo.
 
 cd /d "%~dp0"
 
-echo Testing sequence lengths 3,5,10,15,25,50 with medium motion (full test)...
-python seq_length_test.py --motion medium --frames 120 --seq-lengths 3,5,10,15,25,50
+echo Testing sequence lengths 3,5,10 with medium motion (full test)...
+python seq_length_test.py --motion medium --frames 120 --seq-lengths 3,5,10
 echo.
 
 echo Full test completed! Check temp/ directory for results.

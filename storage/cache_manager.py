@@ -172,7 +172,8 @@ class FlowCacheManager:
     def generate_cache_path(self, input_path: str, start_frame: int, max_frames: int, 
                           sequence_length: int, fast_mode: bool, tile_mode: bool,
                           model: str = 'videoflow', dataset: str = 'things', 
-                          architecture: str = 'mof', variant: str = 'noise') -> str:
+                          architecture: str = 'mof', variant: str = 'noise',
+                          extra_params: Optional[Dict[str, str]] = None) -> str:
         """Generate cache directory path based on video processing parameters and model configuration"""
         from .filename_generator import generate_cache_directory
         
@@ -186,7 +187,8 @@ class FlowCacheManager:
             model=model,
             dataset=dataset,
             architecture=architecture,
-            variant=variant
+            variant=variant,
+            extra_params=extra_params
         )
     
     def check_cache_exists(self, cache_dir: str, max_frames: int) -> Tuple[bool, Optional[str], List[int]]:
