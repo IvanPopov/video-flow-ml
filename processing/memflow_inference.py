@@ -13,12 +13,12 @@ import numpy as np
 from typing import List, Optional, Dict, Any, Tuple
 from tqdm import tqdm
 
-from .memflow_simple import MemFlowSimple
+from .memflow_processor import MemFlowProcessor
 
 
 class MemFlowInference:
     """
-    Simplified MemFlow inference using direct integration.
+    MemFlow inference layer using direct integration.
     
     Based on original inference.py logic for maximum quality and simplicity.
     No isolated processes, no complex architecture.
@@ -40,8 +40,8 @@ class MemFlowInference:
         self.stage = stage
         self.sequence_length = sequence_length
         
-        # Initialize simplified processor
-        self.processor = MemFlowSimple(
+        # Initialize processor
+        self.processor = MemFlowProcessor(
             device=device,
             model_path=model_path,
             stage=stage,
@@ -52,17 +52,15 @@ class MemFlowInference:
         self.model = None  # Will be set after loading
         self.cfg = None    # Will be set after loading
         
-        print(f"MemFlow Inference initialized - simplified direct integration")
+        print(f"MemFlow Inference initialized - direct integration")
     
     def load_model(self):
-        """Load MemFlow model through simplified processor"""
+        """Load MemFlow model through processor"""
         self.processor.load_model()
         
         # Set legacy attributes for compatibility
         self.model = self.processor.model
         self.cfg = self.processor.cfg
-        
-        print("MemFlow model loaded through simplified processor")
     
     def prepare_frame_sequence(self, frames: List[np.ndarray], frame_idx: int) -> torch.Tensor:
         """Prepare frame sequence for MemFlow processing"""
@@ -81,8 +79,8 @@ class MemFlowInference:
         return self.processor.compute_optical_flow(frames, frame_idx)
     
     def calculate_tile_grid(self, width: int, height: int, tile_size: int = 1280) -> Tuple:
-        """Calculate tile grid (delegates to MemFlowSimple)"""
-        return MemFlowSimple.calculate_tile_grid(width, height, tile_size)
+        """Calculate tile grid (delegates to MemFlowProcessor)"""
+        return MemFlowProcessor.calculate_tile_grid(width, height, tile_size)
     
     def extract_tile(self, frame: np.ndarray, tile_info: Dict[str, int]) -> np.ndarray:
         """Extract tile from frame (compatibility - returns full frame)"""
@@ -94,8 +92,8 @@ class MemFlowInference:
         """Compute optical flow using tiled processing (actually full frame for MemFlow)"""
         return self.processor.compute_optical_flow_tiled(frames, frame_idx, tile_pbar, overall_pbar)
     
-    def get_processor(self) -> MemFlowSimple:
-        """Get access to underlying MemFlowSimple processor"""
+    def get_processor(self) -> MemFlowProcessor:
+        """Get access to underlying MemFlowProcessor"""
         return self.processor
     
     def get_core_engine(self):

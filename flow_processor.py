@@ -36,7 +36,7 @@ from effects import TAAProcessor, apply_taa_effect
 from storage import FlowCacheManager
 from visualization import VideoComposer, create_side_by_side, add_text_overlay, create_video_grid
 from processing.flow_inference import VideoFlowInference
-from processing.memflow_inference import MemFlowInference
+from processing.memflow_processor import MemFlowProcessor
 
 
 class VideoFlowProcessor:
@@ -66,7 +66,7 @@ class VideoFlowProcessor:
             if model_path is None:
                 model_path = f'MemFlow_ckpt/MemFlowNet_{stage}.pth'
             
-            self.inference_engine = MemFlowInference(
+            self.inference_engine = MemFlowProcessor(
                 device=self.device,
                 model_path=model_path,
                 stage=stage,
@@ -610,6 +610,7 @@ class VideoFlowProcessor:
             taa_frame, taa_simple_frame, model_name, fast_mode, flow_format
         )
         
+
     def generate_output_filename(self, input_path, output_dir, start_time=None, duration=None, 
                                 start_frame=0, max_frames=1000, flow_only=False, taa=False, uncompressed=False, flow_format='gamedev', fps=30.0):
         """Generate automatic output filename based on parameters"""
@@ -948,7 +949,7 @@ class VideoFlowProcessor:
                                    bar_format='{desc}: {bar}| {n_fmt}/{total_fmt}')
         else:
             # Single progress bar for normal mode
-            main_pbar = tqdm(total=len(frames), desc="VideoFlow processing", 
+            main_pbar = tqdm(total=len(frames), desc="Flow processing", 
                            unit="frame", ncols=100, 
                            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
             tile_pbar = None
@@ -1107,7 +1108,7 @@ class VideoFlowProcessor:
             if self.tile_mode:
                 main_pbar.set_description(f"Frame {i+1}/{len(frames)} (ETA: {eta_seconds:.0f}s)")
             else:
-                main_pbar.set_description(f"VideoFlow processing (ETA: {eta_seconds:.0f}s)")
+                main_pbar.set_description(f"Flow processing (ETA: {eta_seconds:.0f}s)")
             main_pbar.update(1)
         
         # Close progress bars

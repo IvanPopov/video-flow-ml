@@ -1983,7 +1983,7 @@ class FlowRunnerApp(QWidget):
         
         # Run processing in new console window, but use same Python environment
         current_python = sys.executable
-        ps_command = f'Write-Host "Starting VideoFlow processing..." -ForegroundColor Green; Write-Host "Command: {command}" -ForegroundColor Yellow; Write-Host ""; & "{current_python}" {command.split("python", 1)[1]}; Write-Host ""; Write-Host "Processing completed. Press any key to close..." -ForegroundColor Green; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")'
+        ps_command = f'Write-Host "Starting Flow processing..." -ForegroundColor Green; Write-Host "Command: {command}" -ForegroundColor Yellow; Write-Host ""; & "{current_python}" {command.split("python", 1)[1]}; Write-Host ""; Write-Host "Processing completed. Press any key to close..." -ForegroundColor Green; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")'
         subprocess.Popen([
             'powershell.exe', 
             '-Command', 

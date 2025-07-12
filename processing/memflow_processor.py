@@ -17,7 +17,7 @@ from tqdm import tqdm
 # MemFlow imports will be done lazily in load_model method to avoid conflicts
 
 
-class MemFlowSimple:
+class MemFlowProcessor:
     """
     Simplified MemFlow processor that follows original inference.py logic.
     
@@ -30,7 +30,7 @@ class MemFlowSimple:
     def __init__(self, device='cuda', model_path='MemFlow_ckpt/MemFlowNet_sintel.pth', 
                  stage='sintel', sequence_length=3):
         """
-        Initialize simplified MemFlow processor.
+        Initialize MemFlow processor.
         
         Args:
             device: Processing device ('cuda' or 'cpu')
@@ -46,7 +46,7 @@ class MemFlowSimple:
         self.processor = None
         self.cfg = None
         
-        print(f"[MemFlow] Simplified processor initialized:")
+        print(f"[MemFlow] Processor initialized:")
         print(f"  Device: {self.device}")
         print(f"  Model: {model_path}")
         print(f"  Stage: {stage}")
@@ -309,7 +309,7 @@ class MemFlowSimple:
     def calculate_tile_grid(width: int, height: int, tile_size: int = 1280) -> tuple:
         """
         Calculate tile grid (compatibility method - no actual tiling).
-        
+            
         Returns:
             Tuple compatible with VideoFlow tile interface
         """
