@@ -30,9 +30,10 @@ def compute_memflow_isolated(frames_tensor, model_path, stage, device):
     abs_model_path = os.path.abspath(model_path)
     temp_dir = tempfile.gettempdir()
     
-    # Save input tensor to temporary file
+    # Save input tensor to temporary file (move to CPU first to avoid device conflicts)
     input_file = os.path.join(temp_dir, 'memflow_input.pth')
-    torch.save(frames_tensor, input_file)
+    print(f"[MemFlow] Saving input tensor: {frames_tensor.shape} from device {frames_tensor.device}")
+    torch.save(frames_tensor.cpu(), input_file)
     
     # Create inference script
     script_content = f'''
@@ -70,10 +71,12 @@ cfg.restore_ckpt = r"{abs_model_path}"
 
 # Build and load model
 model = build_network(cfg).to("{device}")
+print(f"Model loaded on device: {device}")
 
-# Load input tensor
-frames_tensor = torch.load(r"{input_file}")
+# Load input tensor (ensure it's loaded on CPU first, then move to target device)
+frames_tensor = torch.load(r"{input_file}", map_location='cpu')
 frames_tensor = frames_tensor.to("{device}")
+print(f"Input tensor moved to device: {{frames_tensor.device}}")
 
 print(f"Input tensor shape: {{frames_tensor.shape}}")
 
@@ -131,7 +134,13 @@ print("MemFlow inference completed successfully")
         
         # Load the result
         output_file = os.path.join(temp_dir, 'memflow_output.pth')
-        flow_result = torch.load(output_file)
+        flow_result = torch.load(output_file, map_location='cpu')
+        print(f"[MemFlow] Loaded result tensor: {flow_result.shape} on device {flow_result.device}")
+        
+        # Move result to target device if needed
+        if device != 'cpu':
+            flow_result = flow_result.to(device)
+            print(f"[MemFlow] Moved result to device: {flow_result.device}")
         
         # Clean up
         os.unlink(output_file)

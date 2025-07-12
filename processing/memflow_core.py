@@ -144,20 +144,27 @@ class MemFlowCore:
         if H < 64 or W < 64:
             raise ValueError(f"Spatial dimensions must be at least 64x64, got: {H}x{W}")
         
-        # Check device compatibility
+        # Check device compatibility and automatically move if needed
         tensor_device = str(tensor.device)
         target_device = self.device
         
         # Handle device equivalence (cuda vs cuda:0)
+        devices_compatible = False
         if tensor_device.startswith('cuda') and target_device.startswith('cuda'):
             if tensor_device == 'cuda' and target_device == 'cuda:0':
-                pass  # Compatible
+                devices_compatible = True
             elif tensor_device == 'cuda:0' and target_device == 'cuda':
-                pass  # Compatible
-            elif tensor_device != target_device:
-                print(f"Warning: Tensor device ({tensor_device}) differs from model device ({target_device})")
-        elif tensor_device != target_device:
-            print(f"Warning: Tensor device ({tensor_device}) differs from model device ({target_device})")
+                devices_compatible = True
+            elif tensor_device == target_device:
+                devices_compatible = True
+        elif tensor_device == target_device:
+            devices_compatible = True
+        
+        if not devices_compatible:
+            print(f"Info: Moving tensor from {tensor_device} to {target_device}")
+            return tensor.to(self.device)
+        
+        return tensor
     
     def compute_flow_from_tensor(self, frames_tensor: torch.Tensor) -> torch.Tensor:
         """
@@ -172,7 +179,8 @@ class MemFlowCore:
         if self.model is None:
             raise RuntimeError("Model not loaded. Call load_model() first.")
         
-        self.validate_input_tensor(frames_tensor)
+        # Validate and potentially move tensor to correct device
+        frames_tensor = self.validate_input_tensor(frames_tensor)
         
         # Use isolated inference to avoid import conflicts
         from .memflow_inference_isolated import compute_memflow_isolated

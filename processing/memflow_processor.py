@@ -155,8 +155,8 @@ class MemFlowProcessor:
         # Compute flow using core engine
         flow_tensor = self.core_engine.compute_flow_from_tensor(input_tensor)
         
-        # Convert to numpy [H, W, 2]
-        flow_numpy = flow_tensor.permute(1, 2, 0).numpy()
+        # Convert to numpy [H, W, 2] (move to CPU first)
+        flow_numpy = flow_tensor.permute(1, 2, 0).cpu().numpy()
         
         return flow_numpy
     
