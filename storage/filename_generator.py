@@ -22,7 +22,12 @@ def generate_output_filename(input_path: str,
                            uncompressed: bool = False,
                            flow_format: str = 'gamedev',
                            motion_vectors_clamp_range: float = 32.0,
-                           fps: float = 30.0) -> str:
+                           fps: float = 30.0,
+                           model: str = 'videoflow',
+                           stage: str = 'sintel',
+                           vf_dataset: str = 'sintel',
+                           vf_architecture: str = 'mof',
+                           vf_variant: str = 'standard') -> str:
     """
     Generate automatic output filename based on processing parameters.
     
@@ -40,6 +45,11 @@ def generate_output_filename(input_path: str,
         flow_format: Flow visualization format
         motion_vectors_clamp_range: Clamp range for motion vectors formats
         fps: Video frame rate for filename
+        model: Model type ('videoflow' or 'memflow')
+        stage: Stage/dataset for MemFlow model
+        vf_dataset: Dataset for VideoFlow model
+        vf_architecture: Architecture for VideoFlow model
+        vf_variant: Variant for VideoFlow model
         
     Returns:
         Generated filename (without directory path)
@@ -49,6 +59,22 @@ def generate_output_filename(input_path: str,
     
     # Build filename parts
     parts = [base_name]
+    
+    # Add model information
+    if model == 'videoflow':
+        # VideoFlow model: architecture + dataset + variant
+        if vf_variant == 'noise' and vf_dataset == 'things':
+            model_part = f"VF_{vf_architecture.upper()}_{vf_dataset}_noise"
+        else:
+            model_part = f"VF_{vf_architecture.upper()}_{vf_dataset}"
+    elif model == 'memflow':
+        # MemFlow model: stage
+        model_part = f"MF_{stage}"
+    else:
+        # Fallback
+        model_part = model.upper()
+    
+    parts.append(model_part)
     
     # Add time/frame info
     if start_time is not None:
@@ -113,7 +139,12 @@ def generate_output_filepath(input_path: str,
                            uncompressed: bool = False,
                            flow_format: str = 'gamedev',
                            motion_vectors_clamp_range: float = 32.0,
-                           fps: float = 30.0) -> str:
+                           fps: float = 30.0,
+                           model: str = 'videoflow',
+                           stage: str = 'sintel',
+                           vf_dataset: str = 'sintel',
+                           vf_architecture: str = 'mof',
+                           vf_variant: str = 'standard') -> str:
     """
     Generate complete output filepath (directory + filename).
     
@@ -138,7 +169,12 @@ def generate_output_filepath(input_path: str,
         uncompressed=uncompressed,
         flow_format=flow_format,
         motion_vectors_clamp_range=motion_vectors_clamp_range,
-        fps=fps
+        fps=fps,
+        model=model,
+        stage=stage,
+        vf_dataset=vf_dataset,
+        vf_architecture=vf_architecture,
+        vf_variant=vf_variant
     )
     
     # Create output directory if it doesn't exist

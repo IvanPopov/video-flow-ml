@@ -631,7 +631,12 @@ class VideoFlowProcessor:
             uncompressed=uncompressed,
             flow_format=flow_format,
             motion_vectors_clamp_range=self.motion_vectors_clamp_range,
-            fps=fps
+            fps=fps,
+            model=self.flow_model,
+            stage=self.stage,
+            vf_dataset=self.vf_dataset,
+            vf_architecture=self.vf_architecture,
+            vf_variant=self.vf_variant
         )
     
     def process_video(self, input_path, output_path, max_frames=1000, start_frame=0, 
@@ -1602,12 +1607,12 @@ def main():
         
         model_name = args.model.upper()
         if not args.no_autoplay:
-            print(f"\n✓ {model_name} processing completed successfully! Video should open automatically.")
+            print(f"\n[SUCCESS] {model_name} processing completed successfully! Video should open automatically.")
         else:
-            print(f"\n✓ {model_name} processing completed successfully!")
+            print(f"\n[SUCCESS] {model_name} processing completed successfully!")
         
     except Exception as e:
-        print(f"\n✗ Error: {e}")
+        print(f"\n[ERROR] Error: {e}")
         import traceback
         traceback.print_exc()
 

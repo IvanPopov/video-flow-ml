@@ -1484,7 +1484,12 @@ class FlowRunnerApp(QWidget):
             uncompressed=self.flag_widgets['uncompressed'].isChecked(),
             flow_format=self.flow_format_combo.currentText(),
             motion_vectors_clamp_range=self.mv_clamp_range_spin.value(),
-            fps=fps  # Use provided fps instead of hardcoded 30.0
+            fps=fps,  # Use provided fps instead of hardcoded 30.0
+            model=self.model_combo.currentText(),
+            stage=self.dataset_combo.currentText(),  # For MemFlow, stage is same as dataset
+            vf_dataset=self.dataset_combo.currentText(),  # For VideoFlow
+            vf_architecture=self.vf_architecture_combo.currentText(),
+            vf_variant=self.vf_variant_combo.currentText()
         )
 
     def generate_cache_directory_preview(self, input_path):
@@ -1561,7 +1566,12 @@ class FlowRunnerApp(QWidget):
             uncompressed=self.flag_widgets['uncompressed'].isChecked(),
             flow_format=self.flow_format_combo.currentText(),
             motion_vectors_clamp_range=self.mv_clamp_range_spin.value(),
-            fps=fps  # Use provided fps instead of hardcoded 30.0
+            fps=fps,  # Use provided fps instead of hardcoded 30.0
+            model=self.model_combo.currentText(),
+            stage=self.dataset_combo.currentText(),  # For MemFlow, stage is same as dataset
+            vf_dataset=self.dataset_combo.currentText(),  # For VideoFlow
+            vf_architecture=self.vf_architecture_combo.currentText(),
+            vf_variant=self.vf_variant_combo.currentText()
         )
 
     def update_output_preview(self):
