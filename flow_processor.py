@@ -35,8 +35,7 @@ from encoding import FlowEncoderFactory, encode_flow
 from effects import TAAProcessor, apply_taa_effect
 from storage import FlowCacheManager
 from visualization import VideoComposer, create_side_by_side, add_text_overlay, create_video_grid
-from processing.flow_inference import VideoFlowInference
-from processing.memflow_processor import MemFlowProcessor
+from processing import FlowProcessorFactory
 
 
 class VideoFlowProcessor:
@@ -60,22 +59,24 @@ class VideoFlowProcessor:
         self.vf_architecture = vf_architecture
         self.vf_variant = vf_variant
         
-        # Initialize inference engine based on selected model
+        # Initialize inference engine using factory pattern
         if self.flow_model == 'memflow':
-            # Determine model path for MemFlow
-            if model_path is None:
-                model_path = f'MemFlow_ckpt/MemFlowNet_{stage}.pth'
-            
-            self.inference_engine = MemFlowProcessor(
+            # MemFlow parameters
+            self.inference_engine = FlowProcessorFactory.create_inference(
+                model='memflow',
                 device=self.device,
-                model_path=model_path,
+                fast_mode=fast_mode,
+                tile_mode=tile_mode,
+                sequence_length=sequence_length,
                 stage=stage,
-                sequence_length=sequence_length
+                model_path=model_path
             )
-            print(f"Using MemFlow model: {model_path}")
+            model_path_display = model_path or f'MemFlow_ckpt/MemFlowNet_{stage}.pth'
+            print(f"Using MemFlow model: {model_path_display}")
         elif self.flow_model == 'videoflow':
-            # VideoFlow with configurable dataset and architecture
-            self.inference_engine = VideoFlowInference(
+            # VideoFlow parameters
+            self.inference_engine = FlowProcessorFactory.create_inference(
+                model='videoflow',
                 device=self.device,
                 fast_mode=fast_mode,
                 tile_mode=tile_mode,
@@ -925,7 +926,7 @@ class VideoFlowProcessor:
         # Reset TAA processors for new video
         self.taa_flow_processor.reset_history()
         self.taa_simple_processor.reset_history()
-        previous_flow = None  # Store previous frame's optical flow for TAA
+        self.taa_external_processor.reset_history()
 
         # Create progress bars for tile mode or single progress bar for normal mode
         if self.tile_mode:
@@ -980,8 +981,6 @@ class VideoFlowProcessor:
             
             # No stabilization - use raw flow
             flow = raw_flow
-            if previous_flow is None:
-                previous_flow = flow # use the first frame's flow as previous flow
             
             # Encode optical flow based on selected format
             if i == 0:  # Log encoder info only once
@@ -996,17 +995,17 @@ class VideoFlowProcessor:
                 else:
                     print(f"[Encoder] Using GameDev RG channel encoder")
             
-            # always use previous flow for visualization as it is used for TAA
+            # Use the current frame's flow for visualization
             if flow_format == 'hsv':
-                flow_viz = self.encode_hsv_format(previous_flow, width, height)
+                flow_viz = self.encode_hsv_format(flow, width, height)
             elif flow_format == 'torchvision':
-                flow_viz = self.encode_torchvision_format(previous_flow, width, height)
+                flow_viz = self.encode_torchvision_format(flow, width, height)
             elif flow_format == 'motion-vectors-rg8':
-                flow_viz = self.encode_motion_vectors_rg8_format(previous_flow, width, height)
+                flow_viz = self.encode_motion_vectors_rg8_format(flow, width, height)
             elif flow_format == 'motion-vectors-rgb8':
-                flow_viz = self.encode_motion_vectors_rgb8_format(previous_flow, width, height)
+                flow_viz = self.encode_motion_vectors_rgb8_format(flow, width, height)
             else:
-                flow_viz = self.encode_gamedev_format(previous_flow, width, height)
+                flow_viz = self.encode_gamedev_format(flow, width, height)
             
             # Apply TAA effects if requested
             taa_frame = None
@@ -1019,7 +1018,7 @@ class VideoFlowProcessor:
                 # Normal TAA processing with current computed flow
                 taa_result = self.taa_flow_processor.apply_taa(
                     current_frame=frames[i],
-                    flow_pixels=previous_flow,
+                    flow_pixels=flow,
                     previous_taa_frame=None,
                     alpha=0.1,
                     use_flow=True,
@@ -1029,7 +1028,7 @@ class VideoFlowProcessor:
                 
                 # Apply TAA with external flow if provided
                 if flow_input is not None and i < len(decoded_flows):
-                    external_flow = decoded_flows[i] # decoded flow already includes previous flow
+                    external_flow = decoded_flows[i]
                     taa_external_result = self.taa_external_processor.apply_taa(
                         current_frame=frames[i],
                         flow_pixels=external_flow,
@@ -1053,7 +1052,7 @@ class VideoFlowProcessor:
                         external_flow_viz = self.encode_gamedev_format(external_flow, width, height)
                     
                     # Create difference overlay between original and external flow
-                    difference_overlay = self.create_difference_overlay(previous_flow, external_flow, magnitude_threshold=0.5)
+                    difference_overlay = self.create_difference_overlay(flow, external_flow, magnitude_threshold=0.5)
 
                 # Apply simple TAA (no flow) with alpha=0.1
                 taa_simple_result = self.taa_simple_processor.apply_taa(
@@ -1066,9 +1065,6 @@ class VideoFlowProcessor:
                 )
                 taa_simple_frame = taa_simple_result
                 
-            # Store current flow for next frame's TAA
-            previous_flow = flow.copy()
-            
             # Create combined frame
             if flow_input is not None and taa_external_frame is not None and difference_overlay is not None:
                 # Flow input mode: create 6-video grid

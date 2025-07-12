@@ -1,109 +1,151 @@
-#!/usr/bin/env python3
 """
-MemFlow Inference Module
+MemFlow Optical Flow Inference Module - Compatibility Layer
 
-Simplified inference layer using direct MemFlow integration.
-Based on original inference.py logic for maximum quality and simplicity.
+This module maintains backward compatibility with existing code while using
+the new modular architecture:
+- MemFlowCore: Low-level model operations
+- MemFlowProcessor: High-level processing pipeline
+
+The MemFlowInference class acts as a compatibility wrapper that delegates
+to the appropriate new modules while preserving the original API.
+
+WARNING: This module requires CUDA/GPU support for optimal performance.
+The model loading and inference operations cannot be easily parallelized
+across multiple processes due to CUDA context limitations.
 """
 
 import os
 import sys
-import torch
+from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
-from typing import List, Optional, Dict, Any, Tuple
+import torch
 from tqdm import tqdm
 
+# Import the new modular components
 from .memflow_processor import MemFlowProcessor
+from .base_flow_processor import BaseFlowInference
 
 
-class MemFlowInference:
+class MemFlowInference(BaseFlowInference):
     """
-    MemFlow inference layer using direct integration.
+    MemFlow inference engine for optical flow computation (Compatibility Layer)
     
-    Based on original inference.py logic for maximum quality and simplicity.
-    No isolated processes, no complex architecture.
+    This class provides backward compatibility with existing code while using
+    the new modular architecture internally. It delegates all operations to
+    MemFlowProcessor, which in turn uses MemFlowCore for model operations.
+    
+    For new code, consider using MemFlowProcessor or MemFlowCore directly.
     """
     
-    def __init__(self, device='cuda', model_path='MemFlow_ckpt/MemFlowNet_sintel.pth', 
-                 stage='sintel', sequence_length=3):
+    def __init__(self, device: str = 'cuda', fast_mode: bool = False, tile_mode: bool = False, 
+                 sequence_length: int = 3, stage: str = 'sintel', model_path: str = None):
         """
-        Initialize MemFlow inference engine.
+        Initialize MemFlow inference engine
         
         Args:
-            device: Processing device ('cuda' or 'cpu')
-            model_path: Path to MemFlow model weights
-            stage: Training stage configuration ('sintel', 'things', 'kitti')
-            sequence_length: Number of frames to use for MemFlow processing
+            device: PyTorch device ('cuda', 'cpu', or torch.device)
+            fast_mode: Enable fast mode (currently not implemented for MemFlow)
+            tile_mode: Enable tile-based processing (currently not implemented for MemFlow)
+            sequence_length: Number of frames to use in sequence for inference
+            stage: Training stage/dataset ('sintel', 'things', 'kitti')
+            model_path: Custom path to model weights
         """
-        self.device = device
-        self.model_path = model_path
+        super().__init__(device, fast_mode, tile_mode, sequence_length, 
+                         stage=stage, model_path=model_path)
+        
+        # Delegate to MemFlowProcessor
+        self._processor = MemFlowProcessor(device, fast_mode, tile_mode, sequence_length, 
+                                          stage, model_path)
+        
+        # Store parameters for compatibility
         self.stage = stage
-        self.sequence_length = sequence_length
+        self.model_path = model_path
         
-        # Initialize processor
-        self.processor = MemFlowProcessor(
-            device=device,
-            model_path=model_path,
-            stage=stage,
-            sequence_length=sequence_length
-        )
-        
-        # Legacy attributes for compatibility
-        self.model = None  # Will be set after loading
-        self.cfg = None    # Will be set after loading
-        
-        print(f"MemFlow Inference initialized - direct integration")
+        # Show tile mode warning if enabled
+        if tile_mode:
+            print("Warning: Tile mode is not implemented for MemFlow. Using full-frame processing.")
     
     def load_model(self):
-        """Load MemFlow model through processor"""
-        self.processor.load_model()
+        """Load MemFlow model"""
+        self._processor.load_model()
         
-        # Set legacy attributes for compatibility
-        self.model = self.processor.model
-        self.cfg = self.processor.cfg
+        # Set legacy attributes for backward compatibility
+        self.model = self._processor.core.model
+        self.cfg = self._processor.core.cfg
     
-    def prepare_frame_sequence(self, frames: List[np.ndarray], frame_idx: int) -> torch.Tensor:
-        """Prepare frame sequence for MemFlow processing"""
-        return self.processor._prepare_frames(frames, frame_idx)
+    def is_model_loaded(self) -> bool:
+        """Check if MemFlow model is loaded"""
+        return self._processor.is_model_loaded()
     
-    def compute_optical_flow(self, frames: List[np.ndarray], frame_idx: int) -> np.ndarray:
-        """Compute optical flow using MemFlow model"""
-        return self.processor.compute_optical_flow(frames, frame_idx)
-    
-    def compute_optical_flow_with_progress(self, frames: List[np.ndarray], frame_idx: int,
-                                         tile_pbar: Optional[tqdm] = None) -> np.ndarray:
-        """Compute optical flow with progress updates"""
-        if tile_pbar is not None:
-            tile_pbar.set_description("MemFlow processing")
-            tile_pbar.update(1)
-        return self.processor.compute_optical_flow(frames, frame_idx)
-    
-    def calculate_tile_grid(self, width: int, height: int, tile_size: int = 1280) -> Tuple:
-        """Calculate tile grid (delegates to MemFlowProcessor)"""
-        return MemFlowProcessor.calculate_tile_grid(width, height, tile_size)
-    
-    def extract_tile(self, frame: np.ndarray, tile_info: Dict[str, int]) -> np.ndarray:
-        """Extract tile from frame (compatibility - returns full frame)"""
-        return frame  # MemFlow doesn't use tiles, return full frame
-    
-    def compute_optical_flow_tiled(self, frames: List[np.ndarray], frame_idx: int,
-                                 tile_pbar: Optional[tqdm] = None,
-                                 overall_pbar: Optional[tqdm] = None) -> np.ndarray:
-        """Compute optical flow using tiled processing (actually full frame for MemFlow)"""
-        return self.processor.compute_optical_flow_tiled(frames, frame_idx, tile_pbar, overall_pbar)
-    
-    def get_processor(self) -> MemFlowProcessor:
-        """Get access to underlying MemFlowProcessor"""
-        return self.processor
-    
-    def get_core_engine(self):
-        """Get access to underlying processor (compatibility method)"""
-        return self.processor
+    def get_model_info(self) -> Dict[str, Any]:
+        """Get information about loaded model"""
+        info = self._processor.get_model_info()
+        
+        # Add compatibility layer information
+        if info["status"] == "loaded":
+            info["compatibility_layer"] = "MemFlowInference"
+        
+        return info
     
     def get_memory_usage(self) -> Dict[str, float]:
-        """Get current memory usage statistics"""
-        return self.processor.get_memory_usage()
+        """Get current GPU memory usage"""
+        return self._processor.get_memory_usage()
+    
+    # Additional methods for direct access to new architecture
+    def get_core_engine(self):
+        """Get direct access to MemFlowCore engine"""
+        return self._processor.core
+    
+    def get_processor(self):
+        """Get direct access to MemFlowProcessor"""
+        return self._processor
+    
+    def validate_frames(self, frames: List[np.ndarray], frame_idx: int) -> bool:
+        """Validate frame input format and parameters"""
+        return self._processor.validate_frames(frames, frame_idx)
+    
+    def set_tile_mode(self, enabled: bool):
+        """Enable or disable tile-based processing (not implemented for MemFlow)"""
+        if enabled:
+            print("Warning: Tile mode is not implemented for MemFlow. Using full-frame processing.")
+        self.tile_mode = False
+        self._processor.set_tile_mode(False)
+    
+    def set_sequence_length(self, length: int):
+        """Set the sequence length for multi-frame processing"""
+        self.sequence_length = length
+        self._processor.set_sequence_length(length)
     
     def cleanup(self):
         """Clean up resources"""
-        self.processor.cleanup() 
+        if self._processor is not None:
+            self._processor.cleanup()
+    
+    # Additional MemFlow-specific methods
+    def get_stage(self) -> str:
+        """Get current training stage"""
+        return self.stage
+    
+    def get_model_path(self) -> str:
+        """Get path to model weights"""
+        return self.model_path or f'MemFlow_ckpt/MemFlowNet_{self.stage}.pth'
+    
+    def supports_tile_mode(self) -> bool:
+        """Check if tile mode is supported (always False for MemFlow)"""
+        return False
+    
+    def get_recommended_sequence_length(self) -> int:
+        """Get recommended sequence length for MemFlow (typically 2-3)"""
+        return 3
+    
+    def get_framework_info(self) -> Dict[str, Any]:
+        """Get information about the MemFlow framework"""
+        return {
+            "framework": "MemFlow",
+            "architecture": "MemFlowNet",
+            "stage": self.stage,
+            "supports_tile_mode": False,
+            "recommended_sequence_length": self.get_recommended_sequence_length(),
+            "fast_mode_available": False,
+            "compatibility_layer": "MemFlowInference"
+        } 

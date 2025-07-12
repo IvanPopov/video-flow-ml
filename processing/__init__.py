@@ -7,7 +7,12 @@ This module contains components for:
 - Optical flow computation using VideoFlow/MemFlow models
 - Tile-based processing for large frames
 
-Simplified architecture:
+Unified architecture:
+
+Base classes:
+- BaseFlowCore: Abstract base class for low-level model operations
+- BaseFlowProcessor: Abstract base class for high-level processing pipeline
+- BaseFlowInference: Abstract base class for compatibility layer
 
 VideoFlow:
 - VideoFlowCore: Low-level model operations (minimal dependencies)
@@ -15,17 +20,33 @@ VideoFlow:
 - VideoFlowInference: Compatibility layer (maintains backward compatibility)
 
 MemFlow:
-- MemFlowProcessor: Direct integration with MemFlow (based on original inference.py)
+- MemFlowCore: Low-level model operations (minimal dependencies)
+- MemFlowProcessor: High-level processing pipeline (compatibility with VideoFlow interface)
 - MemFlowInference: Compatibility layer (maintains backward compatibility)
 """
 
-from .flow_inference import VideoFlowInference
+# Base classes
+from .base_flow_processor import BaseFlowCore, BaseFlowProcessor, BaseFlowInference
+
+# VideoFlow components
+from .videoflow_inference import VideoFlowInference
 from .videoflow_core import VideoFlowCore  
 from .videoflow_processor import VideoFlowProcessor
+
+# MemFlow components
+from .memflow_core import MemFlowCore
 from .memflow_processor import MemFlowProcessor
 from .memflow_inference import MemFlowInference
 
+# Factory
+from .flow_processor_factory import FlowProcessorFactory
+
 __all__ = [
+    # Base classes
+    'BaseFlowCore',            # Abstract base class for low-level operations
+    'BaseFlowProcessor',       # Abstract base class for high-level processing
+    'BaseFlowInference',       # Abstract base class for compatibility layer
+    
     # VideoFlow components
     'VideoFlowInference',      # Compatibility layer (recommended for existing code)
     'VideoFlowCore',           # Low-level model operations  
@@ -33,5 +54,9 @@ __all__ = [
     
     # MemFlow components
     'MemFlowInference',        # Compatibility layer (recommended for existing code)
-    'MemFlowProcessor'         # Direct integration processor
+    'MemFlowCore',             # Low-level model operations
+    'MemFlowProcessor',        # High-level processing pipeline
+    
+    # Factory
+    'FlowProcessorFactory'     # Factory for creating processors with unified interface
 ] 

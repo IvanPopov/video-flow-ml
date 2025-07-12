@@ -19,6 +19,7 @@ For high-level operations, use VideoFlowProcessor instead.
 import os
 import sys
 import torch
+from typing import Dict, Any
 
 # Add VideoFlow core to path
 sys.path.insert(0, os.path.join(os.getcwd(), 'VideoFlow'))
@@ -29,8 +30,10 @@ from core.Networks import build_network
 from utils.utils import InputPadder
 from configs.multiframes_sintel_submission import get_cfg
 
+from .base_flow_processor import BaseFlowCore
 
-class VideoFlowCore:
+
+class VideoFlowCore(BaseFlowCore):
     """
     Core VideoFlow inference engine for optical flow computation
     
@@ -60,15 +63,11 @@ class VideoFlowCore:
             architecture: Model architecture ('mof' for MOFNet, 'bof' for BOFNet)
             variant: Model variant ('standard' or 'noise' for things_288960noise)
         """
-        self.device = device
-        self.fast_mode = fast_mode
+        super().__init__(device, fast_mode, dataset=dataset, architecture=architecture, variant=variant)
+        
         self.dataset = dataset
         self.architecture = architecture.lower()
         self.variant = variant
-        
-        # Model components
-        self.model = None
-        self.cfg = None
         
     def load_model(self):
         """Load VideoFlow model with dynamic model path selection based on dataset/architecture/variant"""
@@ -201,42 +200,23 @@ class VideoFlowCore:
         """Check if VideoFlow model is loaded"""
         return self.model is not None
     
-    def get_model_info(self):
+    def get_model_info(self) -> Dict[str, Any]:
         """Get information about loaded model"""
-        if self.model is None:
-            return {"status": "not_loaded"}
-        
-        return {
-            "status": "loaded",
-            "model_path": getattr(self.cfg, 'model', 'unknown') if self.cfg else 'unknown',
-            "dataset": self.dataset,
-            "architecture": self.architecture.upper(),
-            "variant": self.variant,
-            "config": {
-                "decoder_depth": getattr(self.cfg, 'decoder_depth', 'default'),
-                "corr_levels": getattr(self.cfg, 'corr_levels', 'default'),
-                "corr_radius": getattr(self.cfg, 'corr_radius', 'default'),
-            },
-            "fast_mode": self.fast_mode,
-            "device": str(self.device)
-        }
-    
-    def get_device(self):
-        """Get the device used by the model"""
-        return self.device
-    
-    def set_eval_mode(self):
-        """Ensure model is in evaluation mode"""
+        info = super().get_model_info()
         if self.model is not None:
-            self.model.eval()
+            info.update({
+                "model_type": "VideoFlowCore",
+                "model_path": getattr(self.cfg, 'model', 'unknown') if self.cfg else 'unknown',
+                "dataset": self.dataset,
+                "architecture": self.architecture.upper(),
+                "variant": self.variant,
+                "framework": "VideoFlow",
+                "config": {
+                    "decoder_depth": getattr(self.cfg, 'decoder_depth', 'default'),
+                    "corr_levels": getattr(self.cfg, 'corr_levels', 'default'),
+                    "corr_radius": getattr(self.cfg, 'corr_radius', 'default'),
+                }
+            })
+        return info
     
-    def get_memory_usage(self):
-        """Get current GPU memory usage if using CUDA"""
-        if self.device.type == 'cuda':
-            return {
-                "allocated": torch.cuda.memory_allocated(self.device) / 1024**2,  # MB
-                "cached": torch.cuda.memory_reserved(self.device) / 1024**2,  # MB
-                "max_allocated": torch.cuda.max_memory_allocated(self.device) / 1024**2  # MB
-            }
-        else:
-            return {"message": "Memory tracking only available for CUDA devices"} 
+ 

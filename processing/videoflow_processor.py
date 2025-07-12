@@ -15,9 +15,10 @@ a complete processing pipeline for practical applications.
 import torch
 import numpy as np
 from .videoflow_core import VideoFlowCore
+from .base_flow_processor import BaseFlowProcessor
 
 
-class VideoFlowProcessor:
+class VideoFlowProcessor(BaseFlowProcessor):
     """
     High-level VideoFlow processor for optical flow computation
     
@@ -45,10 +46,9 @@ class VideoFlowProcessor:
             architecture: Model architecture ('mof' for MOFNet, 'bof' for BOFNet)
             variant: Model variant ('standard' or 'noise' for things_288960noise)
         """
-        self.device = device
-        self.fast_mode = fast_mode
-        self.tile_mode = tile_mode
-        self.sequence_length = sequence_length
+        super().__init__(device, fast_mode, tile_mode, sequence_length, 
+                         dataset=dataset, architecture=architecture, variant=variant)
+        
         self.dataset = dataset
         self.architecture = architecture
         self.variant = variant
@@ -66,61 +66,9 @@ class VideoFlowProcessor:
         print(f"  Variant: {variant}")
     
     def load_model(self):
-        """Load VideoFlow MOF model using core engine"""
+        """Load VideoFlow model using core engine"""
         model_path = self.core.load_model()
         print(f"VideoFlow model loaded successfully from: {model_path}")
-    
-    @staticmethod
-    def calculate_tile_grid(width, height, tile_size=1280):
-        """
-        Calculate tile grid for fixed square tiles (optimized for VideoFlow MOF model)
-        
-        Args:
-            width, height: Original frame dimensions
-            tile_size: Fixed tile size (default: 1280x1280, optimal for MOF model)
-            
-        Returns:
-            (tile_width, tile_height, cols, rows, tiles_info)
-        """
-        import numpy as np
-        
-        # Use fixed square tiles
-        tile_width = tile_size
-        tile_height = tile_size
-        
-        # Calculate number of tiles needed
-        cols = int(np.ceil(width / tile_width))
-        rows = int(np.ceil(height / tile_height))
-        
-        # Calculate actual tile positions
-        tiles_info = []
-        for row in range(rows):
-            for col in range(cols):
-                # Calculate tile position
-                x = col * tile_width
-                y = row * tile_height
-                
-                # Calculate actual tile size (edge tiles might be smaller)
-                actual_width = min(tile_width, width - x)
-                actual_height = min(tile_height, height - y)
-                
-                tiles_info.append({
-                    'x': x, 'y': y,
-                    'width': actual_width, 'height': actual_height,
-                    'col': col, 'row': row
-                })
-        
-        return tile_width, tile_height, cols, rows, tiles_info
-    
-    def extract_tile(self, frame, tile_info):
-        """Extract a tile from the frame without padding"""
-        x, y = tile_info['x'], tile_info['y']
-        w, h = tile_info['width'], tile_info['height']
-        
-        # Extract the tile from frame
-        tile = frame[y:y+h, x:x+w]
-        
-        return tile
     
     def prepare_frame_sequence(self, frames, frame_idx):
         """
@@ -164,30 +112,7 @@ class VideoFlowProcessor:
         batch = torch.stack(tensors).unsqueeze(0).to(self.device)
         return batch
     
-    def compute_optical_flow(self, frames, frame_idx):
-        """
-        Compute optical flow using VideoFlow model
-        
-        Args:
-            frames: List of numpy arrays in RGB format [H, W, 3], values 0-255
-            frame_idx: Index of current frame to process
-            
-        Returns:
-            flow_np: Optical flow as numpy array [H, W, 2], values in pixels
-        """
-        if not self.core.is_model_loaded():
-            raise RuntimeError("Model not loaded. Call load_model() first.")
-        
-        # Prepare frame sequence
-        frame_batch = self.prepare_frame_sequence(frames, frame_idx)
-        
-        # Use core engine for inference
-        flow_tensor = self.core.compute_flow_from_tensor(frame_batch)
-        
-        # Convert to numpy: CHW -> HWC  
-        flow_np = flow_tensor.permute(1, 2, 0).cpu().numpy()
-        
-        return flow_np
+
     
     def compute_optical_flow_with_progress(self, frames, frame_idx, tile_pbar=None):
         """
@@ -285,80 +210,13 @@ class VideoFlowProcessor:
         
         return full_flow
     
-    def is_model_loaded(self):
-        """Check if VideoFlow model is loaded"""
-        return self.core.is_model_loaded()
-    
     def get_model_info(self):
         """Get information about loaded model"""
-        core_info = self.core.get_model_info()
-        
-        # Add processor-specific information
-        if core_info["status"] == "loaded":
-            core_info.update({
-                "tile_mode": self.tile_mode,
-                "sequence_length": self.sequence_length,
-                "processor_type": "VideoFlowProcessor"
+        info = super().get_model_info()
+        if self.core is not None:
+            info.update({
+                "dataset": self.dataset,
+                "architecture": self.architecture,
+                "variant": self.variant
             })
-        
-        return core_info
-    
-    def get_memory_usage(self):
-        """Get current GPU memory usage"""
-        return self.core.get_memory_usage()
-    
-    def validate_frames(self, frames, frame_idx):
-        """
-        Validate frame input format and parameters
-        
-        Args:
-            frames: List of numpy arrays
-            frame_idx: Frame index to process
-            
-        Raises:
-            ValueError: If validation fails
-        """
-        if not isinstance(frames, list):
-            raise ValueError("Frames must be a list of numpy arrays")
-        
-        if len(frames) == 0:
-            raise ValueError("Frames list cannot be empty")
-        
-        if frame_idx < 0 or frame_idx >= len(frames):
-            raise ValueError(f"Frame index {frame_idx} out of range [0, {len(frames)-1}]")
-        
-        # Check first frame format
-        sample_frame = frames[0]
-        if not isinstance(sample_frame, np.ndarray):
-            raise ValueError("Frames must be numpy arrays")
-        
-        if len(sample_frame.shape) != 3:
-            raise ValueError(f"Frames must be 3D arrays [H,W,C], got shape {sample_frame.shape}")
-        
-        if sample_frame.shape[2] != 3:
-            raise ValueError(f"Frames must have 3 color channels, got {sample_frame.shape[2]}")
-        
-        # Check data type and range
-        if sample_frame.dtype not in [np.uint8, np.float32, np.float64]:
-            raise ValueError(f"Unsupported frame dtype: {sample_frame.dtype}")
-        
-        if sample_frame.dtype == np.uint8:
-            if sample_frame.max() > 255 or sample_frame.min() < 0:
-                raise ValueError("uint8 frames must be in range [0, 255]")
-        elif sample_frame.dtype in [np.float32, np.float64]:
-            if sample_frame.max() > 1.0 or sample_frame.min() < 0.0:
-                # Allow some tolerance for floating point
-                if sample_frame.max() <= 255.0 and sample_frame.min() >= 0.0:
-                    pass  # Probably 0-255 range in float format
-                else:
-                    raise ValueError("Float frames must be in range [0.0, 1.0] or [0.0, 255.0]")
-    
-    def set_tile_mode(self, enabled):
-        """Enable or disable tile-based processing"""
-        self.tile_mode = enabled
-    
-    def set_sequence_length(self, length):
-        """Set the sequence length for multi-frame processing"""
-        if length < 1 or length > 10:
-            raise ValueError("Sequence length must be between 1 and 10")
-        self.sequence_length = length 
+        return info 
