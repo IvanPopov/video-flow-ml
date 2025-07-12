@@ -79,7 +79,7 @@ class VideoFlowProcessor(BaseFlowProcessor):
             frame_idx: Index of current frame to process
             
         Returns:
-            frame_batch: Tensor in VideoFlow format [1, T, 3, H, W], values 0.0-1.0
+            frame_batch: Tensor in VideoFlow format [1, T, 3, H, W], values 0.0-255.0
         """
         # Multi-frame: use consecutive frames centered around current frame
         half_seq = self.sequence_length // 2
@@ -98,13 +98,14 @@ class VideoFlowProcessor(BaseFlowProcessor):
         sequence = sequence[:self.sequence_length]
 
         # Convert to tensors (same format as VideoFlow inference.py)
+        # IMPORTANT: VideoFlow expects values in [0,255] range, NOT [0,1]
         tensors = []
         for frame in sequence:
-            # Convert to tensor and normalize to [0,1], then change HWC to CHW
+            # Convert to tensor but keep values in [0,255] range, then change HWC to CHW
             if frame.dtype == np.uint8:
-                tensor = torch.from_numpy(frame.astype(np.float32) / 255.0).permute(2, 0, 1)
+                tensor = torch.from_numpy(frame.astype(np.float32)).permute(2, 0, 1)
             else:
-                # Already float, assume it's in correct range
+                # Already float, assume it's in [0,255] range
                 tensor = torch.from_numpy(frame.astype(np.float32)).permute(2, 0, 1)
             tensors.append(tensor)
         

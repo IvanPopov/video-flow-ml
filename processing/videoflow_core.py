@@ -22,8 +22,15 @@ import torch
 from typing import Dict, Any
 
 # Add VideoFlow core to path
-sys.path.insert(0, os.path.join(os.getcwd(), 'VideoFlow'))
-sys.path.insert(0, os.path.join(os.getcwd(), 'VideoFlow', 'core'))
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+videoflow_path = os.path.join(project_root, 'VideoFlow')
+videoflow_core_path = os.path.join(videoflow_path, 'core')
+
+if videoflow_path not in sys.path:
+    sys.path.insert(0, videoflow_path)
+if videoflow_core_path not in sys.path:
+    sys.path.insert(0, videoflow_core_path)
 
 # VideoFlow imports
 from core.Networks import build_network
@@ -189,9 +196,9 @@ class VideoFlowCore(BaseFlowCore):
             # Unpad results
             flow_tensor = padder.unpad(flow_predictions)
             
-            # Get the middle flow (center frame of the sequence)
-            middle_idx = flow_tensor.shape[1] // 2
-            flow_tensor = flow_tensor[0, middle_idx]  # Remove batch dim, get middle flow
+            # Get the forward flow (flow23: from frame 2 to frame 3)
+            # VideoFlow returns [flow23, flow21] where flow23 is the forward flow
+            flow_tensor = flow_tensor[0, 0]  # Remove batch dim, get forward flow (flow23)
             
             # Return raw tensor [2, H, W]
             return flow_tensor

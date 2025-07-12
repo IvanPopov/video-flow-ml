@@ -115,8 +115,8 @@ class TAAProcessor:
         y_coords, x_coords = np.mgrid[0:h, 0:w]
         
         # Calculate previous pixel positions using flow
-        prev_x = x_coords + flow_pixels[:, :, 0]
-        prev_y = y_coords + flow_pixels[:, :, 1]
+        prev_x = x_coords - flow_pixels[:, :, 0]
+        prev_y = y_coords - flow_pixels[:, :, 1]
         
         # Identify pixels where the flow vector points out of bounds
         out_of_bounds_mask = (prev_x < 0) | (prev_x >= w) | (prev_y < 0) | (prev_y >= h)

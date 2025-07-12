@@ -14,7 +14,7 @@ The test creates a synthetic video with a white ball moving in a sinusoidal patt
 - **Fast**: 10 pixels/frame max velocity, 2-second motion period
 
 ### Video Parameters
-- Resolution: 640x480 pixels
+- Resolution: 504x216 pixels (21:9 aspect ratio)
 - Frame rate: 30 fps
 - Ball radius: 20 pixels
 - Default frames: 60 frames

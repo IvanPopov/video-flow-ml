@@ -37,13 +37,13 @@ from processing import FlowProcessorFactory
 class SyntheticVideoGenerator:
     """Generate synthetic video with moving ball for optical flow testing"""
     
-    def __init__(self, width: int = 640, height: int = 480, fps: int = 30):
+    def __init__(self, width: int = 504, height: int = 216, fps: int = 30):
         """
         Initialize video generator
         
         Args:
-            width: Video width in pixels
-            height: Video height in pixels
+            width: Video width in pixels (default: 504 for 21:9 aspect ratio)
+            height: Video height in pixels (default: 216 for 21:9 aspect ratio)
             fps: Frames per second
         """
         self.width = width
@@ -382,7 +382,7 @@ class VelocityTestRunner:
         # Ensure temp directory exists
         os.makedirs(self.temp_dir, exist_ok=True)
     
-    def run_flow_processor(self, input_video: str, output_dir: str, model: str, frames: int) -> str:
+    def run_flow_processor(self, input_video: str, output_dir: str, model: str, frames: int, dataset: str = 'sintel') -> str:
         """
         Run optical flow processor
         
@@ -408,8 +408,13 @@ class VelocityTestRunner:
             '--frames', str(frames),
             '--model', model,
             '--flow-format', 'motion-vectors-rg8',
-            '--save-flow', 'npz'
+            '--save-flow', 'npz',
+            '--force-recompute'
         ]
+        
+        # Add dataset parameter for VideoFlow
+        if model == 'videoflow':
+            cmd.extend(['--vf-dataset', dataset])
         
         print(f"Running optical flow processor with {model}...")
         print(f"Command: {' '.join(cmd)}")
@@ -439,6 +444,9 @@ class VelocityTestRunner:
             for item in os.listdir(search_dir):
                 item_path = os.path.join(search_dir, item)
                 if os.path.isdir(item_path) and 'flow_cache' in item and model in item:
+                    # For VideoFlow, also check dataset match
+                    if model == 'videoflow' and dataset not in item:
+                        continue
                     cache_dir = item_path
                     break
             if cache_dir:
@@ -498,12 +506,19 @@ class VelocityTestRunner:
         # Step 2: Run optical flow processors
         print("\n--- Step 2: Running optical flow processors ---")
         
-        # Run VideoFlow
+        # Run VideoFlow with Sintel model
         try:
-            videoflow_cache = self.run_flow_processor(video_file, self.temp_dir, 'videoflow', frames)
+            videoflow_sintel_cache = self.run_flow_processor(video_file, self.temp_dir, 'videoflow', frames, 'sintel')
         except Exception as e:
-            print(f"VideoFlow processing failed: {e}")
-            videoflow_cache = None
+            print(f"VideoFlow (Sintel) processing failed: {e}")
+            videoflow_sintel_cache = None
+        
+        # Run VideoFlow with Things model
+        try:
+            videoflow_things_cache = self.run_flow_processor(video_file, self.temp_dir, 'videoflow', frames, 'things')
+        except Exception as e:
+            print(f"VideoFlow (Things) processing failed: {e}")
+            videoflow_things_cache = None
         
         # Run MemFlow
         try:
@@ -529,14 +544,23 @@ class VelocityTestRunner:
             'models': {}
         }
         
-        # Analyze VideoFlow
-        if videoflow_cache:
+        # Analyze VideoFlow Sintel
+        if videoflow_sintel_cache:
             try:
-                vf_results = analyzer.analyze_flow_accuracy(videoflow_cache, 'VideoFlow')
-                results['models']['videoflow'] = vf_results
+                vf_sintel_results = analyzer.analyze_flow_accuracy(videoflow_sintel_cache, 'VideoFlow (Sintel)')
+                results['models']['videoflow_sintel'] = vf_sintel_results
             except Exception as e:
-                print(f"VideoFlow analysis failed: {e}")
-                results['models']['videoflow'] = {'error': str(e)}
+                print(f"VideoFlow (Sintel) analysis failed: {e}")
+                results['models']['videoflow_sintel'] = {'error': str(e)}
+        
+        # Analyze VideoFlow Things
+        if videoflow_things_cache:
+            try:
+                vf_things_results = analyzer.analyze_flow_accuracy(videoflow_things_cache, 'VideoFlow (Things)')
+                results['models']['videoflow_things'] = vf_things_results
+            except Exception as e:
+                print(f"VideoFlow (Things) analysis failed: {e}")
+                results['models']['videoflow_things'] = {'error': str(e)}
         
         # Analyze MemFlow
         if memflow_cache:
@@ -559,13 +583,27 @@ class VelocityTestRunner:
     
     def print_results_summary(self, results: Dict[str, Any]):
         """Print formatted results summary"""
-        print(f"\n{'='*60}")
+        print(f"\n{'='*80}")
         print(f"VELOCITY TEST RESULTS - {results['test_info']['speed'].upper()}")
-        print(f"{'='*60}")
+        print(f"{'='*80}")
         
-        for model_name, model_results in results['models'].items():
-            print(f"\n{model_name.upper()} Results:")
-            print(f"{'-'*40}")
+        # Define model display order and names
+        model_order = ['videoflow_sintel', 'videoflow_things', 'memflow']
+        model_display_names = {
+            'videoflow_sintel': 'VIDEOFLOW (SINTEL)',
+            'videoflow_things': 'VIDEOFLOW (THINGS)', 
+            'memflow': 'MEMFLOW'
+        }
+        
+        for model_key in model_order:
+            if model_key not in results['models']:
+                continue
+                
+            model_results = results['models'][model_key]
+            display_name = model_display_names[model_key]
+            
+            print(f"\n{display_name} Results:")
+            print(f"{'-'*50}")
             
             if 'error' in model_results:
                 print(f"ERROR: {model_results['error']}")
@@ -579,9 +617,9 @@ class VelocityTestRunner:
             print(f"Accuracy (< 2px): {model_results['accuracy_threshold_2px']:.1f}%")
             print(f"Accuracy (< 5px): {model_results['accuracy_threshold_5px']:.1f}%")
         
-        print(f"\n{'='*60}")
+        print(f"\n{'='*80}")
         print(f"Test completed in {results['test_info']['test_duration']:.1f} seconds")
-        print(f"{'='*60}")
+        print(f"{'='*80}")
 
 
 def main():
