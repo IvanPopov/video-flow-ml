@@ -180,6 +180,13 @@ class MemFlowCore(BaseFlowCore):
             abs_model_path = os.path.abspath(os.path.join(old_cwd, self.model_path))
             self.cfg.restore_ckpt = abs_model_path
             
+            # Enable warm start for better sequential processing
+            self.cfg.warm_start = True
+            
+            # Adjust decoder depth for better speed/accuracy trade-off
+            # Reduce from 15 to 8 for faster inference while maintaining quality
+            self.cfg.val_decoder_depth = 8
+            
             # Build and load model
             self.model = build_network(self.cfg).to(self.device)
             
@@ -264,45 +271,66 @@ class MemFlowCore(BaseFlowCore):
         if frame_batch_tensor.shape[1] < 2:
             raise ValueError(f"MemFlow requires at least 2 frames, got {frame_batch_tensor.shape[1]}")
         
-        # Prepare input for MemFlow
-        # Convert from [B, T, C, H, W] to list of [B, C, H, W] tensors
-        frame_list = []
-        for t in range(frame_batch_tensor.shape[1]):
-            frame_list.append(frame_batch_tensor[:, t, :, :, :])
+        # Get sequence length
+        sequence_length = frame_batch_tensor.shape[1]
         
         # Use InputPadder for spatial padding
-        padder = self.InputPadder(frame_list[0].shape[-2:])
-        padded_frames = [padder.pad(frame) for frame in frame_list]
+        padder = self.InputPadder(frame_batch_tensor.shape[-2:])
         
-        # Run MemFlow inference
+        # Pad entire sequence
+        padded_tensor = padder.pad(frame_batch_tensor)
+        
+        # Convert to MemFlow format: values in [-1, 1]
+        images = 2.0 * padded_tensor - 1.0
+        
+        # Initialize variables for sequential processing
+        flow_prev = None
+        final_flow = None
+        
+        # Process frames sequentially to build up memory
         with torch.no_grad():
-            # Clear memory before processing
+            # Clear memory only at the beginning (not between frames!)
             self.processor.clear_memory()
             
-            # MemFlow processes consecutive frame pairs
-            # We'll process the first two frames (or middle pair for longer sequences)
-            if len(padded_frames) >= 2:
-                # Combine frames for MemFlow input: [B, 2, C, H, W]
-                images = torch.stack([padded_frames[0], padded_frames[1]], dim=1)
+            # Process consecutive frame pairs
+            for ti in range(sequence_length - 1):
+                # Get current frame pair
+                frame_pair = images[:, ti:ti + 2, :, :, :]  # [B, 2, C, H, W]
                 
-                # Convert to MemFlow format: values in [-1, 1]
-                images = 2.0 * images - 1.0
+                # Check if this is the last frame pair
+                is_end = (ti == sequence_length - 2)
                 
                 # MemFlow inference using step method
-                flow_low, flow_pre = self.processor.step(images, end=True)
+                flow_low, flow_pre = self.processor.step(
+                    frame_pair, 
+                    end=is_end, 
+                    flow_init=flow_prev,
+                    add_pe=False  # Disable positional encoding for now
+                )
                 
-                # flow_pre is the final upsampled flow [B, 2, H, W]
-                flow_tensor = flow_pre
+                # Store the final flow (from the last frame pair)
+                if is_end:
+                    final_flow = flow_pre
                 
-                # Unpad the result
-                flow_tensor = padder.unpad(flow_tensor)
-                
-                # Remove batch dimension: [B, 2, H, W] -> [2, H, W]
-                flow_tensor = flow_tensor[0]
-                
-                return flow_tensor
-            else:
-                raise ValueError("MemFlow requires at least 2 frames for processing")
+                # Prepare flow initialization for next iteration (warm start)
+                if hasattr(self.cfg, 'warm_start') and self.cfg.warm_start and not is_end:
+                    # Use forward_interpolate to prepare flow_init for next frame
+                    from utils.utils import forward_interpolate
+                    flow_prev = forward_interpolate(flow_low[0])[None].cuda()
+                else:
+                    flow_prev = None
+            
+            # Ensure we have a final flow
+            if final_flow is None:
+                raise RuntimeError("Failed to compute flow - no final flow generated")
+            
+            # Unpad the result
+            final_flow = padder.unpad(final_flow)
+            
+            # Remove batch dimension: [B, 2, H, W] -> [2, H, W]
+            final_flow = final_flow[0]
+            
+            return final_flow
     
     def get_model_info(self) -> Dict[str, Any]:
         """Get information about loaded model"""
