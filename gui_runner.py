@@ -1497,8 +1497,8 @@ class FlowRunnerApp(QWidget):
         
         # Add long-term memory info for MemFlow
         extra_params = {}
-        if self.model_combo.currentText() == 'memflow':
-            extra_params['long_term'] = 'lt' if self.enable_long_term_checkbox.isChecked() else 'st'
+        if self.model_combo.currentText() == 'memflow' and self.enable_long_term_checkbox.isChecked():
+            extra_params['long_term'] = 'lt'
         
         return generate_output_filename(
             input_path=input_path,
@@ -1547,8 +1547,8 @@ class FlowRunnerApp(QWidget):
         
         # Add long-term memory info for MemFlow
         extra_params = {}
-        if self.model_combo.currentText() == 'memflow':
-            extra_params['long_term'] = 'lt' if self.enable_long_term_checkbox.isChecked() else 'st'
+        if self.model_combo.currentText() == 'memflow' and self.enable_long_term_checkbox.isChecked():
+            extra_params['long_term'] = 'lt'
         
         return generate_cache_directory(
             input_path=input_path,
@@ -1591,8 +1591,8 @@ class FlowRunnerApp(QWidget):
         
         # Add long-term memory info for MemFlow
         extra_params = {}
-        if self.model_combo.currentText() == 'memflow':
-            extra_params['long_term'] = 'lt' if self.enable_long_term_checkbox.isChecked() else 'st'
+        if self.model_combo.currentText() == 'memflow' and self.enable_long_term_checkbox.isChecked():
+            extra_params['long_term'] = 'lt'
         
         return generate_output_filename(
             input_path=input_path,

@@ -71,9 +71,12 @@ def generate_output_filename(input_path: str,
     elif model == 'memflow':
         # MemFlow model: stage
         model_part = f"MF_{stage}"
-        # Add long-term memory info if available
+        # Add long-term memory info - default to 'st' if not specified
         if extra_params and 'long_term' in extra_params:
             model_part += f"_{extra_params['long_term']}"
+        else:
+            # Default to short-term memory for MemFlow
+            model_part += "_st"
     else:
         # Fallback
         model_part = model.upper()
@@ -234,9 +237,12 @@ def generate_cache_directory(input_path: str,
     elif model == 'memflow':
         # Always include dataset for MemFlow
         model_params.append(dataset)
-        # Add long-term memory info if available
+        # Add long-term memory info - default to 'st' if not specified
         if extra_params and 'long_term' in extra_params:
             model_params.append(extra_params['long_term'])
+        else:
+            # Default to short-term memory for MemFlow
+            model_params.append('st')
     
     # Processing parameters
     cache_params = [
