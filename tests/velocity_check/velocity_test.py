@@ -31,7 +31,14 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.join(script_dir, '..', '..')
 sys.path.insert(0, project_root)
 
+# Add tests common directory
+tests_common_dir = os.path.join(script_dir, '..', 'common')
+sys.path.insert(0, tests_common_dir)
+
 from processing import FlowProcessorFactory
+from synthetic_video import SyntheticVideoGenerator
+from flow_analyzer import OpticalFlowAnalyzer
+from test_runner import BaseTestRunner
 
 
 class SyntheticVideoGenerator:
@@ -364,23 +371,12 @@ class OpticalFlowAnalyzer:
         return angle_deg
 
 
-class VelocityTestRunner:
-    """Main test runner"""
+class VelocityTestRunner(BaseTestRunner):
+    """Velocity test runner"""
     
     def __init__(self, test_dir: str, project_root: str):
-        """
-        Initialize test runner
-        
-        Args:
-            test_dir: Directory containing test files
-            project_root: Root directory of the project
-        """
-        self.test_dir = test_dir
-        self.project_root = project_root
-        self.temp_dir = os.path.join(test_dir, 'temp')
-        
-        # Ensure temp directory exists
-        os.makedirs(self.temp_dir, exist_ok=True)
+        """Initialize velocity test runner"""
+        super().__init__(test_dir, project_root)
     
     def run_flow_processor(self, input_video: str, output_dir: str, model: str, frames: int, dataset: str = 'sintel') -> str:
         """
@@ -444,11 +440,19 @@ class VelocityTestRunner:
             for item in os.listdir(search_dir):
                 item_path = os.path.join(search_dir, item)
                 if os.path.isdir(item_path) and 'flow_cache' in item and model in item:
+                    # Check if cache matches the input video name
+                    if cache_base not in item:
+                        continue
                     # For VideoFlow, also check dataset match
                     if model == 'videoflow' and dataset not in item:
                         continue
-                    cache_dir = item_path
-                    break
+                    # Check if frames parameter matches (for more precise cache matching)
+                    if f'frames{frames}' in item:
+                        cache_dir = item_path
+                        break
+                    # Fallback: if no frames parameter found, use any matching cache
+                    elif cache_dir is None:
+                        cache_dir = item_path
             if cache_dir:
                 break
         
@@ -472,7 +476,7 @@ class VelocityTestRunner:
         print(f"Flow cache directory: {cache_dir}")
         return cache_dir
     
-    def run_test(self, speed: str, frames: int = 60, fps: int = 30) -> Dict[str, Any]:
+    def run_test(self, speed: str, frames: int = 60, fps: int = 30, memflow_only: bool = False) -> Dict[str, Any]:
         """
         Run complete velocity test
         
@@ -506,23 +510,31 @@ class VelocityTestRunner:
         # Step 2: Run optical flow processors
         print("\n--- Step 2: Running optical flow processors ---")
         
-        # Run VideoFlow with Sintel model
-        try:
-            videoflow_sintel_cache = self.run_flow_processor(video_file, self.temp_dir, 'videoflow', frames, 'sintel')
-        except Exception as e:
-            print(f"VideoFlow (Sintel) processing failed: {e}")
-            videoflow_sintel_cache = None
+        # Initialize cache variables
+        videoflow_sintel_cache = None
+        videoflow_things_cache = None
+        memflow_cache = None
         
-        # Run VideoFlow with Things model
-        try:
-            videoflow_things_cache = self.run_flow_processor(video_file, self.temp_dir, 'videoflow', frames, 'things')
-        except Exception as e:
-            print(f"VideoFlow (Things) processing failed: {e}")
-            videoflow_things_cache = None
+        if not memflow_only:
+            # Run VideoFlow with Sintel model
+            try:
+                videoflow_sintel_cache = self.run_flow_processor(video_file, self.temp_dir, 'videoflow', frames, 5, 'sintel')
+            except Exception as e:
+                print(f"VideoFlow (Sintel) processing failed: {e}")
+                videoflow_sintel_cache = None
+            
+            # Run VideoFlow with Things model
+            try:
+                videoflow_things_cache = self.run_flow_processor(video_file, self.temp_dir, 'videoflow', frames, 5, 'things')
+            except Exception as e:
+                print(f"VideoFlow (Things) processing failed: {e}")
+                videoflow_things_cache = None
+        else:
+            print("Skipping VideoFlow tests (--memflow-only flag enabled)")
         
         # Run MemFlow
         try:
-            memflow_cache = self.run_flow_processor(video_file, self.temp_dir, 'memflow', frames)
+            memflow_cache = self.run_flow_processor(video_file, self.temp_dir, 'memflow', frames, 5)
         except Exception as e:
             print(f"MemFlow processing failed: {e}")
             memflow_cache = None
@@ -631,6 +643,8 @@ def main():
                        help='Number of frames to generate (default: 60)')
     parser.add_argument('--fps', type=int, default=30,
                        help='Frames per second (default: 30)')
+    parser.add_argument('--memflow-only', action='store_true',
+                       help='Test only MemFlow model (skip VideoFlow for faster testing)')
     
     args = parser.parse_args()
     
@@ -640,7 +654,7 @@ def main():
     
     # Run test
     runner = VelocityTestRunner(test_dir, project_root)
-    results = runner.run_test(args.speed, args.frames, args.fps)
+    results = runner.run_test(args.speed, args.frames, args.fps, args.memflow_only)
     
     return results
 

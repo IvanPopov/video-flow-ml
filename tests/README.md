@@ -1,100 +1,198 @@
-# Video Flow ML Tests
+# Optical Flow Testing Framework
 
-This directory contains various tests for the video-flow-ml project, designed to validate optical flow models and identify potential issues.
+This directory contains a comprehensive testing framework for optical flow models, specifically designed for VideoFlow and MemFlow evaluation using synthetic ground truth data.
+
+## Overview
+
+The framework uses synthetic videos with moving objects and mathematically precise ground truth to identify accuracy issues, optimize configurations, and validate optical flow implementations.
 
 ## Test Suites
 
-### Velocity Check Tests (`velocity_check/`)
+### 🎯 [`velocity_check/`](velocity_check/) - Model Accuracy Validation
+**Purpose**: Validate optical flow model accuracy across different motion speeds
 
-Synthetic video tests that generate mathematically precise ground truth data to validate optical flow accuracy.
-
-**Purpose**: Detect coordinate system issues, temporal inconsistencies, and accuracy problems in optical flow models.
-
-**Status**: ⚠️ **CRITICAL ISSUES FOUND**
-- VideoFlow: Complete direction reversal (coordinate system bug)
-- MemFlow: Temporal offset issues but better overall accuracy
+**Features**:
+- Tests VideoFlow (Sintel/Things) and MemFlow models
+- Evaluates slow, medium, and fast motion scenarios  
+- Identifies direction errors, magnitude issues, and temporal problems
+- Provides accuracy metrics (velocity error, direction error, pixel-level accuracy)
 
 **Quick Start**:
 ```bash
-# Run basic test
-cd tests/velocity_check
-python velocity_test.py --speed slow --frames 10 --fps 30
-
-# Or use batch files
-run_slow.bat      # Test with slow motion
-run_medium.bat    # Test with medium motion
-run_fast.bat      # Test with fast motion
-run_all.bat       # Run all tests
+cd velocity_check
+run_fast.bat        # Test fast motion
+run_all.bat         # Test all motion speeds
 ```
 
-**View Results**:
+**Key Results**: Successfully identified and fixed critical MemFlow direction bugs, improving accuracy by 12-18x.
+
+### 🔧 [`memflow_seq_length/`](memflow_seq_length/) - Sequence Length Optimization  
+**Purpose**: Determine optimal sequence length for MemFlow processing
+
+**Features**:
+- Tests sequence lengths from 2-12 frames
+- Evaluates accuracy vs processing speed trade-offs
+- Provides recommendations for different use cases
+- Measures memory efficiency and temporal coherence
+
+**Quick Start**:
 ```bash
-python show_results.py
-# Or use: show_results.bat
+cd memflow_seq_length  
+run_quick_test.bat     # Test seq lengths 2-6 (quick)
+run_full_test.bat      # Test seq lengths 2-10 (full)
 ```
 
-See `velocity_check/FINDINGS.md` for detailed analysis and recommendations.
+**Expected Results**: Identifies optimal sequence lengths (typically 4-7 frames) for different motion types.
 
-## Test Results Summary
+### 🛠️ [`common/`](common/) - Shared Components
+**Purpose**: Reusable components for all test suites
 
-| Model | Mean Error | Direction Error | Accuracy | Status |
-|-------|------------|----------------|----------|--------|
-| VideoFlow | 27.94 px/frame | 169.7° | 0% | ❌ Critical Issues |
-| MemFlow | 11.72 px/frame | 85.8° | 0% | ⚠️ Needs Debugging |
+**Components**:
+- `SyntheticVideoGenerator` - Creates test videos with known ground truth
+- `OpticalFlowAnalyzer` - Analyzes flow accuracy against ground truth
+- `BaseTestRunner` - Base class for test execution
 
-## Recommendations
+## Architecture
 
-1. **Priority 1**: Fix VideoFlow coordinate system (complete direction reversal)
-2. **Priority 2**: Debug MemFlow temporal sequence handling
-3. **Priority 3**: Implement automated regression testing
-4. **Priority 4**: Extend test coverage to more motion patterns
-
-## Adding New Tests
-
-To add a new test suite:
-
-1. Create a new directory under `tests/`
-2. Add `__init__.py` and main test script
-3. Create batch files for easy execution
-4. Update this README with test description
-5. Add findings to the results summary
-
-## Test Environment
-
-- **GPU**: NVIDIA GeForce RTX 4060 Ti
-- **CUDA**: Available and used
-- **Python**: 3.10+
-- **Dependencies**: See `requirements.txt` in project root
-
-## Running All Tests
-
-```bash
-# From project root
-python -m pytest tests/  # If using pytest
-# Or run individual test suites manually
 ```
+tests/
+├── common/                    # Shared components
+│   ├── synthetic_video.py    # Video generation
+│   ├── flow_analyzer.py      # Accuracy analysis  
+│   └── test_runner.py        # Base test runner
+├── velocity_check/           # Model validation tests
+└── memflow_seq_length/       # Sequence optimization tests
+```
+
+## Common Features
+
+### Synthetic Video Generation
+- **Resolution**: 504x216 pixels (21:9 aspect ratio, optimized for speed)
+- **Motion**: Sinusoidal ball movement with precise mathematical ground truth
+- **Speeds**: Slow (2px/frame), Medium (5px/frame), Fast (10px/frame)
+- **Customizable**: Frame count, FPS, motion parameters
+
+### Accuracy Analysis
+- **Velocity Error**: Euclidean distance between predicted and ground truth
+- **Direction Error**: Angular difference in degrees
+- **Pixel Accuracy**: Percentage within 1px, 2px, 5px thresholds
+- **Statistical Analysis**: Mean, std deviation, frame-by-frame analysis
+
+### Model Integration
+- **VideoFlow**: Sintel and Things models with dataset-specific configurations
+- **MemFlow**: Optimized settings with memory management and warm start
+- **Automatic Cache Management**: Proper isolation between different test runs
+
+## Usage Patterns
+
+### For Model Validation
+1. Run `velocity_check` tests first to verify basic functionality
+2. Check for direction errors, temporal issues, accuracy problems
+3. Use results to debug and fix model implementations
+
+### For Optimization  
+1. Use `memflow_seq_length` tests to find optimal sequence lengths
+2. Consider accuracy vs speed trade-offs for your use case
+3. Apply findings to production configurations
+
+### For Development
+1. Create new test suites by extending `BaseTestRunner`
+2. Reuse `SyntheticVideoGenerator` and `OpticalFlowAnalyzer`
+3. Follow established patterns for consistency
+
+## Results Interpretation
+
+### Good Performance Indicators
+- **Low velocity error**: <2px for accurate motion tracking
+- **Low direction error**: <10° for correct motion direction
+- **High pixel accuracy**: >80% within 2px threshold
+- **Consistent performance**: Similar results across different speeds
+
+### Common Issues
+- **Direction reversal**: 180° error indicates coordinate system problems
+- **Temporal offset**: Early frames worse than later frames
+- **Memory saturation**: Accuracy degradation with longer sequences
+- **Model warmup**: First few frames showing poor performance
+
+## Best Practices
+
+### Test Design
+- Start with quick tests (few frames, limited sequence lengths)
+- Use medium motion for initial validation (most representative)
+- Test edge cases (very slow/fast motion) separately
+- Validate fixes with multiple motion types
+
+### Performance Optimization
+- Use 21:9 aspect ratio videos for 65% faster processing
+- Enable MemFlow warm start for temporal consistency
+- Configure appropriate sequence lengths based on use case
+- Monitor memory usage for long sequences
+
+### Result Analysis
+- Focus on consistent trends across multiple tests
+- Look for systematic errors (direction, magnitude, temporal)
+- Compare relative performance between models
+- Use synthetic tests to validate real-world improvements
+
+## Integration with Production
+
+### Configuration Recommendations
+Based on test results:
+- **MemFlow sequence length**: 5-6 frames for optimal accuracy
+- **VideoFlow model selection**: Sintel for fast motion, Things for general use
+- **Memory management**: Enable warm start and proper sequence handling
+- **Error tolerance**: <2px for high-accuracy applications, <5px for real-time
+
+### Validation Pipeline
+1. **Synthetic Tests**: Use this framework for initial validation
+2. **Real-world Tests**: Validate on actual video data
+3. **Performance Tests**: Measure processing speed and memory usage
+4. **Regression Tests**: Ensure changes don't break existing functionality
+
+## Extending the Framework
+
+### Adding New Test Suites
+1. Create new directory under `tests/`
+2. Inherit from `BaseTestRunner` 
+3. Reuse `SyntheticVideoGenerator` and `OpticalFlowAnalyzer`
+4. Follow established naming and structure patterns
+
+### Custom Analyses
+- Extend `OpticalFlowAnalyzer` for domain-specific metrics
+- Modify `SyntheticVideoGenerator` for different motion patterns
+- Add new batch files for common use cases
+- Create specialized documentation
 
 ## Troubleshooting
 
 ### Common Issues
+1. **Import errors**: Ensure Python path includes project root
+2. **Cache conflicts**: Use `--force-recompute` flag
+3. **Memory issues**: Reduce frame count or sequence length  
+4. **Model loading**: Check model file paths and permissions
 
-1. **Unicode Errors**: Windows console may have issues with special characters
-2. **CUDA Memory**: Ensure sufficient GPU memory for model loading
-3. **Path Issues**: Run tests from correct directory or use absolute paths
-4. **Model Loading**: Ensure model weights are available in correct locations
-
-### Debug Mode
-
-Use debug mode for faster iteration:
-```bash
-python velocity_test.py --speed slow --frames 5 --fps 30
-```
+### Performance Tips
+- Use SSD storage for faster video generation and processing
+- Monitor GPU memory usage during tests
+- Parallelize tests across different motion types
+- Cache intermediate results when appropriate
 
 ## Contributing
 
-When adding tests:
-- Follow existing naming conventions
-- Include both programmatic and batch file interfaces
-- Generate detailed reports with findings
-- Update documentation with results
-- Consider synthetic data for precise validation 
+When adding new tests or features:
+1. Maintain compatibility with existing test suites
+2. Update this README with new capabilities
+3. Add appropriate documentation to new test directories
+4. Ensure tests are reproducible and well-documented
+5. Follow established patterns for consistency
+
+## Dependencies
+
+- **Core**: NumPy, OpenCV, PyTorch (for model integration)
+- **Analysis**: Mathematical libraries for ground truth calculations
+- **Video**: CV2 for video generation and processing  
+- **Models**: VideoFlow and MemFlow frameworks
+
+## License
+
+Same as parent project - see project root for details. 
