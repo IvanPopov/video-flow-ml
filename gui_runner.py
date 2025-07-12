@@ -154,7 +154,6 @@ class FlowRunnerApp(QWidget):
         self.total_frames = 0
         self.fps = 0
         self.video_thread = None
-        self.process_thread = None
         
         # Import and create instance only when needed
         self.flow_processor_instance = None
@@ -1940,7 +1939,7 @@ class FlowRunnerApp(QWidget):
         
         InfoBar.info(
             title="Interactive Mode",
-            content="Starting interactive flow visualizer in PowerShell",
+            content="Starting interactive flow visualizer in new console",
             orient=Qt.Orientation.Horizontal,
             isClosable=True,
             duration=2000,
@@ -1948,8 +1947,9 @@ class FlowRunnerApp(QWidget):
             parent=self
         )
         
-        # Run interactive command in separate PowerShell window
-        ps_command = f'Write-Host "Starting Interactive Flow Visualizer..." -ForegroundColor Green; Write-Host "Command: {command}" -ForegroundColor Yellow; Write-Host ""; {command}; Write-Host ""; Write-Host "Interactive session completed. Press any key to close..." -ForegroundColor Green; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")'
+        # Run interactive command in new console window, but use same Python environment
+        current_python = sys.executable
+        ps_command = f'Write-Host "Starting Interactive Flow Visualizer..." -ForegroundColor Green; Write-Host "Command: {command}" -ForegroundColor Yellow; Write-Host ""; & "{current_python}" {command.split("python", 1)[1]}; Write-Host ""; Write-Host "Interactive session completed. Press any key to close..." -ForegroundColor Green; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")'
         subprocess.Popen([
             'powershell.exe', 
             '-Command', 
@@ -1973,7 +1973,7 @@ class FlowRunnerApp(QWidget):
         
         InfoBar.info(
             title="Processing Started",
-            content="Processing started in separate PowerShell window",
+            content="Processing started in new console",
             orient=Qt.Orientation.Horizontal,
             isClosable=True,
             duration=3000,
@@ -1981,8 +1981,9 @@ class FlowRunnerApp(QWidget):
             parent=self
         )
         
-        # Run processing in separate PowerShell window
-        ps_command = f'Write-Host "Starting VideoFlow processing..." -ForegroundColor Green; Write-Host "Command: {command}" -ForegroundColor Yellow; Write-Host ""; {command}; Write-Host ""; Write-Host "Processing completed. Press any key to close..." -ForegroundColor Green; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")'
+        # Run processing in new console window, but use same Python environment
+        current_python = sys.executable
+        ps_command = f'Write-Host "Starting VideoFlow processing..." -ForegroundColor Green; Write-Host "Command: {command}" -ForegroundColor Yellow; Write-Host ""; & "{current_python}" {command.split("python", 1)[1]}; Write-Host ""; Write-Host "Processing completed. Press any key to close..." -ForegroundColor Green; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")'
         subprocess.Popen([
             'powershell.exe', 
             '-Command', 
@@ -2004,10 +2005,6 @@ class FlowRunnerApp(QWidget):
         if self.video_thread and self.video_thread.isRunning():
             self.video_thread.quit()
             self.video_thread.wait()
-        
-        if self.process_thread and self.process_thread.isRunning():
-            self.process_thread.quit()
-            self.process_thread.wait()
         
         event.accept()
 
