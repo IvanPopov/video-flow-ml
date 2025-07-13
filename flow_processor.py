@@ -72,8 +72,10 @@ class VideoFlowProcessor:
                 model_path=model_path,
                 enable_long_term=enable_long_term
             )
+            # For MemFlow, the actual model path will be determined by the core
+            # We'll show a placeholder here and update it after model loading
             model_path_display = model_path or f'MemFlow_ckpt/MemFlowNet_{stage}.pth'
-            print(f"Using MemFlow model: {model_path_display}")
+            print(f"Using MemFlow model: {model_path_display} (will be auto-selected)")
             if enable_long_term:
                 print(f"Long-term memory: ENABLED")
             else:
@@ -133,6 +135,10 @@ class VideoFlowProcessor:
     def load_model(self):
         """Load optical flow model (VideoFlow or MemFlow)"""
         self.inference_engine.load_model()
+        
+        # For MemFlow, show the actual loaded model path
+        if self.flow_model == 'memflow' and hasattr(self.inference_engine, 'model_path'):
+            print(f"MemFlow model actually loaded: {self.inference_engine.model_path}")
         
     def load_videoflow_model(self):
         """Load VideoFlow MOF model (legacy method - use load_model instead)"""

@@ -37,7 +37,7 @@ class MemFlowProcessor(BaseFlowProcessor):
     
     def __init__(self, device: str = 'cuda', fast_mode: bool = False, tile_mode: bool = False,
                  sequence_length: int = 3, stage: str = 'sintel', model_path: str = None, 
-                 enable_long_term: bool = False, **kwargs):
+                 enable_long_term: bool = False, quality_preset: str = None, **kwargs):
         """
         Initialize MemFlow processor
         
@@ -49,6 +49,7 @@ class MemFlowProcessor(BaseFlowProcessor):
             stage: Training stage/dataset ('sintel', 'things', 'kitti')
             model_path: Custom path to model weights
             enable_long_term: Enable long-term memory (default: False)
+            quality_preset: Quality preset ('fast', 'balanced', 'high_quality', 'maximum_quality') or None for original settings
             **kwargs: Additional configuration parameters
         """
         super().__init__(device, fast_mode, tile_mode, sequence_length, **kwargs)
@@ -56,9 +57,11 @@ class MemFlowProcessor(BaseFlowProcessor):
         self.stage = stage
         self.model_path = model_path
         self.enable_long_term = enable_long_term
+        self.quality_preset = quality_preset
         
         # Initialize core inference engine with model configuration
-        self.core = MemFlowCore(device, fast_mode, stage, model_path, enable_long_term)
+        # Pass None for model_path to let MemFlowCore auto-select the best model
+        self.core = MemFlowCore(device, fast_mode, stage, None, enable_long_term, quality_preset)
         
         print(f"MemFlow Processor initialized:")
         print(f"  Device: {device}")
@@ -66,13 +69,18 @@ class MemFlowProcessor(BaseFlowProcessor):
         print(f"  Tile mode: {tile_mode} (note: not implemented for MemFlow)")
         print(f"  Sequence length: {sequence_length}")
         print(f"  Stage: {stage}")
-        print(f"  Model path: {model_path or f'MemFlow_ckpt/MemFlowNet_{stage}.pth'}")
+        # Get the actual model path that will be used (auto-selected by core)
+        actual_model_path = model_path or f'MemFlow_ckpt/MemFlowNet_{stage}.pth'
+        print(f"  Model path: {actual_model_path} (will be auto-selected)")
         print(f"  Long-term memory: {'Enabled' if enable_long_term else 'Disabled'}")
+        print(f"  Quality preset: {quality_preset or 'None (Original settings)'}")
     
     def load_model(self):
         """Load MemFlow model using core engine"""
         model_path = self.core.load_model()
         print(f"MemFlow model loaded successfully from: {model_path}")
+        # Update the model path to reflect the actual loaded model
+        self.model_path = model_path
     
     def prepare_frame_sequence(self, frames: List[np.ndarray], frame_idx: int) -> torch.Tensor:
         """
@@ -192,6 +200,7 @@ class MemFlowProcessor(BaseFlowProcessor):
                 "stage": self.stage,
                 "model_path": self.model_path,
                 "enable_long_term": self.enable_long_term,
+                "quality_preset": self.quality_preset,
                 "note": "Tile mode not supported for MemFlow"
             })
         return info

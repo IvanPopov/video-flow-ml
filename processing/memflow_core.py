@@ -25,6 +25,85 @@ from typing import Dict, Any
 from .base_flow_processor import BaseFlowCore
 
 
+# ============================================================================
+# QUALITY PRESETS FOR MEMFLOW
+# ============================================================================
+
+# Available quality presets
+QUALITY_PRESETS = {
+    'fast': {
+        'name': 'Fast',
+        'description': 'Fastest processing, lower quality',
+        'val_decoder_depth': 6,
+        'corr_levels': 3,
+        'corr_radius': 3,
+        'feat_dim': 128,
+        'down_ratio': 10,
+        'max_mid_term_frames': 2,
+        'min_mid_term_frames': 1,
+        'num_prototypes': 64,
+        'add_pe': False,
+        'attention_scale_factor': 1.0,
+        'flow_smoothing': False,
+        'outlier_filtering': False
+    },
+    
+    'balanced': {
+        'name': 'Balanced',
+        'description': 'Good balance between speed and quality',
+        'val_decoder_depth': 10,
+        'corr_levels': 5,
+        'corr_radius': 5,
+        'feat_dim': 384,
+        'down_ratio': 7,
+        'max_mid_term_frames': 3,
+        'min_mid_term_frames': 2,
+        'num_prototypes': 192,
+        'add_pe': True,
+        'attention_scale_factor': 1.25,
+        'flow_smoothing': True,
+        'outlier_filtering': False
+    },
+    
+    'high_quality': {
+        'name': 'High Quality',
+        'description': 'High quality processing, slower',
+        'val_decoder_depth': 12,
+        'corr_levels': 6,
+        'corr_radius': 6,
+        'feat_dim': 512,
+        'down_ratio': 6,
+        'max_mid_term_frames': 4,
+        'min_mid_term_frames': 2,
+        'num_prototypes': 256,
+        'add_pe': True,
+        'attention_scale_factor': 1.5,
+        'flow_smoothing': True,
+        'outlier_filtering': True
+    },
+    
+    'maximum_quality': {
+        'name': 'Maximum Quality',
+        'description': 'Maximum quality, very slow',
+        'val_decoder_depth': 15,
+        'corr_levels': 8,
+        'corr_radius': 8,
+        'feat_dim': 512,
+        'down_ratio': 4,
+        'max_mid_term_frames': 6,
+        'min_mid_term_frames': 3,
+        'num_prototypes': 512,
+        'add_pe': True,
+        'attention_scale_factor': 2.0,
+        'flow_smoothing': True,
+        'outlier_filtering': True
+    }
+}
+
+# Default quality preset (None means use original config settings)
+DEFAULT_QUALITY_PRESET = 'maximum_quality'
+
+
 class MemFlowCore(BaseFlowCore):
     """
     Core MemFlow inference engine for optical flow computation
@@ -45,7 +124,8 @@ class MemFlowCore(BaseFlowCore):
     """
     
     def __init__(self, device: str, fast_mode: bool = False, stage: str = 'sintel', 
-                 model_path: str = None, enable_long_term: bool = False, **kwargs):
+                 model_path: str = None, enable_long_term: bool = False, 
+                 quality_preset: str = DEFAULT_QUALITY_PRESET, **kwargs):
         """
         Initialize MemFlow core engine
         
@@ -55,6 +135,7 @@ class MemFlowCore(BaseFlowCore):
             stage: Training stage/dataset ('sintel', 'things', 'kitti')
             model_path: Custom path to model weights
             enable_long_term: Enable long-term memory (default: False)
+            quality_preset: Quality preset ('fast', 'balanced', 'high_quality', 'maximum_quality')
             **kwargs: Additional configuration parameters
         """
         super().__init__(device, fast_mode, **kwargs)
@@ -62,12 +143,31 @@ class MemFlowCore(BaseFlowCore):
         self.stage = stage
         self.model_path = model_path
         self.enable_long_term = enable_long_term
+        self.quality_preset = quality_preset
         self.processor = None
         self.InputPadder = None
         
+        # Validate quality preset
+        if quality_preset is not None and quality_preset not in QUALITY_PRESETS:
+            print(f"[MemFlow Core] Warning: Unknown quality preset '{quality_preset}'. Using original config settings.")
+            self.quality_preset = None
+        
+        # Auto-apply maximum quality preset for things + long-term memory combination
+        if self.stage == 'things' and self.enable_long_term and self.quality_preset is None:
+            self.quality_preset = 'maximum_quality'
+            print(f"[MemFlow Core] Auto-applied maximum quality preset for things + long-term memory combination")
+        
+        # Get preset configuration (None if no preset)
+        self.preset_config = QUALITY_PRESETS.get(self.quality_preset, None)
+        
         # Generate default model path if not provided
         if self.model_path is None:
-            self.model_path = f'MemFlow_ckpt/MemFlowNet_{stage}.pth'
+            # Auto-select Twins model for things + long-term memory combination
+            if self.stage == 'things' and self.enable_long_term:
+                self.model_path = 'MemFlow_ckpt/MemFlowNet_T_things.pth'
+                print(f"[MemFlow Core] Auto-selected Twins model for things + long-term memory: {self.model_path}")
+            else:
+                self.model_path = f'MemFlow_ckpt/MemFlowNet_{stage}.pth'
     
     def load_model(self) -> str:
         """Load MemFlow model with original approach"""
@@ -196,7 +296,12 @@ class MemFlowCore(BaseFlowCore):
             if self.stage == 'sintel':
                 from configs.sintel_memflownet import get_cfg
             elif self.stage == 'things':
-                from configs.things_memflownet import get_cfg
+                # Use Twins configuration for things + long-term memory combination
+                if self.enable_long_term and 'MemFlowNet_T_things.pth' in self.model_path:
+                    from configs.things_memflownet_t import get_cfg
+                    print(f"[MemFlow Core] Using Twins configuration for things + long-term memory")
+                else:
+                    from configs.things_memflownet import get_cfg
             elif self.stage == 'kitti':
                 from configs.kitti_memflownet import get_cfg
             else:
@@ -218,9 +323,13 @@ class MemFlowCore(BaseFlowCore):
                 self.cfg.enable_long_term = False
                 print(f"[MemFlow Core] Long-term memory disabled (default)")
             
-            # Adjust decoder depth for better speed/accuracy trade-off
-            # Reduce from 15 to 8 for faster inference while maintaining quality
-            self.cfg.val_decoder_depth = 8
+            # Apply quality preset settings if specified
+            if self.preset_config is not None:
+                self._apply_quality_preset()
+                print(f"[MemFlow Core] Applied quality preset: {self.preset_config['name']}")
+                print(f"  Description: {self.preset_config['description']}")
+            else:
+                print(f"[MemFlow Core] Using original config settings (no quality preset)")
             
             # Build and load model
             self.model = build_network(self.cfg).to(self.device)
@@ -261,6 +370,71 @@ class MemFlowCore(BaseFlowCore):
                     with open(memory_manager_path, 'w') as f:
                         f.write(self._original_memory_manager_content)
                     print("[MemFlow Core] Restored original memory manager file")
+    
+    def _apply_quality_preset(self):
+        """Apply quality preset settings to configuration"""
+        if self.preset_config is None:
+            print(f"[MemFlow Core] No quality preset specified, using original config settings")
+            # Set default values for inference
+            self.add_pe = False
+            return
+            
+        preset = self.preset_config
+        
+        # Apply decoder depth
+        self.cfg.val_decoder_depth = preset['val_decoder_depth']
+        
+        # Apply correlation settings
+        self.cfg.corr_levels = preset['corr_levels']
+        self.cfg.corr_radius = preset['corr_radius']
+        
+        # Apply feature dimension
+        self.cfg.feat_dim = preset['feat_dim']
+        
+        # Apply down ratio
+        self.cfg.down_ratio = preset['down_ratio']
+        
+        # Apply memory settings
+        self.cfg.max_mid_term_frames = preset['max_mid_term_frames']
+        self.cfg.min_mid_term_frames = preset['min_mid_term_frames']
+        self.cfg.num_prototypes = preset['num_prototypes']
+        
+        # Apply attention settings
+        self.cfg.attention_scale_factor = preset['attention_scale_factor']
+        
+        # Apply post-processing settings
+        self.cfg.flow_smoothing = preset['flow_smoothing']
+        self.cfg.outlier_filtering = preset['outlier_filtering']
+        
+        # Store additional settings for use in inference
+        self.add_pe = preset['add_pe']
+        
+        # Twins-specific optimizations for things + long-term memory combination
+        if self.stage == 'things' and self.enable_long_term and 'MemFlowNet_T_things.pth' in self.model_path:
+            # Twins-specific optimizations
+            self.cfg.decoder_depth = 15  # Увеличить с 12 до 15
+            self.cfg.max_long_term_elements = 20000  # Увеличить память
+            self.cfg.mixed_precision = False  # Отключить для точности
+            self.cfg.rope = True  # Включить Rotary PE
+            self.cfg.warm_start = True  # Включить warm start
+            
+            print(f"[MemFlow Core] Twins-specific optimizations applied:")
+            print(f"  Decoder depth: {self.cfg.decoder_depth}")
+            print(f"  Max long-term elements: {self.cfg.max_long_term_elements}")
+            print(f"  Mixed precision: {self.cfg.mixed_precision}")
+            print(f"  Rotary PE: {self.cfg.rope}")
+            print(f"  Warm start: {self.cfg.warm_start}")
+        
+        print(f"[MemFlow Core] Quality settings applied:")
+        print(f"  Decoder depth: {preset['val_decoder_depth']}")
+        print(f"  Correlation levels: {preset['corr_levels']}, radius: {preset['corr_radius']}")
+        print(f"  Feature dimension: {preset['feat_dim']}")
+        print(f"  Down ratio: {preset['down_ratio']}")
+        print(f"  Memory frames: {preset['min_mid_term_frames']}-{preset['max_mid_term_frames']}")
+        print(f"  Prototypes: {preset['num_prototypes']}")
+        print(f"  Position encoding: {preset['add_pe']}")
+        print(f"  Flow smoothing: {preset['flow_smoothing']}")
+        print(f"  Outlier filtering: {preset['outlier_filtering']}")
     
     def compute_flow_from_tensor(self, frame_batch_tensor: torch.Tensor) -> torch.Tensor:
         """
@@ -349,7 +523,7 @@ class MemFlowCore(BaseFlowCore):
                     frame_pair, 
                     end=is_end, 
                     flow_init=flow_prev,
-                    add_pe=False  # Disable positional encoding for now
+                    add_pe=self.add_pe  # Use preset setting for positional encoding
                 )
                 
                 # Store the final flow (from the last frame pair)
@@ -386,6 +560,9 @@ class MemFlowCore(BaseFlowCore):
                 "model_path": self.model_path,
                 "architecture": "MemFlow",
                 "framework": "MemFlow",
-                "enable_long_term": self.enable_long_term
+                "enable_long_term": self.enable_long_term,
+                "quality_preset": self.quality_preset,
+                "quality_preset_name": self.preset_config['name'] if self.preset_config else "None (Original)",
+                "quality_preset_description": self.preset_config['description'] if self.preset_config else "Using original config settings"
             })
         return info 
