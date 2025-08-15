@@ -57,8 +57,12 @@ class SyntheticVideoGenerator:
         self.height = height
         self.fps = fps
         self.ball_radius = 20
-        self.ball_color = (255, 255, 255)  # White ball
-        self.bg_color = (64, 64, 64)       # Dark gray background
+        
+        # Use colors that are more compatible with natural scene training
+        # Sintel: natural outdoor scenes (earthy tones work well)
+        # Things: diverse objects (neutral colors work best)
+        self.bg_color = (85, 95, 105)          # Neutral gray-blue background
+        self.ball_color = (180, 150, 120)      # Natural brown/tan ball
         
         # Motion parameters (will be set based on speed)
         self.max_velocity = 0.0  # pixels per frame
@@ -153,15 +157,15 @@ class SyntheticVideoGenerator:
             # Calculate ball position and velocity
             x_pos, y_pos, x_vel, y_vel = self.calculate_position_and_velocity(frame_idx, total_frames)
             
-            # Create frame
+            # Create simple but well-colored frame
             frame = np.full((self.height, self.width, 3), self.bg_color, dtype=np.uint8)
             
-            # Draw ball
+            # Draw ball with simple anti-aliasing
             cv2.circle(frame, (int(x_pos), int(y_pos)), self.ball_radius, self.ball_color, -1)
             
-            # Add slight anti-aliasing for smoother motion
-            cv2.circle(frame, (int(x_pos), int(y_pos)), self.ball_radius + 1, 
-                      (self.ball_color[0]//2, self.ball_color[1]//2, self.ball_color[2]//2), 1)
+            # Light anti-aliasing border
+            border_color = tuple((self.ball_color[i] + self.bg_color[i]) // 2 for i in range(3))
+            cv2.circle(frame, (int(x_pos), int(y_pos)), self.ball_radius + 1, border_color, 1)
             
             # Write frame
             writer.write(frame)
@@ -378,7 +382,7 @@ class VelocityTestRunner(BaseTestRunner):
         """Initialize velocity test runner"""
         super().__init__(test_dir, project_root)
     
-    def run_flow_processor(self, input_video: str, output_dir: str, model: str, frames: int, dataset: str = 'sintel') -> str:
+    def run_flow_processor(self, input_video: str, output_dir: str, model: str, frames: int, sequence_length: int = 5, dataset: str = 'sintel') -> str:
         """
         Run optical flow processor
         
@@ -387,6 +391,8 @@ class VelocityTestRunner(BaseTestRunner):
             output_dir: Directory for output
             model: Model name ('videoflow' or 'memflow')
             frames: Number of frames to process
+            sequence_length: Sequence length for processing
+            dataset: Dataset for model configuration ('sintel', 'things', 'things_noise' for VideoFlow; 'sintel', 'things', 'kitti' for MemFlow)
             
         Returns:
             Path to flow cache directory
@@ -405,12 +411,29 @@ class VelocityTestRunner(BaseTestRunner):
             '--model', model,
             '--flow-format', 'motion-vectors-rg8',
             '--save-flow', 'npz',
-            '--force-recompute'
+            '--force-recompute',
+            '--sequence-length', str(sequence_length)
         ]
         
-        # Add dataset parameter for VideoFlow
+        # Add model-specific parameters
         if model == 'videoflow':
-            cmd.extend(['--vf-dataset', dataset])
+            # Handle things_noise variant
+            if dataset == 'things_noise':
+                cmd.extend(['--vf-dataset', 'things'])
+                cmd.extend(['--vf-variant', 'noise'])
+            else:
+                cmd.extend(['--vf-dataset', dataset])
+        elif model == 'memflow':
+            # MemFlow uses 'stage' parameter instead of 'dataset'
+            # Map dataset names to stage names
+            stage_map = {
+                'sintel': 'sintel',
+                'things': 'things', 
+                'things_noise': 'things',  # Use things stage for noise variant
+                'kitti': 'kitti'
+            }
+            stage = stage_map.get(dataset, 'sintel')
+            cmd.extend(['--stage', stage])
         
         print(f"Running optical flow processor with {model}...")
         print(f"Command: {' '.join(cmd)}")
@@ -443,9 +466,23 @@ class VelocityTestRunner(BaseTestRunner):
                     # Check if cache matches the input video name
                     if cache_base not in item:
                         continue
-                    # For VideoFlow, also check dataset match
-                    if model == 'videoflow' and dataset not in item:
-                        continue
+                    # For VideoFlow, check dataset match (including noise variant)
+                    if model == 'videoflow':
+                        if dataset == 'things_noise' and 'things' not in item:
+                            continue
+                        elif dataset != 'things_noise' and dataset not in item:
+                            continue
+                    # For MemFlow, check stage match
+                    elif model == 'memflow':
+                        stage_map = {
+                            'sintel': 'sintel',
+                            'things': 'things', 
+                            'things_noise': 'things',
+                            'kitti': 'kitti'
+                        }
+                        expected_stage = stage_map.get(dataset, 'sintel')
+                        if expected_stage not in item:
+                            continue
                     # Check if frames parameter matches (for more precise cache matching)
                     if f'frames{frames}' in item:
                         cache_dir = item_path
@@ -465,6 +502,108 @@ class VelocityTestRunner(BaseTestRunner):
                     print(f"    - {item}")
             
             # Show flow processor output for debugging
+            if result.returncode != 0:
+                print(f"Flow processor STDOUT:")
+                print(result.stdout[-500:] if len(result.stdout) > 500 else result.stdout)
+                print(f"Flow processor STDERR:")
+                print(result.stderr[-500:] if len(result.stderr) > 500 else result.stderr)
+            
+            raise RuntimeError(f"Could not find flow cache directory for {model}")
+        
+        print(f"Flow cache directory: {cache_dir}")
+        return cache_dir
+    
+    def run_flow_processor_with_long_term(self, input_video: str, output_dir: str, model: str, frames: int, sequence_length: int = 5, dataset: str = 'sintel') -> str:
+        """
+        Run optical flow processor with long-term memory enabled (for MemFlow)
+        
+        Args:
+            input_video: Path to input video
+            output_dir: Directory for output  
+            model: Model name ('memflow')
+            frames: Number of frames to process
+            sequence_length: Sequence length for processing
+            dataset: Dataset for model configuration
+            
+        Returns:
+            Path to flow cache directory
+        """
+        # Construct command
+        flow_processor_script = os.path.join(self.project_root, 'flow_processor.py')
+        
+        cmd = [
+            sys.executable, flow_processor_script,
+            '--input', input_video,
+            '--output', output_dir,
+            '--flow-only',
+            '--skip-lods',
+            '--start-frame', '0',
+            '--frames', str(frames),
+            '--model', model,
+            '--flow-format', 'motion-vectors-rg8',
+            '--save-flow', 'npz',
+            '--force-recompute',
+            '--sequence-length', str(sequence_length),
+            '--enable-long-term'  # Enable long-term memory for better performance
+        ]
+        
+        # Add MemFlow stage parameter
+        stage_map = {
+            'sintel': 'sintel',
+            'things': 'things', 
+            'things_noise': 'things',
+            'kitti': 'kitti'
+        }
+        stage = stage_map.get(dataset, 'sintel')
+        cmd.extend(['--stage', stage])
+        
+        print(f"Running optical flow processor with {model} (long-term enabled)...")
+        print(f"Command: {' '.join(cmd)}")
+        
+        # Run command
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=self.project_root)
+        
+        if result.returncode != 0:
+            print(f"Flow processor finished with non-zero return code: {result.returncode}")
+            print(f"This may be due to Unicode issues in Windows console.")
+            print(f"Checking if flow cache was created anyway...")
+        
+        # Find the generated cache directory
+        cache_base = os.path.splitext(os.path.basename(input_video))[0]
+        search_dirs = [os.path.dirname(input_video), self.temp_dir]
+        
+        # Search for cache directory
+        cache_dir = None
+        for search_dir in search_dirs:
+            if not os.path.exists(search_dir):
+                continue
+            for item in os.listdir(search_dir):
+                item_path = os.path.join(search_dir, item)
+                if os.path.isdir(item_path) and 'flow_cache' in item and model in item:
+                    # Check if cache matches the input video name
+                    if cache_base not in item:
+                        continue
+                    # For MemFlow, check stage match and long-term indicator
+                    expected_stage = stage_map.get(dataset, 'sintel')
+                    if expected_stage not in item:
+                        continue
+                    # Check if frames parameter matches
+                    if f'frames{frames}' in item:
+                        cache_dir = item_path
+                        break
+                    elif cache_dir is None:
+                        cache_dir = item_path
+            if cache_dir:
+                break
+        
+        if cache_dir is None:
+            print(f"Could not find flow cache directory for {model}")
+            print(f"  Searched directories: {search_dirs}")
+            if os.path.exists(self.temp_dir):
+                print(f"  Items in temp directory:")
+                for item in os.listdir(self.temp_dir):
+                    print(f"    - {item}")
+            
             if result.returncode != 0:
                 print(f"Flow processor STDOUT:")
                 print(result.stdout[-500:] if len(result.stdout) > 500 else result.stdout)
@@ -511,30 +650,30 @@ class VelocityTestRunner(BaseTestRunner):
         print("\n--- Step 2: Running optical flow processors ---")
         
         # Initialize cache variables
-        videoflow_sintel_cache = None
         videoflow_things_cache = None
+        videoflow_things_noise_cache = None
         memflow_cache = None
         
         if not memflow_only:
-            # Run VideoFlow with Sintel model
-            try:
-                videoflow_sintel_cache = self.run_flow_processor(video_file, self.temp_dir, 'videoflow', frames, 5, 'sintel')
-            except Exception as e:
-                print(f"VideoFlow (Sintel) processing failed: {e}")
-                videoflow_sintel_cache = None
-            
-            # Run VideoFlow with Things model
+            # Run VideoFlow with Things model (standard)
             try:
                 videoflow_things_cache = self.run_flow_processor(video_file, self.temp_dir, 'videoflow', frames, 5, 'things')
             except Exception as e:
                 print(f"VideoFlow (Things) processing failed: {e}")
                 videoflow_things_cache = None
+            
+            # Run VideoFlow with Things + Noise model (more robust)
+            try:
+                videoflow_things_noise_cache = self.run_flow_processor(video_file, self.temp_dir, 'videoflow', frames, 5, 'things_noise')
+            except Exception as e:
+                print(f"VideoFlow (Things + Noise) processing failed: {e}")
+                videoflow_things_noise_cache = None
         else:
             print("Skipping VideoFlow tests (--memflow-only flag enabled)")
         
-        # Run MemFlow
+        # Run MemFlow with Things dataset configuration and long-term memory
         try:
-            memflow_cache = self.run_flow_processor(video_file, self.temp_dir, 'memflow', frames, 5)
+            memflow_cache = self.run_flow_processor_with_long_term(video_file, self.temp_dir, 'memflow', frames, 5, 'things')
         except Exception as e:
             print(f"MemFlow processing failed: {e}")
             memflow_cache = None
@@ -556,16 +695,7 @@ class VelocityTestRunner(BaseTestRunner):
             'models': {}
         }
         
-        # Analyze VideoFlow Sintel
-        if videoflow_sintel_cache:
-            try:
-                vf_sintel_results = analyzer.analyze_flow_accuracy(videoflow_sintel_cache, 'VideoFlow (Sintel)')
-                results['models']['videoflow_sintel'] = vf_sintel_results
-            except Exception as e:
-                print(f"VideoFlow (Sintel) analysis failed: {e}")
-                results['models']['videoflow_sintel'] = {'error': str(e)}
-        
-        # Analyze VideoFlow Things
+        # Analyze VideoFlow Things (standard)
         if videoflow_things_cache:
             try:
                 vf_things_results = analyzer.analyze_flow_accuracy(videoflow_things_cache, 'VideoFlow (Things)')
@@ -574,10 +704,19 @@ class VelocityTestRunner(BaseTestRunner):
                 print(f"VideoFlow (Things) analysis failed: {e}")
                 results['models']['videoflow_things'] = {'error': str(e)}
         
-        # Analyze MemFlow
+        # Analyze VideoFlow Things + Noise
+        if videoflow_things_noise_cache:
+            try:
+                vf_things_noise_results = analyzer.analyze_flow_accuracy(videoflow_things_noise_cache, 'VideoFlow (Things + Noise)')
+                results['models']['videoflow_things_noise'] = vf_things_noise_results
+            except Exception as e:
+                print(f"VideoFlow (Things + Noise) analysis failed: {e}")
+                results['models']['videoflow_things_noise'] = {'error': str(e)}
+        
+        # Analyze MemFlow with Things dataset
         if memflow_cache:
             try:
-                mf_results = analyzer.analyze_flow_accuracy(memflow_cache, 'MemFlow')
+                mf_results = analyzer.analyze_flow_accuracy(memflow_cache, 'MemFlow (Things)')
                 results['models']['memflow'] = mf_results
             except Exception as e:
                 print(f"MemFlow analysis failed: {e}")
@@ -600,11 +739,11 @@ class VelocityTestRunner(BaseTestRunner):
         print(f"{'='*80}")
         
         # Define model display order and names
-        model_order = ['videoflow_sintel', 'videoflow_things', 'memflow']
+        model_order = ['videoflow_things', 'videoflow_things_noise', 'memflow']
         model_display_names = {
-            'videoflow_sintel': 'VIDEOFLOW (SINTEL)',
-            'videoflow_things': 'VIDEOFLOW (THINGS)', 
-            'memflow': 'MEMFLOW'
+            'videoflow_things': 'VIDEOFLOW (THINGS)',
+            'videoflow_things_noise': 'VIDEOFLOW (THINGS + NOISE)',
+            'memflow': 'MEMFLOW (THINGS)'
         }
         
         for model_key in model_order:
