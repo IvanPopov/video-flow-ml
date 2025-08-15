@@ -1,0 +1,19 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+- All changes must be atomic and do exactly what was required
+- There is no need to create documentation and installation files unless explicitly requested.
+- Only English must be used everywhere, in names, comments and descriptions.
+- The project architecture should be modular; for each specific task, you need to create a separate module that does exactly that.
+- Each module should try to accept a separate set of data independent of other modules and return an equally independent set of data to ensure that the module can be reused in another project.
+- Each module should work with its own copy of the data so that it can be run in multithreaded mode and if this is not possible, then you need to create a large noticeable comment in the module description explaining that the module cannot work in multithreaded mode.
+- The main program or script should, if possible, contain only the part for orchestrating modules, but not the business logic itself.
+
+- After finishing work on some isolated feature, always offer to make a commit with the changes.
+- Try to keep the root directory clean and not create files in it, and keep all modules in one of the subfolders
+- Third party repositories should be used as submodules unless explicitly requested otherwise
+- Any project should start with GIT and if it is not there, a repo must be created
+
+- When moving functionality or files or modules from one place to another, always strictly ensure that the code is transferred without changes and clearly warn about any edits that need to be made.

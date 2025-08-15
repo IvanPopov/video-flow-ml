@@ -79,6 +79,10 @@ class SyntheticVideoGenerator:
         elif speed == 'fast':
             self.max_velocity = 10.0   # 10 pixels per frame
             self.motion_period = 60    # 2 seconds at 30fps
+        elif speed == 'constant':
+            # Constant high speed for temporal alignment testing
+            self.max_velocity = 16.0   # 16 pixels per frame (very fast but constant)
+            self.motion_period = float('inf')  # No period (constant motion)
         else:
             raise ValueError(f"Unknown speed: {speed}")
     
@@ -93,28 +97,48 @@ class SyntheticVideoGenerator:
         Returns:
             Tuple of (x_position, y_position, x_velocity, y_velocity)
         """
-        # Normalize time to [0, 1] over the video duration
-        t = frame_idx / (total_frames - 1)
-        
-        # Create sinusoidal motion with multiple cycles
-        cycles = total_frames / self.motion_period
-        phase = 2 * math.pi * cycles * t
-        
-        # Position: sinusoidal motion in X, centered in Y
-        center_x = self.width // 2
-        center_y = self.height // 2
-        
-        # Motion range (keep ball within frame bounds)
-        motion_range = self.width // 2 - self.ball_radius - 20
-        
-        x_pos = center_x + motion_range * math.sin(phase)
-        y_pos = center_y  # Keep Y position fixed for simpler analysis
-        
-        # Velocity: derivative of position
-        x_velocity = motion_range * math.cos(phase) * (2 * math.pi * cycles / (total_frames - 1))
-        y_velocity = 0.0  # No Y motion
-        
-        return x_pos, y_pos, x_velocity, y_velocity
+        if self.max_velocity == 16.0 and self.motion_period == float('inf'):
+            # Constant velocity motion for temporal alignment testing
+            center_y = self.height // 2
+            
+            # Start from left edge, move right at constant velocity
+            start_x = self.ball_radius + 10
+            x_pos = start_x + self.max_velocity * frame_idx
+            y_pos = center_y
+            
+            # Constant velocity
+            x_velocity = self.max_velocity
+            y_velocity = 0.0
+            
+            # Wrap around if ball goes off screen
+            if x_pos > self.width - self.ball_radius - 10:
+                cycles_completed = int((x_pos - start_x) / (self.width - 2 * self.ball_radius - 20))
+                x_pos = start_x + ((x_pos - start_x) % (self.width - 2 * self.ball_radius - 20))
+            
+            return x_pos, y_pos, x_velocity, y_velocity
+        else:
+            # Original sinusoidal motion
+            t = frame_idx / (total_frames - 1)
+            
+            # Create sinusoidal motion with multiple cycles
+            cycles = total_frames / self.motion_period
+            phase = 2 * math.pi * cycles * t
+            
+            # Position: sinusoidal motion in X, centered in Y
+            center_x = self.width // 2
+            center_y = self.height // 2
+            
+            # Motion range (keep ball within frame bounds)
+            motion_range = self.width // 2 - self.ball_radius - 20
+            
+            x_pos = center_x + motion_range * math.sin(phase)
+            y_pos = center_y  # Keep Y position fixed for simpler analysis
+            
+            # Velocity: derivative of position
+            x_velocity = motion_range * math.cos(phase) * (2 * math.pi * cycles / (total_frames - 1))
+            y_velocity = 0.0  # No Y motion
+            
+            return x_pos, y_pos, x_velocity, y_velocity
     
     def generate_video(self, output_path: str, total_frames: int, speed: str) -> Dict[str, Any]:
         """
@@ -373,6 +397,139 @@ class OpticalFlowAnalyzer:
         angle_deg = np.degrees(angle_rad)
         
         return angle_deg
+    
+    def analyze_temporal_alignment(self, cache_dir: str, model_name: str) -> Dict[str, Any]:
+        """
+        Analyze temporal alignment by checking if flow vectors correspond to wrong frame
+        
+        This method specifically tests the hypothesis that flow vectors are offset by one frame,
+        by comparing the percentage of pixels with incorrect velocities against the analytical
+        percentage of pixels that should have background velocity due to object movement.
+        
+        Args:
+            cache_dir: Directory containing flow cache
+            model_name: Name of the model (for reporting)
+            
+        Returns:
+            Dictionary with temporal alignment analysis results
+        """
+        print(f"\nAnalyzing temporal alignment for {model_name}...")
+        
+        total_frames = len(self.ground_truth['frames'])
+        
+        # Only analyze if we have constant motion (easier to detect temporal offset)
+        speed = self.ground_truth['video_info']['speed']
+        if speed != 'constant':
+            return {'error': 'Temporal alignment analysis only works with constant motion'}
+        
+        velocity = self.ground_truth['video_info']['max_velocity']
+        radius = self.ground_truth['frames'][0]['ball_radius']
+        
+        # Statistics for temporal alignment analysis
+        frame_analyses = []
+        
+        # We can analyze frames 1 to total_frames-2 (need previous and current frame data)
+        for frame_idx in range(1, total_frames - 1):
+            try:
+                # Load flow data for this frame
+                flow = self.load_flow_data(cache_dir, frame_idx)
+                
+                # Get ball positions and velocities
+                current_frame = self.ground_truth['frames'][frame_idx]
+                prev_frame = self.ground_truth['frames'][frame_idx - 1]
+                
+                current_center = current_frame['ball_center']
+                prev_center = prev_frame['ball_center']
+                gt_velocity = current_frame['ball_velocity']
+                
+                # Create masks for current and previous ball positions
+                current_mask = self.create_ball_mask(frame_idx, dilation=0)
+                prev_mask = self.create_ball_mask(frame_idx - 1, dilation=0)
+                
+                # Calculate analytical percentage of pixels that should show background velocity
+                # (pixels that were ball in previous frame but background in current frame)
+                
+                # Area that was ball in previous frame but not in current frame
+                exposed_bg_mask = prev_mask & ~current_mask
+                exposed_bg_pixels = np.sum(exposed_bg_mask)
+                
+                # Area that was background in previous frame but ball in current frame
+                covered_bg_mask = current_mask & ~prev_mask
+                covered_bg_pixels = np.sum(covered_bg_mask)
+                
+                # Total ball pixels in current frame
+                total_ball_pixels = np.sum(current_mask)
+                
+                # Analytical percentage of ball pixels that should have ~zero velocity
+                # (were background in previous frame, now covered by ball)
+                analytical_bg_percent = (covered_bg_pixels / total_ball_pixels) * 100 if total_ball_pixels > 0 else 0
+                
+                # Analyze flow vectors in current ball position
+                ball_flow = flow[current_mask]
+                
+                # Find pixels with velocities significantly different from ground truth
+                velocity_magnitudes = np.linalg.norm(ball_flow, axis=1)
+                gt_magnitude = np.linalg.norm(gt_velocity)
+                
+                # Define thresholds for "incorrect" velocities
+                low_velocity_threshold = gt_magnitude * 0.3  # Less than 30% of expected velocity
+                high_velocity_threshold = gt_magnitude * 1.7  # More than 170% of expected velocity
+                
+                # Count pixels with incorrect velocities
+                low_velocity_pixels = np.sum(velocity_magnitudes < low_velocity_threshold)
+                high_velocity_pixels = np.sum(velocity_magnitudes > high_velocity_threshold)
+                incorrect_velocity_pixels = low_velocity_pixels + high_velocity_pixels
+                
+                # Calculate percentage of pixels with incorrect velocities
+                measured_incorrect_percent = (incorrect_velocity_pixels / len(ball_flow)) * 100 if len(ball_flow) > 0 else 0
+                
+                # Store frame analysis
+                frame_analysis = {
+                    'frame_idx': int(frame_idx),
+                    'analytical_bg_percent': float(analytical_bg_percent),
+                    'measured_incorrect_percent': float(measured_incorrect_percent),
+                    'total_ball_pixels': int(total_ball_pixels),
+                    'exposed_bg_pixels': int(exposed_bg_pixels),
+                    'covered_bg_pixels': int(covered_bg_pixels),
+                    'low_velocity_pixels': int(low_velocity_pixels),
+                    'high_velocity_pixels': int(high_velocity_pixels),
+                    'gt_velocity_magnitude': float(gt_magnitude),
+                    'mean_flow_magnitude': float(np.mean(velocity_magnitudes)),
+                    'std_flow_magnitude': float(np.std(velocity_magnitudes))
+                }
+                
+                frame_analyses.append(frame_analysis)
+                
+            except Exception as e:
+                print(f"Error analyzing temporal alignment for frame {frame_idx}: {e}")
+                continue
+        
+        if not frame_analyses:
+            return {'error': 'No frames could be analyzed for temporal alignment'}
+        
+        # Calculate overall statistics
+        analytical_percentages = [f['analytical_bg_percent'] for f in frame_analyses]
+        measured_percentages = [f['measured_incorrect_percent'] for f in frame_analyses]
+        
+        # Calculate correlation between analytical and measured percentages
+        correlation = 0.0
+        if len(analytical_percentages) > 1:
+            analytical_array = np.array(analytical_percentages)
+            measured_array = np.array(measured_percentages)
+            correlation_matrix = np.corrcoef(analytical_array, measured_array)
+            correlation = correlation_matrix[0, 1] if not np.isnan(correlation_matrix[0, 1]) else 0.0
+        
+        results = {
+            'model_name': model_name,
+            'total_frames_analyzed': len(frame_analyses),
+            'mean_analytical_bg_percent': float(np.mean(analytical_percentages)),
+            'mean_measured_incorrect_percent': float(np.mean(measured_percentages)),
+            'correlation_coefficient': float(correlation),
+            'temporal_alignment_hypothesis': bool(correlation > 0.7),  # Strong correlation suggests temporal offset
+            'frame_analyses': frame_analyses
+        }
+        
+        return results
 
 
 class VelocityTestRunner(BaseTestRunner):
@@ -615,14 +772,16 @@ class VelocityTestRunner(BaseTestRunner):
         print(f"Flow cache directory: {cache_dir}")
         return cache_dir
     
-    def run_test(self, speed: str, frames: int = 60, fps: int = 30, memflow_only: bool = False) -> Dict[str, Any]:
+    def run_test(self, speed: str, frames: int = 60, fps: int = 30, memflow_only: bool = False, videoflow_only: bool = False) -> Dict[str, Any]:
         """
         Run complete velocity test
         
         Args:
-            speed: Motion speed ('slow', 'medium', 'fast')
+            speed: Motion speed ('slow', 'medium', 'fast', 'constant')
             frames: Number of frames to generate
             fps: Frames per second
+            memflow_only: Test only MemFlow model
+            videoflow_only: Test only VideoFlow model
             
         Returns:
             Dictionary with test results
@@ -671,12 +830,15 @@ class VelocityTestRunner(BaseTestRunner):
         else:
             print("Skipping VideoFlow tests (--memflow-only flag enabled)")
         
-        # Run MemFlow with Things dataset configuration and long-term memory
-        try:
-            memflow_cache = self.run_flow_processor_with_long_term(video_file, self.temp_dir, 'memflow', frames, 5, 'things')
-        except Exception as e:
-            print(f"MemFlow processing failed: {e}")
-            memflow_cache = None
+        if not videoflow_only:
+            # Run MemFlow with Things dataset configuration and long-term memory
+            try:
+                memflow_cache = self.run_flow_processor_with_long_term(video_file, self.temp_dir, 'memflow', frames, 5, 'things')
+            except Exception as e:
+                print(f"MemFlow processing failed: {e}")
+                memflow_cache = None
+        else:
+            print("Skipping MemFlow tests (--videoflow-only flag enabled)")
         
         # Step 3: Analyze results
         print("\n--- Step 3: Analyzing results ---")
@@ -700,6 +862,12 @@ class VelocityTestRunner(BaseTestRunner):
             try:
                 vf_things_results = analyzer.analyze_flow_accuracy(videoflow_things_cache, 'VideoFlow (Things)')
                 results['models']['videoflow_things'] = vf_things_results
+                
+                # Add temporal alignment analysis for constant motion
+                if speed == 'constant':
+                    temporal_results = analyzer.analyze_temporal_alignment(videoflow_things_cache, 'VideoFlow (Things)')
+                    results['models']['videoflow_things']['temporal_alignment'] = temporal_results
+                    
             except Exception as e:
                 print(f"VideoFlow (Things) analysis failed: {e}")
                 results['models']['videoflow_things'] = {'error': str(e)}
@@ -709,6 +877,12 @@ class VelocityTestRunner(BaseTestRunner):
             try:
                 vf_things_noise_results = analyzer.analyze_flow_accuracy(videoflow_things_noise_cache, 'VideoFlow (Things + Noise)')
                 results['models']['videoflow_things_noise'] = vf_things_noise_results
+                
+                # Add temporal alignment analysis for constant motion
+                if speed == 'constant':
+                    temporal_results = analyzer.analyze_temporal_alignment(videoflow_things_noise_cache, 'VideoFlow (Things + Noise)')
+                    results['models']['videoflow_things_noise']['temporal_alignment'] = temporal_results
+                    
             except Exception as e:
                 print(f"VideoFlow (Things + Noise) analysis failed: {e}")
                 results['models']['videoflow_things_noise'] = {'error': str(e)}
@@ -718,6 +892,12 @@ class VelocityTestRunner(BaseTestRunner):
             try:
                 mf_results = analyzer.analyze_flow_accuracy(memflow_cache, 'MemFlow (Things)')
                 results['models']['memflow'] = mf_results
+                
+                # Add temporal alignment analysis for constant motion
+                if speed == 'constant':
+                    temporal_results = analyzer.analyze_temporal_alignment(memflow_cache, 'MemFlow (Things)')
+                    results['models']['memflow']['temporal_alignment'] = temporal_results
+                    
             except Exception as e:
                 print(f"MemFlow analysis failed: {e}")
                 results['models']['memflow'] = {'error': str(e)}
@@ -767,6 +947,18 @@ class VelocityTestRunner(BaseTestRunner):
             print(f"Accuracy (< 1px): {model_results['accuracy_threshold_1px']:.1f}%")
             print(f"Accuracy (< 2px): {model_results['accuracy_threshold_2px']:.1f}%")
             print(f"Accuracy (< 5px): {model_results['accuracy_threshold_5px']:.1f}%")
+            
+            # Print temporal alignment analysis if available
+            if 'temporal_alignment' in model_results and 'error' not in model_results['temporal_alignment']:
+                temporal = model_results['temporal_alignment']
+                print(f"\nTemporal Alignment Analysis:")
+                print(f"  Analytical BG%: {temporal['mean_analytical_bg_percent']:.1f}%")
+                print(f"  Measured incorrect%: {temporal['mean_measured_incorrect_percent']:.1f}%")
+                print(f"  Correlation: {temporal['correlation_coefficient']:.3f}")
+                if temporal['temporal_alignment_hypothesis']:
+                    print(f"  *** TEMPORAL OFFSET DETECTED *** (correlation > 0.7)")
+                else:
+                    print(f"  Temporal alignment appears correct")
         
         print(f"\n{'='*80}")
         print(f"Test completed in {results['test_info']['test_duration']:.1f} seconds")
@@ -776,14 +968,16 @@ class VelocityTestRunner(BaseTestRunner):
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(description='Velocity Check Test for Optical Flow Models')
-    parser.add_argument('--speed', choices=['slow', 'medium', 'fast'], required=True,
-                       help='Motion speed for test')
+    parser.add_argument('--speed', choices=['slow', 'medium', 'fast', 'constant'], required=True,
+                       help='Motion speed for test (constant = 8px/frame for temporal alignment testing)')
     parser.add_argument('--frames', type=int, default=60,
                        help='Number of frames to generate (default: 60)')
     parser.add_argument('--fps', type=int, default=30,
                        help='Frames per second (default: 30)')
     parser.add_argument('--memflow-only', action='store_true',
                        help='Test only MemFlow model (skip VideoFlow for faster testing)')
+    parser.add_argument('--videoflow-only', action='store_true',
+                       help='Test only VideoFlow model (skip MemFlow for faster testing)')
     
     args = parser.parse_args()
     
@@ -793,7 +987,7 @@ def main():
     
     # Run test
     runner = VelocityTestRunner(test_dir, project_root)
-    results = runner.run_test(args.speed, args.frames, args.fps, args.memflow_only)
+    results = runner.run_test(args.speed, args.frames, args.fps, args.memflow_only, args.videoflow_only)
     
     return results
 
