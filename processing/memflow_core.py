@@ -329,7 +329,10 @@ class MemFlowCore(BaseFlowCore):
                 print(f"[MemFlow Core] Applied quality preset: {self.preset_config['name']}")
                 print(f"  Description: {self.preset_config['description']}")
             else:
+                # Set default add_pe value when no preset is used
+                self.add_pe = False
                 print(f"[MemFlow Core] Using original config settings (no quality preset)")
+                print(f"  Position encoding: {self.add_pe}")
             
             # Build and load model
             self.model = build_network(self.cfg).to(self.device)

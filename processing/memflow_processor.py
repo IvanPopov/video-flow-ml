@@ -96,9 +96,23 @@ class MemFlowProcessor(BaseFlowProcessor):
         # MemFlow requires at least 2 frames
         sequence_length = max(2, self.sequence_length)
         
-        # Determine frame indices for sequence
+        # Determine frame indices for sequence  
         total_frames = len(frames)
-        end_idx = frame_idx + 1
+        
+        # CORRECTED: MemFlow indexing fix
+        # MemFlow processes frame pairs and returns flow from the LAST pair
+        # When requesting flow for frame_idx, we want flow FROM frame_idx
+        # Original: end_idx = frame_idx + 1 gave flow FROM frame_{idx-1} 
+        # Corrected: end_idx = frame_idx + 2 gives flow FROM frame_idx
+        # But need to handle boundary case when frame_idx + 2 > total_frames
+        
+        if frame_idx >= total_frames - 1:
+            # Near end of video: use available frames
+            end_idx = total_frames
+        else:
+            # Normal case: shift forward by 1 to get correct flow
+            end_idx = frame_idx + 2
+            
         start_idx = max(0, end_idx - sequence_length)
         
         # Get frame sequence

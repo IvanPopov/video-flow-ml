@@ -38,6 +38,102 @@ from visualization import VideoComposer, create_side_by_side, add_text_overlay, 
 from processing import FlowProcessorFactory
 
 
+class ReversedVideoFlowComputer:
+    """
+    Wrapper class for computing optical flow on reversed video while maintaining original frame order.
+    
+    This class handles the complexity of:
+    1. Reversing video frames for flow computation
+    2. Computing forward optical flow on reversed video (effectively backward flow)
+    3. Mapping results back to original frame indices for caching and visualization
+    
+    The key insight: computing forward flow on reversed video gives us backward flow for original video.
+    """
+    
+    def __init__(self, inference_engine):
+        """
+        Initialize with the optical flow inference engine
+        
+        Args:
+            inference_engine: VideoFlow or MemFlow inference engine
+        """
+        self.inference_engine = inference_engine
+        
+    def compute_optical_flow_for_frame(self, original_frames, original_frame_idx, tile_pbar=None, overall_pbar=None):
+        """
+        Compute optical flow for a specific frame using reversed video processing
+        
+        Args:
+            original_frames: List of frames in original order [frame0, frame1, ..., frameN]
+            original_frame_idx: Index of frame in original sequence (0 to N-1)
+            tile_pbar: Optional progress bar for tile processing
+            overall_pbar: Optional progress bar for overall progress
+            
+        Returns:
+            Optical flow for the specified frame in original sequence
+        """
+        # Special case: frame0 cannot have backward flow (no frame-1 exists)
+        # Solution: copy flow from frame1 to frame0
+        if original_frame_idx == 0:
+            if len(original_frames) == 1:
+                # Only one frame - create zero flow
+                height, width = original_frames[0].shape[:2]
+                return np.zeros((height, width, 2), dtype=np.float32)
+            else:
+                # Use flow from frame1 (copy it for frame0)
+                return self.compute_optical_flow_for_frame(original_frames, 1, tile_pbar, overall_pbar)
+        
+        # Create reversed frames for flow computation
+        reversed_frames = original_frames[::-1]  # [frameN, frameN-1, ..., frame0]
+        
+        # Map original frame index to reversed frame index
+        reversed_frame_idx = len(original_frames) - 1 - original_frame_idx
+        
+        # Compute flow using reversed frames and reversed index
+        # This gives us forward flow on reversed video = backward flow on original video
+        flow = self.inference_engine.compute_optical_flow_tiled(
+            reversed_frames, reversed_frame_idx, tile_pbar, overall_pbar
+        )
+        
+        return flow
+        
+    def compute_optical_flow_with_progress_for_frame(self, original_frames, original_frame_idx, tile_pbar=None):
+        """
+        Compute optical flow with progress updates for a specific frame
+        
+        Args:
+            original_frames: List of frames in original order
+            original_frame_idx: Index of frame in original sequence
+            tile_pbar: Optional progress bar for tile processing
+            
+        Returns:
+            Optical flow for the specified frame in original sequence
+        """
+        # Special case: frame0 cannot have backward flow (no frame-1 exists)
+        # Solution: use the flow from frame1 → frame0 (copy flow from frame1)
+        if original_frame_idx == 0:
+            if len(original_frames) == 1:
+                # Only one frame - create zero flow
+                height, width = original_frames[0].shape[:2]
+                return np.zeros((height, width, 2), dtype=np.float32)
+            else:
+                # Use flow from frame1 (frame1 → frame0 is what we want for frame0)
+                return self.compute_optical_flow_with_progress_for_frame(original_frames, 1, tile_pbar)
+        
+        # Create reversed frames for flow computation
+        reversed_frames = original_frames[::-1]
+        
+        # Map original frame index to reversed frame index
+        reversed_frame_idx = len(original_frames) - 1 - original_frame_idx
+        
+        # Compute flow using reversed frames and reversed index
+        flow = self.inference_engine.compute_optical_flow_with_progress(
+            reversed_frames, reversed_frame_idx, tile_pbar
+        )
+        
+        return flow
+
+
 class VideoFlowProcessor:
     def __init__(self, device='auto', fast_mode=False, tile_mode=False, sequence_length=5,
                  flow_model='videoflow', model_path=None, stage='sintel', 
@@ -120,6 +216,9 @@ class VideoFlowProcessor:
         # Initialize video composer
         self.video_composer = VideoComposer()
         
+        # Initialize reversed video flow computer for backward optical flow computation
+        self.reversed_flow_computer = None  # Will be initialized when model is loaded
+        
         print(f"Optical Flow Processor initialized - Device: {self.device}")
         self.device_manager.print_device_info()
         print(f"Model: {self.flow_model.upper()}")
@@ -135,6 +234,10 @@ class VideoFlowProcessor:
     def load_model(self):
         """Load optical flow model (VideoFlow or MemFlow)"""
         self.inference_engine.load_model()
+        
+        # Initialize reversed video flow computer after model is loaded
+        self.reversed_flow_computer = ReversedVideoFlowComputer(self.inference_engine)
+        print(f"[Model] Initialized reversed video flow computation wrapper")
         
         # For MemFlow, show the actual loaded model path
         if self.flow_model == 'memflow' and hasattr(self.inference_engine, 'model_path'):
@@ -720,6 +823,10 @@ class VideoFlowProcessor:
             duration=duration
         )
         
+        print(f"[Processing] Extracted {len(frames)} frames from video")
+        print(f"[Processing] Will compute backward optical flow using reversed video processing")
+        print(f"              (Forward flow on reversed video = Backward flow on original video)")
+        
         # Check if output_path is a directory and generate filename if needed
         if os.path.isdir(output_path):
             output_path = self.generate_output_filename(
@@ -901,9 +1008,14 @@ class VideoFlowProcessor:
             if self.tile_mode:
                 print(f"  Tile Mode: Enabled (process in tiles for large frames)")
             print(f"  Device: {self.device}")
+            print(f"  Processing: Reversed video for backward optical flow")
             print()
             
             self.load_model()
+            
+            # Verify reversed flow computer is initialized
+            if self.reversed_flow_computer is None:
+                raise RuntimeError("Reversed flow computer not initialized after model loading")
         
         # Setup flow saving directory if requested or if we need to cache
         flow_base_filename = None
@@ -992,18 +1104,24 @@ class VideoFlowProcessor:
         for i in range(len(frames)):
             start_time = time.time()
             
-            # Get optical flow (from cache or compute)
+            # Get optical flow (from cache or compute using reversed video)
             if use_cached_flow:
                 # Load from cache (raw flow before stabilization)
                 raw_flow = self.load_cached_flow(flow_cache_dir, i, cached_flow_format)
             else:
-                # Compute optical flow using VideoFlow (with tiling if enabled)
+                # Compute optical flow using REVERSED VIDEO processing
+                # This computes forward flow on reversed video = backward flow on original video
+                # The result is saved with original frame index for proper caching/visualization
                 if self.tile_mode:
                     # Reset overall tile progress for each frame
                     overall_tile_pbar.reset()
-                    raw_flow = self.compute_optical_flow_tiled(frames, i, tile_pbar, overall_tile_pbar)
+                    raw_flow = self.reversed_flow_computer.compute_optical_flow_for_frame(
+                        frames, i, tile_pbar, overall_tile_pbar
+                    )
                 else:
-                    raw_flow = self.compute_optical_flow_tiled(frames, i)
+                    raw_flow = self.reversed_flow_computer.compute_optical_flow_for_frame(
+                        frames, i
+                    )
                 
                 # Save raw flow to cache BEFORE stabilization
                 self.cache_manager.save_flow_to_cache(raw_flow, flow_cache_dir, i, cache_save_format)

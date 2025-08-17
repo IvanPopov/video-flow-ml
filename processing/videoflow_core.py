@@ -196,12 +196,15 @@ class VideoFlowCore(BaseFlowCore):
             # Unpad results
             flow_tensor = padder.unpad(flow_predictions)
             
-            # Get the BACKWARD flow (flow21: from frame 2 to frame 1) instead of forward flow
-            # VideoFlow returns [flow23, flow21] where:
-            # - flow23 is forward flow (from frame 2 to frame 3) - index 0
-            # - flow21 is backward flow (from frame 2 to frame 1) - index 1
-            # We want BACKWARD flow for temporal alignment correction
-            flow_tensor = flow_tensor[0, 1]  # Remove batch dim, get BACKWARD flow (flow21)
+            # For REVERSED video processing (backward optical flow computation):
+            # VideoFlow returns concatenated tensor [forward_flows, backward_flows] along dim=1
+            # For sequence_length=5, we get flows for 3 central frames:
+            # - Indices 0-2: forward flows for frames at positions 1,2,3 in sequence  
+            # - Indices 3-5: backward flows for frames at positions 1,2,3 in sequence
+            # Our target frame (frame2) is at position 2 in reversed sequence [frame4,frame3,frame2,frame1,frame0]
+            # We need FORWARD flow for frame2 in reversed video → index 1 (position among forward flows)
+            # Forward flow in reversed video = flow from frame2 to frame1 = backward flow in original video
+            flow_tensor = flow_tensor[0, 1]  # Get forward flow for target frame2 in reversed video
             
             # Return raw tensor [2, H, W]
             return flow_tensor
